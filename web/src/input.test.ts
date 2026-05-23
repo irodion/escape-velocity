@@ -314,6 +314,33 @@ describe('InputController', () => {
     expect(ctxStub.putImageData).not.toHaveBeenCalled()
   })
 
+  it('setViewport redirects subsequent wheel events to the new viewport without firing onChange', () => {
+    const next = makeViewportDouble()
+    next.zoom_around.mockReturnValue({} as unknown as Viewport)
+    viewport.zoom_around.mockReturnValue({} as unknown as Viewport)
+    const controller = new InputController(canvas, viewport as unknown as Viewport, onChange)
+
+    controller.setViewport(next as unknown as Viewport)
+    // setViewport itself must be side-effect-free — Slice 3's main.ts
+    // calls it inside the Controls onChange handler, which already
+    // owns the render trigger; an emitted onChange here would double
+    // the work.
+    expect(onChange).not.toHaveBeenCalled()
+
+    canvas.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: 100,
+        clientX: 100,
+        clientY: 50,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    expect(next.zoom_around).toHaveBeenCalledTimes(1)
+    expect(viewport.zoom_around).not.toHaveBeenCalled()
+    expect(onChange).toHaveBeenCalledTimes(1)
+  })
+
   it('wheel calls preventDefault', () => {
     viewport.zoom_around.mockReturnValue({} as unknown as Viewport)
     new InputController(canvas, viewport as unknown as Viewport, onChange)
