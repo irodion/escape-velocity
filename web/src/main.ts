@@ -120,16 +120,29 @@ const inputController = new InputController(canvas, viewport, (next) => {
   rerender()
 })
 
-new Controls(controlsForm, current, (next) => {
-  // Mid-edit NaN guard: a `<input type="number">` blur with an empty
-  // / dash-only value emits NaN. In Julia mode, NaN would trip the
-  // WASM-side finite-c validation; skip the render AND skip updating
-  // `current`, so the next genuine commit's diff still picks up the
-  // c change. (In Mandelbrot mode the c values are ignored, so NaN
-  // is harmless — fall through to the no-op branch below, which
-  // updates `current` to keep the snapshot fresh.)
-  if (next.mode === 'julia' && (!Number.isFinite(next.cRe) || !Number.isFinite(next.cIm))) {
-    return
+new Controls(controlsForm, current, (rawNext) => {
+  // Substitute the last-known-finite c values for any non-finite
+  // entries in the form snapshot. `<input type="number">` reports
+  // NaN for an empty / dash-only `value`, and the WASM `compute`
+  // seam validates `c_re`/`c_im` for `is_finite()` **unconditionally**
+  // — Mandelbrot ignores the c payload mathematically, but a NaN
+  // still trips the boundary check. Without this substitution, the
+  // sequence (Julia → clear c.re → toggle back to Mandelbrot) would
+  // store `cRe = NaN` into `current` and throw on the next render.
+  //
+  // The substitution preserves the invariant "`current.cRe`/`current.cIm`
+  // are always finite" — established at boot by the Controls
+  // construction-time NaN guard, and closed here by always pulling
+  // the fallback from `current`. In Julia mode the substitution
+  // turns a mid-edit empty input into a no-op commit (next's c
+  // equals current's after sanitisation, so branch 3's cChangedInJulia
+  // check is false and branch 5 runs). In Mandelbrot mode it lets
+  // mode toggles succeed regardless of whatever the user typed into
+  // the (then-disabled) c fields earlier.
+  const next: Settings = {
+    ...rawNext,
+    cRe: Number.isFinite(rawNext.cRe) ? rawNext.cRe : current.cRe,
+    cIm: Number.isFinite(rawNext.cIm) ? rawNext.cIm : current.cIm,
   }
 
   // Branch 1: fractal-family change. Reset the viewport to the
@@ -161,9 +174,10 @@ new Controls(controlsForm, current, (next) => {
   }
 
   // Branch 3: compute-class change — `maxIter`, or (in Julia mode
-  // only) a `c` change. The mid-edit NaN guard at the top of the
-  // dispatcher already filtered the non-finite case, so any `c`
-  // change reaching this point is committable.
+  // only) a `c` change. The top-of-handler sanitise step already
+  // replaced any non-finite `c` with the previous finite value, so
+  // `next.cRe`/`next.cIm` reaching this branch are always finite and
+  // safe to send through the WASM seam.
   const cChangedInJulia =
     next.mode === 'julia' && (next.cRe !== current.cRe || next.cIm !== current.cIm)
   if (next.maxIter !== current.maxIter || cChangedInJulia) {
