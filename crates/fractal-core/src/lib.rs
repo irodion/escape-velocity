@@ -7,6 +7,8 @@
 //!
 //! - [`Complex64`] — newtype complex number for the inner loop.
 //! - [`Viewport`] — rectangular window onto the complex plane.
+//! - [`MIN_ZOOM`] / [`MAX_ZOOM`] — zoom clamping range used by
+//!   [`Viewport::zoom_around`].
 //! - [`escape_time`] — single-point Mandelbrot iteration.
 //! - [`compute`] — viewport → per-pixel iteration buffer.
 //! - [`colorize`] — iteration buffer → RGBA8 pixels (Slice 1 greyscale).
@@ -19,4 +21,4 @@ mod viewport;
 pub use complex::Complex64;
 pub use escape_time::escape_time;
 pub use pipeline::{colorize, compute};
-pub use viewport::Viewport;
+pub use viewport::{MAX_ZOOM, MIN_ZOOM, Viewport};
