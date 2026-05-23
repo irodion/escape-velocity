@@ -32,9 +32,27 @@ export class Controls {
       throw new Error('Controls: form is missing a <select name="resolution">')
     }
 
+    // HTMLSelectElement.value silently becomes '' when assigned a
+    // string that matches no <option>. Fail fast here so the bug
+    // surfaces at boot (caller's `initial` is out of sync with the
+    // option list) rather than emitting `Number('')`=0 and tripping
+    // the wasm boundary inside an event handler.
     maxIterSelect.value = String(initial.maxIter)
-    resolutionSelect.value = `${initial.width}x${initial.height}`
+    if (maxIterSelect.value === '') {
+      throw new Error(`Controls: initial.maxIter=${initial.maxIter} has no matching <option>`)
+    }
+    const initialResolution = `${initial.width}x${initial.height}`
+    resolutionSelect.value = initialResolution
+    if (resolutionSelect.value === '') {
+      throw new Error(
+        `Controls: initial resolution "${initialResolution}" has no matching <option>`,
+      )
+    }
 
+    // The select's value is constrained to its option set at runtime
+    // — the browser only sets it to a listed <option value> on
+    // user interaction. Combined with the construction-time guard
+    // above, both parsers below see a well-formed string.
     const emit = (): void => {
       const maxIter = Number(maxIterSelect.value)
       const [width, height] = resolutionSelect.value.split('x').map(Number)

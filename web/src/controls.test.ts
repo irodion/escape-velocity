@@ -60,6 +60,22 @@ describe('Controls', () => {
     document.body.removeChild(form)
   })
 
+  it('throws when initial.maxIter does not match any <option>', () => {
+    // Programmer error: caller's INITIAL_MAX_ITER constant drifted
+    // from the HTML option list. Without the construction-time guard,
+    // maxIterSelect.value silently becomes '' and the first emit
+    // would push maxIter=0 through to the WASM boundary.
+    expect(() => {
+      new Controls(form, { maxIter: 999, width: 800, height: 600 }, onChange)
+    }).toThrow(/initial\.maxIter=999/)
+  })
+
+  it('throws when initial resolution does not match any <option>', () => {
+    expect(() => {
+      new Controls(form, { maxIter: 256, width: 1000, height: 1000 }, onChange)
+    }).toThrow(/initial resolution "1000x1000"/)
+  })
+
   it('populates both selects from `initial` and fires nothing during construction', () => {
     new Controls(form, INITIAL, onChange)
     expect(selectByName(form, 'max-iter').value).toBe('256')
