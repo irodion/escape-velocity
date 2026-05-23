@@ -111,6 +111,23 @@ impl Viewport {
             inner: self.inner.zoom_around(pixel_x, pixel_y, factor),
         })
     }
+
+    /// Return a new viewport at the requested pixel dimensions, with
+    /// `center` and `zoom` preserved exactly. Rejects zero in either
+    /// dimension at the boundary; the core method itself is
+    /// un-validated per the `fractal-core` trust-callers convention.
+    #[wasm_bindgen]
+    pub fn with_resolution(&self, width: u32, height: u32) -> Result<Viewport, JsError> {
+        if width == 0 {
+            return Err(JsError::new("with_resolution: width must be > 0"));
+        }
+        if height == 0 {
+            return Err(JsError::new("with_resolution: height must be > 0"));
+        }
+        Ok(Self {
+            inner: self.inner.with_resolution(width, height),
+        })
+    }
 }
 
 /// Compute the iteration buffer for `viewport` and return a pointer

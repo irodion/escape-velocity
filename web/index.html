@@ -5,11 +5,45 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Escape Velocity</title>
     <style>
-      canvas#fractal { cursor: crosshair; }
+      /* The canvas's CSS display size stays at 800×600 across all
+         resolution selections. Resolution becomes a quality knob
+         (super/sub-sampling), not a layout knob — the page never
+         reflows when the user changes it. */
+      canvas#fractal {
+        cursor: crosshair;
+        width: 800px;
+        height: 600px;
+      }
       canvas#fractal.dragging { cursor: all-scroll; }
+      form#controls { margin-bottom: 0.5rem; }
+      form#controls label { margin-right: 1rem; }
     </style>
   </head>
   <body>
+    <form id="controls">
+      <label>
+        Iterations:
+        <select name="max-iter">
+          <option value="64">64</option>
+          <option value="128">128</option>
+          <option value="256" selected>256</option>
+          <option value="512">512</option>
+          <option value="1024">1024</option>
+          <option value="2048">2048</option>
+          <option value="4096">4096</option>
+          <option value="8192">8192</option>
+        </select>
+      </label>
+      <label>
+        Resolution:
+        <select name="resolution">
+          <option value="400x300">400 × 300</option>
+          <option value="800x600" selected>800 × 600</option>
+          <option value="1200x900">1200 × 900</option>
+          <option value="1600x1200">1600 × 1200</option>
+        </select>
+      </label>
+    </form>
     <canvas id="fractal" width="800" height="600"></canvas>
     <script type="module" src="/src/main.ts"></script>
   </body>

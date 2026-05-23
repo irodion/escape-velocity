@@ -7,8 +7,6 @@ import {
   type Viewport,
 } from '../wasm/fractal_wasm.js'
 
-const MAX_ITER = 256
-
 /**
  * Run one compute → colorize → putImageData cycle.
  *
@@ -18,10 +16,15 @@ const MAX_ITER = 256
  * never invokes this concurrently — every `onChange` produces a
  * synchronous render that finishes before the next event lands.
  */
-export function render(viewport: Viewport, ctx: CanvasRenderingContext2D, wasm: InitOutput): void {
-  const iterPtr = compute(viewport, MAX_ITER)
+export function render(
+  viewport: Viewport,
+  ctx: CanvasRenderingContext2D,
+  wasm: InitOutput,
+  maxIter: number,
+): void {
+  const iterPtr = compute(viewport, maxIter)
   const iterLen = compute_len()
-  const rgbaPtr = colorize(iterPtr, iterLen, MAX_ITER)
+  const rgbaPtr = colorize(iterPtr, iterLen, maxIter)
   const rgbaLen = colorize_len()
 
   // View into WASM linear memory — no copy. ImageData wraps the same

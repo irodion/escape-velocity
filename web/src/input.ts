@@ -146,6 +146,19 @@ export class InputController {
     // passive, which silently no-ops `preventDefault`.
     canvas.addEventListener('wheel', this.handleWheel, { passive: false })
   }
+
+  /**
+   * Overwrite the controller's viewport. The next pan/zoom event will
+   * derive its result from this viewport instead of the previous one.
+   *
+   * Slice 3 calls this after a resolution change so the controller
+   * sees the resized viewport without rebuilding listener wiring. No
+   * `onChange` fires — the caller already has the new viewport in
+   * hand and is responsible for triggering the render.
+   */
+  setViewport(viewport: Viewport): void {
+    this.currentViewport = viewport
+  }
 }
 
 interface DragState {
