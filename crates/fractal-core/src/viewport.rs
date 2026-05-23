@@ -153,6 +153,26 @@ impl Viewport {
             height: self.height,
         }
     }
+
+    /// Return a viewport sampling the same complex-plane region at a
+    /// different pixel resolution. `center` and `zoom` are preserved
+    /// exactly; only `width` and `height` change.
+    ///
+    /// `pixel_scale` follows the new `width` per the formula in
+    /// [`Self::pixel_scale`] — doubling `width` halves the per-pixel
+    /// step, so the same window is sampled at finer granularity.
+    ///
+    /// Validation follows the PR #5 convention: `fractal-core` trusts
+    /// callers, so `width == 0` is not rejected here. The
+    /// `fractal-wasm` binding rejects zero at the WASM boundary.
+    pub fn with_resolution(&self, width: u32, height: u32) -> Viewport {
+        Self {
+            center: self.center,
+            zoom: self.zoom,
+            width,
+            height,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -415,5 +435,57 @@ mod tests {
         let zoomed = vp.zoom_around(123.0, 77.0, 2.5);
         assert_eq!(zoomed.width, vp.width);
         assert_eq!(zoomed.height, vp.height);
+    }
+
+    // --- with_resolution ----------------------------------------------
+
+    #[test]
+    fn with_resolution_preserves_center_exactly() {
+        let vp = sample_viewport();
+        let resized = vp.with_resolution(1600, 1200);
+        assert_eq!(resized.center, vp.center);
+    }
+
+    #[test]
+    fn with_resolution_preserves_zoom_exactly() {
+        let vp = sample_viewport();
+        let resized = vp.with_resolution(1600, 1200);
+        assert_eq!(resized.zoom, vp.zoom);
+    }
+
+    #[test]
+    fn with_resolution_sets_dimensions_exactly() {
+        let vp = sample_viewport();
+        let resized = vp.with_resolution(1600, 1200);
+        assert_eq!(resized.width, 1600);
+        assert_eq!(resized.height, 1200);
+    }
+
+    #[test]
+    fn with_resolution_identity_at_same_dimensions() {
+        let vp = sample_viewport();
+        assert_eq!(vp.with_resolution(vp.width, vp.height), vp);
+    }
+
+    #[test]
+    fn with_resolution_halves_pixel_scale_at_double_width() {
+        let vp = sample_viewport();
+        let resized = vp.with_resolution(vp.width * 2, vp.height * 2);
+        assert_eq!(resized.pixel_scale(), vp.pixel_scale() / 2.0);
+    }
+
+    #[test]
+    fn with_resolution_center_pixel_maps_to_same_complex_point() {
+        // The pixel grid's geometric centre maps to `center` in both
+        // viewports; choosing the integer pixel nearest the centre
+        // introduces at most one pixel-scale of drift, which the new
+        // (finer) pixel-scale bounds.
+        let vp = sample_viewport();
+        let resized = vp.with_resolution(1600, 1200);
+        let before = vp.pixel_to_complex(vp.width / 2, vp.height / 2);
+        let after = resized.pixel_to_complex(resized.width / 2, resized.height / 2);
+        let tolerance = vp.pixel_scale();
+        assert!((after.re - before.re).abs() <= tolerance);
+        assert!((after.im - before.im).abs() <= tolerance);
     }
 }
