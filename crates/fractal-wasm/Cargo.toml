@@ -10,3 +10,4 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 fractal-core = { path = "../fractal-core" }
+wasm-bindgen = "0.2"
