@@ -9,7 +9,7 @@
     "dev": "pnpm wasm:build && vite",
     "build": "pnpm wasm:build && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "pnpm wasm:build && tsc --noEmit",
     "lint": "biome ci",
     "fmt": "biome check --write"
   },
