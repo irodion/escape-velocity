@@ -71,6 +71,7 @@ export class InputController {
     if (ctx === null) return
 
     const rect = this.canvas.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0) return
     const dxCss = event.clientX - this.dragState.startClientX
     const dyCss = event.clientY - this.dragState.startClientY
     const dxInternal = (dxCss * this.canvas.width) / rect.width
@@ -96,6 +97,12 @@ export class InputController {
     document.removeEventListener('mouseup', this.handleMouseUp)
 
     const rect = this.canvas.getBoundingClientRect()
+    // Cleanup above runs unconditionally; only the viewport update is
+    // skipped when the canvas is degenerate (e.g. display:none or
+    // detached). Without this, dxInternal/dyInternal would be
+    // NaN/Infinity and the WASM seam would throw on the finite-input
+    // check.
+    if (rect.width <= 0 || rect.height <= 0) return
     const dxCss = event.clientX - startClientX
     const dyCss = event.clientY - startClientY
     const dxInternal = (dxCss * this.canvas.width) / rect.width
@@ -109,6 +116,7 @@ export class InputController {
   private readonly handleWheel = (event: WheelEvent): void => {
     event.preventDefault()
     const rect = this.canvas.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0) return
     const cssX = event.clientX - rect.left
     const cssY = event.clientY - rect.top
     const pixelX = (cssX * this.canvas.width) / rect.width

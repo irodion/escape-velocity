@@ -261,6 +261,38 @@ describe('InputController', () => {
     expect(viewport.zoom_around).toHaveBeenCalledWith(100, 50, 1.25 ** (-(1 * 800) / 100))
   })
 
+  it('bails out cleanly when the canvas rect is 0×0 (display:none, detached)', () => {
+    // A degenerate rect (display:none, detached element, etc.) would
+    // otherwise divide by zero — producing NaN/Infinity which would
+    // throw at the WASM finite-input seam. The guard turns this into
+    // a no-op without crashing.
+    setRect(canvas, { width: 0, height: 0 })
+    new InputController(canvas, viewport as unknown as Viewport, onChange)
+
+    // Wheel on a 0×0 canvas: no zoom_around, no onChange.
+    canvas.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: 100,
+        clientX: 50,
+        clientY: 50,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    expect(viewport.zoom_around).not.toHaveBeenCalled()
+
+    // Drag on a 0×0 canvas: cleanup still happens (class removed,
+    // dragState reset implicitly via second mousedown not crashing),
+    // but no pan_by_pixels / onChange.
+    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, clientY: 0, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 30, clientY: 20, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 30, clientY: 20, bubbles: true }))
+    expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
+    expect(onChange).not.toHaveBeenCalled()
+    expect(canvas.classList.contains('dragging')).toBe(false)
+    expect(ctxStub.putImageData).not.toHaveBeenCalled()
+  })
+
   it('wheel calls preventDefault', () => {
     viewport.zoom_around.mockReturnValue({} as unknown as Viewport)
     new InputController(canvas, viewport as unknown as Viewport, onChange)
