@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Controls, type NormalisationName, type PaletteName, type Settings } from './controls.js'
+import {
+  Controls,
+  type FractalMode,
+  type NormalisationName,
+  type PaletteName,
+  type Settings,
+} from './controls.js'
 
 const INITIAL: Settings = {
   maxIter: 256,
@@ -7,15 +13,20 @@ const INITIAL: Settings = {
   height: 600,
   palette: 'viridis',
   normalisation: 'cycled',
+  mode: 'mandelbrot',
+  cRe: -0.7,
+  cIm: 0.27015,
 }
 
 // Build the same form layout the production index.html ships. Slices
 // 3 and 4 pin the option lists in their PRDs (max-iter: 64..8192
 // doubling; resolution: four 4:3 presets; palette: five matplotlib-
-// derived names; normalisation: cycled or histogram). The defaults
-// selected here match the `selected` attributes on the HTML so the
-// construction-time `value` assignment is a no-op against a clean
-// form.
+// derived names; normalisation: cycled or histogram). Slice 5C adds
+// the `mode <select>` and the two `c.re` / `c.im` number inputs; the
+// numeric inputs ship `disabled` because the default mode is
+// Mandelbrot (which ignores `c`). The defaults selected here match
+// the `selected` attributes on the HTML so the construction-time
+// `value` assignment is a no-op against a clean form.
 function buildForm(): HTMLFormElement {
   const form = document.createElement('form')
   form.id = 'controls'
@@ -59,6 +70,21 @@ function buildForm(): HTMLFormElement {
         <option value="histogram">Match palette to image</option>
       </select>
     </label>
+    <label>
+      Fractal:
+      <select name="mode">
+        <option value="mandelbrot" selected>Mandelbrot</option>
+        <option value="julia">Julia</option>
+      </select>
+    </label>
+    <label>
+      c.re:
+      <input type="number" name="c-re" step="0.0001" value="-0.7" disabled />
+    </label>
+    <label>
+      c.im:
+      <input type="number" name="c-im" step="0.0001" value="0.27015" disabled />
+    </label>
   `
   document.body.appendChild(form)
   return form
@@ -68,6 +94,14 @@ function selectByName(form: HTMLFormElement, name: string): HTMLSelectElement {
   const el = form.elements.namedItem(name)
   if (!(el instanceof HTMLSelectElement)) {
     throw new Error(`expected <select name="${name}"> in test form`)
+  }
+  return el
+}
+
+function inputByName(form: HTMLFormElement, name: string): HTMLInputElement {
+  const el = form.elements.namedItem(name)
+  if (!(el instanceof HTMLInputElement)) {
+    throw new Error(`expected <input name="${name}"> in test form`)
   }
   return el
 }
@@ -118,13 +152,45 @@ describe('Controls', () => {
     expect(() => new Controls(form, bad, onChange)).toThrow(/initial\.normalisation="rainbow"/)
   })
 
-  it('populates all four selects from `initial` and fires nothing during construction', () => {
+  it('throws when initial.mode does not match any <option>', () => {
+    const bad = { ...INITIAL, mode: 'newton' as unknown as FractalMode }
+    expect(() => new Controls(form, bad, onChange)).toThrow(/initial\.mode="newton"/)
+  })
+
+  it('throws when initial.cRe is NaN', () => {
+    expect(() => new Controls(form, { ...INITIAL, cRe: Number.NaN }, onChange)).toThrow(
+      /initial\.cRe=NaN/,
+    )
+  })
+
+  it('throws when initial.cIm is NaN', () => {
+    expect(() => new Controls(form, { ...INITIAL, cIm: Number.NaN }, onChange)).toThrow(
+      /initial\.cIm=NaN/,
+    )
+  })
+
+  it('populates all seven controls from `initial` and fires nothing during construction', () => {
     new Controls(form, INITIAL, onChange)
     expect(selectByName(form, 'max-iter').value).toBe('256')
     expect(selectByName(form, 'resolution').value).toBe('800x600')
     expect(selectByName(form, 'palette').value).toBe('viridis')
     expect(selectByName(form, 'normalisation').value).toBe('cycled')
+    expect(selectByName(form, 'mode').value).toBe('mandelbrot')
+    expect(inputByName(form, 'c-re').valueAsNumber).toBe(-0.7)
+    expect(inputByName(form, 'c-im').valueAsNumber).toBe(0.27015)
     expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('disables the two c inputs when initial.mode is mandelbrot', () => {
+    new Controls(form, INITIAL, onChange)
+    expect(inputByName(form, 'c-re').disabled).toBe(true)
+    expect(inputByName(form, 'c-im').disabled).toBe(true)
+  })
+
+  it('enables the two c inputs when initial.mode is julia', () => {
+    new Controls(form, { ...INITIAL, mode: 'julia' }, onChange)
+    expect(inputByName(form, 'c-re').disabled).toBe(false)
+    expect(inputByName(form, 'c-im').disabled).toBe(false)
   })
 
   it('fires onChange once with the new maxIter when max-iter changes', () => {
@@ -133,13 +199,7 @@ describe('Controls', () => {
     maxIterSelect.value = '4096'
     maxIterSelect.dispatchEvent(new Event('change', { bubbles: true }))
     expect(onChange).toHaveBeenCalledTimes(1)
-    expect(onChange).toHaveBeenCalledWith({
-      maxIter: 4096,
-      width: 800,
-      height: 600,
-      palette: 'viridis',
-      normalisation: 'cycled',
-    })
+    expect(onChange).toHaveBeenCalledWith({ ...INITIAL, maxIter: 4096 })
   })
 
   it('fires onChange once with the parsed width/height when resolution changes', () => {
@@ -148,13 +208,7 @@ describe('Controls', () => {
     resolutionSelect.value = '1600x1200'
     resolutionSelect.dispatchEvent(new Event('change', { bubbles: true }))
     expect(onChange).toHaveBeenCalledTimes(1)
-    expect(onChange).toHaveBeenCalledWith({
-      maxIter: 256,
-      width: 1600,
-      height: 1200,
-      palette: 'viridis',
-      normalisation: 'cycled',
-    })
+    expect(onChange).toHaveBeenCalledWith({ ...INITIAL, width: 1600, height: 1200 })
   })
 
   it('fires onChange once with the new palette when palette changes', () => {
@@ -163,13 +217,7 @@ describe('Controls', () => {
     paletteSelect.value = 'magma'
     paletteSelect.dispatchEvent(new Event('change', { bubbles: true }))
     expect(onChange).toHaveBeenCalledTimes(1)
-    expect(onChange).toHaveBeenCalledWith({
-      maxIter: 256,
-      width: 800,
-      height: 600,
-      palette: 'magma',
-      normalisation: 'cycled',
-    })
+    expect(onChange).toHaveBeenCalledWith({ ...INITIAL, palette: 'magma' })
   })
 
   it('fires onChange once with the new normalisation when normalisation changes', () => {
@@ -178,23 +226,86 @@ describe('Controls', () => {
     normalisationSelect.value = 'histogram'
     normalisationSelect.dispatchEvent(new Event('change', { bubbles: true }))
     expect(onChange).toHaveBeenCalledTimes(1)
-    expect(onChange).toHaveBeenCalledWith({
-      maxIter: 256,
-      width: 800,
-      height: 600,
-      palette: 'viridis',
-      normalisation: 'histogram',
-    })
+    expect(onChange).toHaveBeenCalledWith({ ...INITIAL, normalisation: 'histogram' })
   })
 
-  it('ignores the `input` event on every select', () => {
+  it('fires onChange once with the new mode when mode changes', () => {
     new Controls(form, INITIAL, onChange)
-    for (const name of ['max-iter', 'resolution', 'palette', 'normalisation']) {
+    const modeSelect = selectByName(form, 'mode')
+    modeSelect.value = 'julia'
+    modeSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith({ ...INITIAL, mode: 'julia' })
+  })
+
+  it('un-disables both c inputs when mode flips mandelbrot → julia', () => {
+    new Controls(form, INITIAL, onChange)
+    const modeSelect = selectByName(form, 'mode')
+    modeSelect.value = 'julia'
+    modeSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(inputByName(form, 'c-re').disabled).toBe(false)
+    expect(inputByName(form, 'c-im').disabled).toBe(false)
+  })
+
+  it('disables both c inputs when mode flips julia → mandelbrot', () => {
+    new Controls(form, { ...INITIAL, mode: 'julia' }, onChange)
+    const modeSelect = selectByName(form, 'mode')
+    modeSelect.value = 'mandelbrot'
+    modeSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(inputByName(form, 'c-re').disabled).toBe(true)
+    expect(inputByName(form, 'c-im').disabled).toBe(true)
+  })
+
+  it('fires onChange once with the new cRe when c-re changes', () => {
+    // Start in Julia mode so the inputs are enabled and the user can
+    // actually commit a value through the form.
+    new Controls(form, { ...INITIAL, mode: 'julia' }, onChange)
+    const cReInput = inputByName(form, 'c-re')
+    cReInput.valueAsNumber = -0.5
+    cReInput.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith({ ...INITIAL, mode: 'julia', cRe: -0.5 })
+  })
+
+  it('fires onChange once with the new cIm when c-im changes', () => {
+    new Controls(form, { ...INITIAL, mode: 'julia' }, onChange)
+    const cImInput = inputByName(form, 'c-im')
+    cImInput.valueAsNumber = 0.5
+    cImInput.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith({ ...INITIAL, mode: 'julia', cIm: 0.5 })
+  })
+
+  it('emits NaN for cRe when the input is cleared mid-edit (dispatcher filters)', () => {
+    // Clearing an `<input type="number">` puts it in an empty state;
+    // `valueAsNumber` then reads back NaN. The Controls class does
+    // NOT filter this — it passes the raw snapshot through so the
+    // dispatcher (main.ts) can decide what to do.
+    new Controls(form, { ...INITIAL, mode: 'julia' }, onChange)
+    const cReInput = inputByName(form, 'c-re')
+    cReInput.value = ''
+    cReInput.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(onChange).toHaveBeenCalledTimes(1)
+    const snapshot = onChange.mock.calls[0]?.[0]
+    expect(snapshot).toBeDefined()
+    expect(Number.isNaN(snapshot?.cRe)).toBe(true)
+  })
+
+  it('ignores the `input` event on every control', () => {
+    // `<input type="number">` fires `input` on every keystroke; the
+    // PRD's commit-not-live contract is that ONLY blur/Enter (which
+    // emit `change`) triggers a render. Same contract for the four
+    // <select>s, where `input` would fire on dropdown scrub.
+    new Controls(form, INITIAL, onChange)
+    for (const name of ['max-iter', 'resolution', 'palette', 'normalisation', 'mode']) {
       const sel = selectByName(form, name)
-      // Pick any non-default value so the assignment actually changes
-      // something — the test is about event semantics, not deltas.
       sel.value = sel.options[sel.options.length - 1]?.value ?? sel.value
       sel.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    for (const name of ['c-re', 'c-im']) {
+      const inp = inputByName(form, name)
+      inp.valueAsNumber = 1.5
+      inp.dispatchEvent(new Event('input', { bubbles: true }))
     }
     expect(onChange).not.toHaveBeenCalled()
   })
@@ -206,13 +317,7 @@ describe('Controls', () => {
 
     maxIterSelect.value = '1024'
     maxIterSelect.dispatchEvent(new Event('change', { bubbles: true }))
-    expect(onChange).toHaveBeenLastCalledWith({
-      maxIter: 1024,
-      width: 800,
-      height: 600,
-      palette: 'viridis',
-      normalisation: 'cycled',
-    })
+    expect(onChange).toHaveBeenLastCalledWith({ ...INITIAL, maxIter: 1024 })
 
     // The second emit must reflect the first change's `max-iter`
     // value, not the initial `256` — that's what proves the class
@@ -220,12 +325,6 @@ describe('Controls', () => {
     paletteSelect.value = 'inferno'
     paletteSelect.dispatchEvent(new Event('change', { bubbles: true }))
     expect(onChange).toHaveBeenCalledTimes(2)
-    expect(onChange).toHaveBeenLastCalledWith({
-      maxIter: 1024,
-      width: 800,
-      height: 600,
-      palette: 'inferno',
-      normalisation: 'cycled',
-    })
+    expect(onChange).toHaveBeenLastCalledWith({ ...INITIAL, maxIter: 1024, palette: 'inferno' })
   })
 })

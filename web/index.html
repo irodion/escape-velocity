@@ -17,6 +17,12 @@
       canvas#fractal.dragging { cursor: all-scroll; }
       form#controls { margin-bottom: 0.5rem; }
       form#controls label { margin-right: 1rem; }
+      /* Visualise the Mandelbrot-mode state of the `c` inputs: dim the
+         input itself, and use `:has()` to dim the surrounding <label>
+         so the visitor reads the whole c.re / c.im strip as "off"
+         rather than just the field. */
+      input[type="number"]:disabled { opacity: 0.5; }
+      form#controls label:has(input:disabled) { opacity: 0.6; }
     </style>
   </head>
   <body>
@@ -59,6 +65,21 @@
           <option value="cycled" selected>Cycled</option>
           <option value="histogram">Match palette to image</option>
         </select>
+      </label>
+      <label>
+        Fractal:
+        <select name="mode">
+          <option value="mandelbrot" selected>Mandelbrot</option>
+          <option value="julia">Julia</option>
+        </select>
+      </label>
+      <label>
+        c.re:
+        <input type="number" name="c-re" step="0.0001" value="-0.7" disabled />
+      </label>
+      <label>
+        c.im:
+        <input type="number" name="c-im" step="0.0001" value="0.27015" disabled />
       </label>
     </form>
     <canvas id="fractal" width="800" height="600"></canvas>

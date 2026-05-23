@@ -28,7 +28,9 @@ if (typeof globalThis.ImageData === 'undefined') {
 // what `vi.resetModules()` plus a dynamic re-import buys.
 vi.mock('../wasm/fractal_wasm.js', () => {
   return {
-    compute: vi.fn((_viewport: unknown, _maxIter: number) => 0x1000),
+    compute: vi.fn(
+      (_viewport: unknown, _maxIter: number, _kind: number, _cRe: number, _cIm: number) => 0x1000,
+    ),
     compute_len: vi.fn(() => 4),
     colorize: vi.fn(
       (_iterPtr: number, _len: number, _palette: number, _mode: number, _maxIter: number) => 0x2000,
@@ -36,6 +38,7 @@ vi.mock('../wasm/fractal_wasm.js', () => {
     colorize_len: vi.fn(() => 16),
     Palette: { Grayscale: 0, Viridis: 1, Magma: 2, Inferno: 3, Twilight: 4 },
     NormalizationMode: { Cycled: 0, Histogram: 1 },
+    FractalKind: { Mandelbrot: 0, Julia: 1 },
   }
 })
 
@@ -46,6 +49,7 @@ interface MockedWasm {
   colorize_len: ReturnType<typeof vi.fn>
   Palette: { Viridis: number; Magma: number }
   NormalizationMode: { Cycled: number; Histogram: number }
+  FractalKind: { Mandelbrot: number; Julia: number }
 }
 
 interface RenderModule {
@@ -56,6 +60,9 @@ interface RenderModule {
     maxIter: number,
     palette: number,
     mode: number,
+    kind: number,
+    cRe: number,
+    cIm: number,
   ) => void
   recolorize: (ctx: CanvasRenderingContext2D, wasm: unknown, palette: number, mode: number) => void
 }
@@ -105,6 +112,13 @@ describe('render / recolorize', () => {
   const PALETTE_MAGMA = 2
   const MODE_CYCLED = 0
   const MODE_HISTOGRAM = 1
+  const KIND_MANDELBROT = 0
+  const KIND_JULIA = 1
+  // Pinned to the Slice 5C UI defaults so a divergence in the
+  // production constants surfaces as a test failure here rather than
+  // silently passing through the WASM seam.
+  const C_RE_DEFAULT = -0.7
+  const C_IM_DEFAULT = 0.27015
   let ctx: CanvasRenderingContext2D
   let wasmInit: { memory: WebAssembly.Memory }
 
@@ -119,7 +133,17 @@ describe('render / recolorize', () => {
 
   it('render calls compute once and colorize once, in that order', async () => {
     const { wasm, render } = await loadFresh()
-    render.render(VIEWPORT, ctx, wasmInit, 256, PALETTE_VIRIDIS, MODE_CYCLED)
+    render.render(
+      VIEWPORT,
+      ctx,
+      wasmInit,
+      256,
+      PALETTE_VIRIDIS,
+      MODE_CYCLED,
+      KIND_MANDELBROT,
+      C_RE_DEFAULT,
+      C_IM_DEFAULT,
+    )
     expect(wasm.compute).toHaveBeenCalledTimes(1)
     expect(wasm.colorize).toHaveBeenCalledTimes(1)
     const computeOrder = wasm.compute.mock.invocationCallOrder[0]
@@ -127,9 +151,40 @@ describe('render / recolorize', () => {
     expect(computeOrder).toBeLessThan(colorizeOrder)
   })
 
+  it('render forwards (kind, cRe, cIm) into the compute call positionally', async () => {
+    const { wasm, render } = await loadFresh()
+    render.render(
+      VIEWPORT,
+      ctx,
+      wasmInit,
+      256,
+      PALETTE_VIRIDIS,
+      MODE_CYCLED,
+      KIND_JULIA,
+      C_RE_DEFAULT,
+      C_IM_DEFAULT,
+    )
+    expect(wasm.compute).toHaveBeenCalledTimes(1)
+    const args = wasm.compute.mock.calls[0] as [unknown, number, number, number, number]
+    expect(args[1]).toBe(256)
+    expect(args[2]).toBe(KIND_JULIA)
+    expect(args[3]).toBe(C_RE_DEFAULT)
+    expect(args[4]).toBe(C_IM_DEFAULT)
+  })
+
   it('recolorize after a render runs colorize again with the cached (ptr, len) and skips compute', async () => {
     const { wasm, render } = await loadFresh()
-    render.render(VIEWPORT, ctx, wasmInit, 256, PALETTE_VIRIDIS, MODE_CYCLED)
+    render.render(
+      VIEWPORT,
+      ctx,
+      wasmInit,
+      256,
+      PALETTE_VIRIDIS,
+      MODE_CYCLED,
+      KIND_MANDELBROT,
+      C_RE_DEFAULT,
+      C_IM_DEFAULT,
+    )
     const [iterPtr, iterLen] = wasm.colorize.mock.calls[0] as [number, number, ...unknown[]]
 
     render.recolorize(ctx, wasmInit, PALETTE_MAGMA, MODE_HISTOGRAM)
@@ -152,11 +207,100 @@ describe('render / recolorize', () => {
 
   it('a render after a recolorize triggers a fresh compute (cache does not become permanent)', async () => {
     const { wasm, render } = await loadFresh()
-    render.render(VIEWPORT, ctx, wasmInit, 256, PALETTE_VIRIDIS, MODE_CYCLED)
+    render.render(
+      VIEWPORT,
+      ctx,
+      wasmInit,
+      256,
+      PALETTE_VIRIDIS,
+      MODE_CYCLED,
+      KIND_MANDELBROT,
+      C_RE_DEFAULT,
+      C_IM_DEFAULT,
+    )
     render.recolorize(ctx, wasmInit, PALETTE_MAGMA, MODE_HISTOGRAM)
-    render.render(VIEWPORT, ctx, wasmInit, 256, PALETTE_VIRIDIS, MODE_CYCLED)
+    render.render(
+      VIEWPORT,
+      ctx,
+      wasmInit,
+      256,
+      PALETTE_VIRIDIS,
+      MODE_CYCLED,
+      KIND_MANDELBROT,
+      C_RE_DEFAULT,
+      C_IM_DEFAULT,
+    )
     expect(wasm.compute).toHaveBeenCalledTimes(2)
     // 1 render + 1 recolorize + 1 render = 3 colorize calls total.
     expect(wasm.colorize).toHaveBeenCalledTimes(3)
+  })
+
+  it('two renders with different `kind` arguments trigger two distinct computes', async () => {
+    // Locks in that a mode change is NOT a fast-path candidate: a
+    // Mandelbrot iteration buffer cannot be re-coloured as if it were
+    // Julia, so the render layer must call `compute` again. If the
+    // cache ever grew a kind-keyed fast path that wasn't sound, this
+    // test would still fail loudly.
+    const { wasm, render } = await loadFresh()
+    render.render(
+      VIEWPORT,
+      ctx,
+      wasmInit,
+      256,
+      PALETTE_VIRIDIS,
+      MODE_CYCLED,
+      KIND_MANDELBROT,
+      C_RE_DEFAULT,
+      C_IM_DEFAULT,
+    )
+    render.render(
+      VIEWPORT,
+      ctx,
+      wasmInit,
+      256,
+      PALETTE_VIRIDIS,
+      MODE_CYCLED,
+      KIND_JULIA,
+      C_RE_DEFAULT,
+      C_IM_DEFAULT,
+    )
+    expect(wasm.compute).toHaveBeenCalledTimes(2)
+    expect((wasm.compute.mock.calls[0] as unknown[])[2]).toBe(KIND_MANDELBROT)
+    expect((wasm.compute.mock.calls[1] as unknown[])[2]).toBe(KIND_JULIA)
+  })
+
+  it('two renders in Julia mode with different (cRe, cIm) trigger two distinct computes', async () => {
+    // Mirror of the kind-change test for the c parameter: changing
+    // the Julia parameter is a compute-class change, not a
+    // recolorize-class change — the iteration buffer is a different
+    // function of position when c differs.
+    const { wasm, render } = await loadFresh()
+    render.render(
+      VIEWPORT,
+      ctx,
+      wasmInit,
+      256,
+      PALETTE_VIRIDIS,
+      MODE_CYCLED,
+      KIND_JULIA,
+      -0.7,
+      0.27015,
+    )
+    render.render(
+      VIEWPORT,
+      ctx,
+      wasmInit,
+      256,
+      PALETTE_VIRIDIS,
+      MODE_CYCLED,
+      KIND_JULIA,
+      -0.123,
+      0.745,
+    )
+    expect(wasm.compute).toHaveBeenCalledTimes(2)
+    const first = wasm.compute.mock.calls[0] as unknown[]
+    const second = wasm.compute.mock.calls[1] as unknown[]
+    expect([first[3], first[4]]).toEqual([-0.7, 0.27015])
+    expect([second[3], second[4]]).toEqual([-0.123, 0.745])
   })
 })
