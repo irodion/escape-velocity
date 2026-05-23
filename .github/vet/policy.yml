@@ -1,0 +1,25 @@
+name: Escape Velocity vet policy
+description: |
+  Block PRs only on actual security risk (critical/high vulnerabilities or
+  flagged malware). Advisory signals — version drift, low popularity,
+  maintenance gaps, license diversity, dangerous-workflow scoring — are NOT
+  treated as build failures at this stage because they are noisy for a project
+  with normal Vite + Rust transitive dependencies.
+
+  Tighten later (slice 1 or beyond) by reintroducing rules from
+  https://raw.githubusercontent.com/safedep/vet-action/main/example/policy.yml
+  as findings warrant. The starting point is "fail closed on real risk, fail
+  open on cosmetics."
+tags:
+  - escape-velocity
+filters:
+  - name: critical-or-high-vulns
+    check_type: CheckTypeVulnerability
+    summary: Critical or high risk vulnerabilities were found
+    value: |
+      vulns.critical.exists(p, true) || vulns.high.exists(p, true)
+  - name: osv-malware
+    check_type: CheckTypeMalware
+    summary: Malicious (malware) component detected
+    value: |
+      vulns.all.exists(v, v.id.startsWith("MAL-"))
