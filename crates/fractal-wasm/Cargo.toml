@@ -1,0 +1,12 @@
+[package]
+name = "fractal-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "wasm-bindgen binding layer over fractal-core."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fractal-core = { path = "../fractal-core" }

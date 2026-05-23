@@ -1,0 +1,6 @@
+[package]
+name = "fractal-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mandelbrot/Julia escape-time iteration and coloring. Pure Rust, no WebAssembly dependency."
