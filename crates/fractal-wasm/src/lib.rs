@@ -25,7 +25,8 @@
 use std::cell::RefCell;
 
 use fractal_core::{
-    Complex64, NormalizationMode as CoreMode, Palette as CorePalette, Viewport as CoreViewport,
+    Complex64, FractalKind as CoreFractalKind, NormalizationMode as CoreMode,
+    Palette as CorePalette, Viewport as CoreViewport,
 };
 use wasm_bindgen::prelude::*;
 
@@ -54,6 +55,22 @@ pub enum Palette {
 pub enum NormalizationMode {
     Cycled = 0,
     Histogram = 1,
+}
+
+/// JS-visible fractal-family discriminant. Mirrors
+/// `fractal_core::FractalKind` but carries no payload — the core's
+/// `Julia { c }` payload arrives as flat `c_re` / `c_im` scalars
+/// alongside the discriminant in [`compute`], matching the calling
+/// convention the JS side already uses for the viewport constructor
+/// (no wasm-bindgen `Complex` struct). Inlining the
+/// (`kind`, `c_re`, `c_im`) → `CoreFractalKind` translation inside
+/// `compute` is the natural shape because that's the only place the
+/// scalar payload exists.
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug)]
+pub enum FractalKind {
+    Mandelbrot = 0,
+    Julia = 1,
 }
 
 impl From<Palette> for CorePalette {
@@ -187,6 +204,13 @@ impl Viewport {
 /// to build a `Float32Array` view; the values are the continuous
 /// escape-time count `nu` (NaN for inside-set pixels).
 ///
+/// `kind` selects the fractal family; `c_re` / `c_im` carry the Julia
+/// parameter `c`. Both scalars are validated for `is_finite()`
+/// **unconditionally** — the Mandelbrot path ignores them, but
+/// validating regardless costs nothing and forecloses a class of
+/// latent JS bugs where a stale `NaN` in a hidden Julia input would
+/// surface only at the next mode toggle.
+///
 /// The returned `(ptr, len)` pair is the only handle JS keeps to the
 /// iteration buffer; it is valid until the next `compute` rewrites the
 /// underlying `Vec`. The render layer's module-level cache (see
@@ -194,13 +218,31 @@ impl Viewport {
 /// palette/normalisation-only change can call [`colorize`] against the
 /// cached pair without re-iterating.
 #[wasm_bindgen]
-pub fn compute(viewport: &Viewport, max_iter: u32) -> *const f32 {
-    let buf = fractal_core::compute(&viewport.inner, max_iter);
-    ITER_BUFFER.with(|cell| {
+pub fn compute(
+    viewport: &Viewport,
+    max_iter: u32,
+    kind: FractalKind,
+    c_re: f64,
+    c_im: f64,
+) -> Result<*const f32, JsError> {
+    if !c_re.is_finite() {
+        return Err(JsError::new("compute: c_re must be finite"));
+    }
+    if !c_im.is_finite() {
+        return Err(JsError::new("compute: c_im must be finite"));
+    }
+    let core_kind = match kind {
+        FractalKind::Mandelbrot => CoreFractalKind::Mandelbrot,
+        FractalKind::Julia => CoreFractalKind::Julia {
+            c: Complex64::new(c_re, c_im),
+        },
+    };
+    let buf = fractal_core::compute(&viewport.inner, max_iter, core_kind);
+    Ok(ITER_BUFFER.with(|cell| {
         let mut iters = cell.borrow_mut();
         *iters = buf;
         iters.as_ptr()
-    })
+    }))
 }
 
 /// Length (element count, not bytes) of the iteration buffer last
