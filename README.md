@@ -97,32 +97,49 @@ Things that bite *late* — captured here so they don't ambush slice 7 or 8.
    regresses f64→f32 precision (WGSL/GLSL core has no f64). Decide it
    deliberately, and not in slice 1.
 
-## Planned repository layout
+## Repository layout
 
 ```
 escape-velocity/
 ├── Cargo.toml              # workspace
+├── rust-toolchain.toml     # pins Rust 1.94.1 stable
 ├── crates/
 │   ├── fractal-core/       # pure Rust: escape-time, smooth coloring, palettes
-│   └── fractal-wasm/       # thin wasm-bindgen binding layer
-├── web/                    # Vite + TypeScript frontend
+│   └── fractal-wasm/       # thin wasm-bindgen binding layer (Slice 1)
+├── web/                    # Vite + TypeScript frontend (biome.json for fmt+lint)
 ├── docs/
 │   └── decisions/          # ADRs
-├── .github/workflows/      # CI: cargo test, clippy, fmt, wasm build
-├── LICENSE                 # GPL-3.0
+├── .github/workflows/      # CI: rust (fmt/clippy/test) + web (biome/typecheck/build) + safedep/vet
+├── LICENSE                 # GPL-3.0-or-later
 └── README.md
 ```
 
 ## Building
 
-Toolchain (filled in fully during Slice 0):
+Toolchain:
 
-- Rust stable (`rustup`).
-- [`wasm-pack`](https://rustwasm.github.io/wasm-pack/).
-- Node.js LTS + a package manager (npm / pnpm).
+- **Rust** pinned via [`rust-toolchain.toml`](rust-toolchain.toml) (currently `1.94.1`).
+  Install [`rustup`](https://rustup.rs) and `cd` into the repo — it auto-installs the right toolchain.
+- **Node.js 24** (current LTS).
+- **pnpm 10.30.1** — pinned in `web/package.json#packageManager`. Run `corepack enable` if you don't have it.
+- [`wasm-pack`](https://rustwasm.github.io/wasm-pack/) — needed from Slice 1 onward.
 
-Commands will live here after Slice 0 lands. Until then there is nothing
-to build.
+Slice 0 verification (matches CI):
+
+```sh
+# Rust side
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+
+# Web side
+cd web
+pnpm install
+pnpm lint          # biome ci
+pnpm typecheck     # tsc --noEmit
+pnpm build         # vite build
+pnpm fmt           # biome auto-fix (local convenience, not in CI)
+```
 
 ## Contributing
 
