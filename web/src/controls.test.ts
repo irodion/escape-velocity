@@ -276,11 +276,12 @@ describe('Controls', () => {
     expect(onChange).toHaveBeenCalledWith({ ...INITIAL, mode: 'julia', cIm: 0.5 })
   })
 
-  it('emits NaN for cRe when the input is cleared mid-edit (dispatcher filters)', () => {
+  it('emits NaN for cRe when the input is cleared mid-edit (dispatcher filters and back-writes)', () => {
     // Clearing an `<input type="number">` puts it in an empty state;
     // `valueAsNumber` then reads back NaN. The Controls class does
     // NOT filter this — it passes the raw snapshot through so the
-    // dispatcher (main.ts) can decide what to do.
+    // dispatcher (main.ts) can decide what to do, then calls
+    // `setCValues` to back-write its substituted fallback.
     new Controls(form, { ...INITIAL, mode: 'julia' }, onChange)
     const cReInput = inputByName(form, 'c-re')
     cReInput.value = ''
@@ -289,6 +290,22 @@ describe('Controls', () => {
     const snapshot = onChange.mock.calls[0]?.[0]
     expect(snapshot).toBeDefined()
     expect(Number.isNaN(snapshot?.cRe)).toBe(true)
+  })
+
+  it('setCValues writes both inputs and does not fire onChange', () => {
+    // Back-write contract: the dispatcher calls this to keep the
+    // DOM aligned with the rendered parameter after sanitising a
+    // mid-edit NaN. The write MUST NOT re-enter the dispatcher —
+    // setting `valueAsNumber` does not dispatch `change`, but pin
+    // that assumption with a test so a future refactor that switches
+    // to `setAttribute('value', ...)` (which also wouldn't fire
+    // `change` — same outcome) or `dispatchEvent(...)` (which would)
+    // is caught here.
+    const controls = new Controls(form, { ...INITIAL, mode: 'julia' }, onChange)
+    controls.setCValues(-0.123, 0.745)
+    expect(inputByName(form, 'c-re').valueAsNumber).toBe(-0.123)
+    expect(inputByName(form, 'c-im').valueAsNumber).toBe(0.745)
+    expect(onChange).not.toHaveBeenCalled()
   })
 
   it('ignores the `input` event on every control', () => {

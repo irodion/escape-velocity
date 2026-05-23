@@ -120,7 +120,7 @@ const inputController = new InputController(canvas, viewport, (next) => {
   rerender()
 })
 
-new Controls(controlsForm, current, (rawNext) => {
+const controls = new Controls(controlsForm, current, (rawNext) => {
   // Substitute the last-known-finite c values for any non-finite
   // entries in the form snapshot. `<input type="number">` reports
   // NaN for an empty / dash-only `value`, and the WASM `compute`
@@ -139,11 +139,22 @@ new Controls(controlsForm, current, (rawNext) => {
   // check is false and branch 5 runs). In Mandelbrot mode it lets
   // mode toggles succeed regardless of whatever the user typed into
   // the (then-disabled) c fields earlier.
-  const next: Settings = {
-    ...rawNext,
-    cRe: Number.isFinite(rawNext.cRe) ? rawNext.cRe : current.cRe,
-    cIm: Number.isFinite(rawNext.cIm) ? rawNext.cIm : current.cIm,
+  //
+  // Where a fallback fires, back-write the substituted value into the
+  // DOM so the visible field matches the rendered parameter. Without
+  // this the input would stay blank while the renderer used the
+  // hidden previous c — e.g., the user clears c.re, then changes
+  // palette: branch 4 would recolour the cached Julia buffer (drawn
+  // with the previous c) while the c.re field shows nothing. The
+  // back-write keeps form and image strictly aligned. Setting
+  // `valueAsNumber` does not dispatch a `change`, so this is a
+  // one-way sync that never re-enters the dispatcher.
+  const cRe = Number.isFinite(rawNext.cRe) ? rawNext.cRe : current.cRe
+  const cIm = Number.isFinite(rawNext.cIm) ? rawNext.cIm : current.cIm
+  if (cRe !== rawNext.cRe || cIm !== rawNext.cIm) {
+    controls.setCValues(cRe, cIm)
   }
+  const next: Settings = { ...rawNext, cRe, cIm }
 
   // Branch 1: fractal-family change. Reset the viewport to the
   // canonical "starting frame" for the new family so the user lands

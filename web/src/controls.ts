@@ -152,8 +152,10 @@ export class Controls {
         normalisation: normalisationSelect.value as NormalisationName,
         mode: modeSelect.value as FractalMode,
         // valueAsNumber returns NaN for mid-edit states ("", "-",
-        // "1.5e"). The dispatcher in main.ts treats NaN in Julia mode
-        // as "don't render yet" and waits for the next commit.
+        // "1.5e"). The dispatcher in main.ts substitutes a finite
+        // fallback and calls `setCValues` to back-write the
+        // substitution into the DOM so the visible field always
+        // matches the rendered parameter.
         cRe: cReInput.valueAsNumber,
         cIm: cImInput.valueAsNumber,
       })
@@ -183,5 +185,23 @@ export class Controls {
   private setCInputsEnabled(enabled: boolean): void {
     this.cReInput.disabled = !enabled
     this.cImInput.disabled = !enabled
+  }
+
+  /**
+   * Write `(cRe, cIm)` back into the two c inputs. Called by the
+   * dispatcher in main.ts after sanitising a non-finite snapshot, so
+   * the visible field and the rendered parameter stay in lockstep
+   * (e.g., after a user clears `c.re` and the dispatcher falls back
+   * to the previous finite value, the input shows that fallback
+   * instead of staying blank).
+   *
+   * Setting `valueAsNumber` does NOT fire `change` — the form's
+   * `change` listeners only run on direct user interaction or an
+   * explicit `dispatchEvent`. So the back-write is a safe one-way
+   * sync that never re-enters the dispatcher.
+   */
+  public setCValues(cRe: number, cIm: number): void {
+    this.cReInput.valueAsNumber = cRe
+    this.cImInput.valueAsNumber = cIm
   }
 }
