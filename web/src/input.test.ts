@@ -165,6 +165,44 @@ describe('InputController', () => {
     expect(viewport.zoom_around).toHaveBeenCalledWith(400, 300, 1)
   })
 
+  it('wheel normalizes line-mode deltas (Firefox-on-Linux style)', () => {
+    viewport.zoom_around.mockReturnValue({} as unknown as Viewport)
+    new InputController(canvas, viewport as unknown as Viewport, onChange)
+
+    // Firefox-on-Linux historical wheel: deltaMode = 1 (line),
+    // deltaY ≈ ±3 per notch. Without normalization, factor ≈ 0.993
+    // — effectively no zoom. With ×40 line scaling, 3 lines → 120
+    // normalized pixels → factor = 1.25 ** -1.2 (visible zoom step).
+    canvas.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: 3,
+        deltaMode: 1,
+        clientX: 100,
+        clientY: 50,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    expect(viewport.zoom_around).toHaveBeenCalledWith(100, 50, 1.25 ** (-(3 * 40) / 100))
+  })
+
+  it('wheel normalizes page-mode deltas', () => {
+    viewport.zoom_around.mockReturnValue({} as unknown as Viewport)
+    new InputController(canvas, viewport as unknown as Viewport, onChange)
+
+    canvas.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: 1,
+        deltaMode: 2,
+        clientX: 100,
+        clientY: 50,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    expect(viewport.zoom_around).toHaveBeenCalledWith(100, 50, 1.25 ** (-(1 * 800) / 100))
+  })
+
   it('wheel calls preventDefault', () => {
     viewport.zoom_around.mockReturnValue({} as unknown as Viewport)
     new InputController(canvas, viewport as unknown as Viewport, onChange)

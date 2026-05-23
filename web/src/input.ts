@@ -86,7 +86,7 @@ export class InputController {
     const cssY = event.clientY - rect.top
     const pixelX = (cssX * this.canvas.width) / rect.width
     const pixelY = (cssY * this.canvas.height) / rect.height
-    const factor = 1.25 ** (-event.deltaY / 100)
+    const factor = 1.25 ** (-normalizeWheelDelta(event) / 100)
 
     const next = this.currentViewport.zoom_around(pixelX, pixelY, factor)
     this.currentViewport = next
@@ -111,4 +111,27 @@ interface DragState {
   readonly startClientX: number
   readonly startClientY: number
   readonly startViewport: Viewport
+}
+
+// Convert a WheelEvent's deltaY into a pixel-equivalent value so the
+// zoom factor stays consistent across input devices. `deltaMode` is 0
+// (pixel) on every modern trackpad and most mouse-wheel setups, but
+// Firefox-on-Linux historically reports 1 (line) with deltaY ≈ ±3 per
+// notch, and some assistive devices report 2 (page). Without
+// normalization, a line-mode notch would compute factor ≈ 0.993 — a
+// near-no-op zoom.
+//
+// The constants target ~100 normalized pixels per physical wheel
+// notch: 3 lines × 40 px ≈ 120; 1 page × 800 px ≈ 800 (a single page-
+// mode notch is a large zoom step, which matches user expectation for
+// that mode).
+function normalizeWheelDelta(event: WheelEvent): number {
+  switch (event.deltaMode) {
+    case 1:
+      return event.deltaY * 40
+    case 2:
+      return event.deltaY * 800
+    default:
+      return event.deltaY
+  }
 }
