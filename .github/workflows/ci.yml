@@ -39,13 +39,27 @@ jobs:
   web:
     name: Web
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+
+      - name: Install Rust toolchain (pinned via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@aad518f59d88bae90133242f9ddac7f8bbc5dddf # 1.94.1
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        # Compile from source via cargo for supply-chain consistency with
+        # the rest of the Rust pipeline. The binary lives at ~/.cargo/bin
+        # and isn't covered by rust-cache's default cache; reinstalls on
+        # every CI run (~30s with a warm registry).
+        run: cargo install --locked wasm-pack@0.15.0
+
+      - name: Build WASM artifact
+        run: wasm-pack build crates/fractal-wasm --target web --out-dir ../../web/wasm --release
 
       - uses: pnpm/action-setup@v4
         with:
@@ -58,15 +72,19 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
 
       - name: Install dependencies
+        working-directory: web
         run: pnpm install --frozen-lockfile
 
       - name: Biome (format + lint)
+        working-directory: web
         run: pnpm lint
 
       - name: TypeScript check
+        working-directory: web
         run: pnpm typecheck
 
       - name: Build
+        working-directory: web
         run: pnpm build
 
   vet:

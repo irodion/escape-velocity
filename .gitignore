@@ -5,6 +5,7 @@
 # wasm-pack output — regenerated from the source crates
 /crates/*/pkg/
 /pkg/
+/web/wasm/
 
 # Node / Vite
 node_modules/

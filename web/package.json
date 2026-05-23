@@ -5,8 +5,9 @@
   "type": "module",
   "packageManager": "pnpm@10.30.1",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
+    "wasm:build": "wasm-pack build ../crates/fractal-wasm --target web --out-dir ../../web/wasm --release",
+    "dev": "pnpm wasm:build && vite",
+    "build": "pnpm wasm:build && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "lint": "biome ci",
