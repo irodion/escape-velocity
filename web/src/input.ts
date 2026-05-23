@@ -11,12 +11,23 @@ import type { Viewport } from '../wasm/fractal_wasm.js'
  *
  * ## Drag semantics
  *
- * Drag during mousemove uses a CSS `translate` on the canvas — no
- * re-render, just visual feedback. On mouseup, one `pan_by_pixels`
- * call produces the final viewport and one `onChange` call hands it
- * off. CSS pixels (from `clientX`/`clientY`) are scaled to canvas-
- * internal pixels using `canvas.width / boundingRect.width` so a
- * future devicePixelRatio change does not need to retrofit the math.
+ * On mousedown the controller snapshots the canvas pixels via
+ * `getImageData`. Each mousemove paints that snapshot back into the
+ * canvas buffer at the current drag offset — no recompute, just a
+ * shift of an already-rendered image. The canvas DOM element itself
+ * never moves. On mouseup, one `pan_by_pixels` call produces the
+ * final viewport and one `onChange` call hands it off. CSS pixels
+ * (from `clientX`/`clientY`) are scaled to canvas-internal pixels
+ * using `canvas.width / boundingRect.width` so a future
+ * devicePixelRatio change does not need to retrofit the math.
+ *
+ * Earlier revisions used `canvas.style.transform = translate(...)`
+ * for drag feedback. That approach was visually broken on mouseup:
+ * the canvas element snapped from its dragged CSS position back to
+ * the origin even though the rendered content was mathematically
+ * continuous, so the user perceived a rectangle-jump. Shifting the
+ * image inside the buffer keeps the canvas element stationary, so
+ * only the content moves — same as a native pan.
  *
  * The pan sign matches `fractal_core::Viewport::pan_by_pixels`:
  * dragging the canvas right by `dx` CSS pixels corresponds to the
@@ -41,10 +52,13 @@ export class InputController {
   private dragState: DragState | null = null
 
   private readonly handleMouseDown = (event: MouseEvent): void => {
+    const ctx = this.canvas.getContext('2d')
+    if (ctx === null) return
     this.dragState = {
       startClientX: event.clientX,
       startClientY: event.clientY,
       startViewport: this.currentViewport,
+      snapshot: ctx.getImageData(0, 0, this.canvas.width, this.canvas.height),
     }
     this.canvas.classList.add('dragging')
     document.addEventListener('mousemove', this.handleMouseMove)
@@ -53,9 +67,23 @@ export class InputController {
 
   private readonly handleMouseMove = (event: MouseEvent): void => {
     if (this.dragState === null) return
-    const dx = event.clientX - this.dragState.startClientX
-    const dy = event.clientY - this.dragState.startClientY
-    this.canvas.style.transform = `translate(${dx}px, ${dy}px)`
+    const ctx = this.canvas.getContext('2d')
+    if (ctx === null) return
+
+    const rect = this.canvas.getBoundingClientRect()
+    const dxCss = event.clientX - this.dragState.startClientX
+    const dyCss = event.clientY - this.dragState.startClientY
+    const dxInternal = (dxCss * this.canvas.width) / rect.width
+    const dyInternal = (dyCss * this.canvas.height) / rect.height
+
+    // Fill black for the edges exposed by the drag — this matches the
+    // Mandelbrot "outside the set" colour, so the strips look like
+    // part of the fractal rather than blank canvas. `putImageData`
+    // overwrites pixels (it doesn't blend), so the snapshot fully
+    // covers the centre.
+    ctx.fillStyle = 'black'
+    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height)
+    ctx.putImageData(this.dragState.snapshot, dxInternal, dyInternal)
   }
 
   private readonly handleMouseUp = (event: MouseEvent): void => {
@@ -63,7 +91,6 @@ export class InputController {
     const { startClientX, startClientY, startViewport } = this.dragState
 
     this.dragState = null
-    this.canvas.style.transform = ''
     this.canvas.classList.remove('dragging')
     document.removeEventListener('mousemove', this.handleMouseMove)
     document.removeEventListener('mouseup', this.handleMouseUp)
@@ -111,6 +138,7 @@ interface DragState {
   readonly startClientX: number
   readonly startClientY: number
   readonly startViewport: Viewport
+  readonly snapshot: ImageData
 }
 
 // Convert a WheelEvent's deltaY into a pixel-equivalent value so the

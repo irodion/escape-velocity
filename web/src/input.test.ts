@@ -35,10 +35,35 @@ function setRect(
   } as DOMRect)
 }
 
+// Minimal 2D context stub. jsdom does not implement canvas painting,
+// so `canvas.getContext('2d')` returns null by default. The
+// InputController calls `getImageData` on mousedown and
+// `fillRect` / `putImageData` on mousemove — these three are the only
+// canvas-API touchpoints, so the stub only needs to spy on them.
+function makeCtxStub(snapshot: ImageData): {
+  ctx: CanvasRenderingContext2D
+  getImageData: ReturnType<typeof vi.fn>
+  putImageData: ReturnType<typeof vi.fn>
+  fillRect: ReturnType<typeof vi.fn>
+} {
+  const getImageData = vi.fn().mockReturnValue(snapshot)
+  const putImageData = vi.fn()
+  const fillRect = vi.fn()
+  const ctx = {
+    getImageData,
+    putImageData,
+    fillRect,
+    fillStyle: '',
+  } as unknown as CanvasRenderingContext2D
+  return { ctx, getImageData, putImageData, fillRect }
+}
+
 describe('InputController', () => {
   let canvas: HTMLCanvasElement
   let onChange: ReturnType<typeof vi.fn<(viewport: Viewport) => void>>
   let viewport: ReturnType<typeof makeViewportDouble>
+  let snapshot: ImageData
+  let ctxStub: ReturnType<typeof makeCtxStub>
 
   beforeEach(() => {
     canvas = document.createElement('canvas')
@@ -48,6 +73,14 @@ describe('InputController', () => {
     canvas.height = 600
     document.body.appendChild(canvas)
     setRect(canvas, { width: 800, height: 600 })
+    snapshot = {
+      data: new Uint8ClampedArray(800 * 600 * 4),
+      width: 800,
+      height: 600,
+      colorSpace: 'srgb',
+    } as ImageData
+    ctxStub = makeCtxStub(snapshot)
+    vi.spyOn(canvas, 'getContext').mockReturnValue(ctxStub.ctx)
     onChange = vi.fn<(viewport: Viewport) => void>()
     viewport = makeViewportDouble()
   })
@@ -81,23 +114,48 @@ describe('InputController', () => {
     expect(viewport.pan_by_pixels).toHaveBeenCalledWith(50, 40)
   })
 
-  it('applies a CSS translate during mousemove and clears it on mouseup', () => {
+  it('snapshots the canvas on mousedown and paints it at the drag offset on mousemove', () => {
     viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
     new InputController(canvas, viewport as unknown as Viewport, onChange)
 
     canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
+    expect(ctxStub.getImageData).toHaveBeenCalledWith(0, 0, 800, 600)
+
     document.dispatchEvent(
       new MouseEvent('mousemove', { clientX: 130, clientY: 70, bubbles: true }),
     )
-    expect(canvas.style.transform).toBe('translate(30px, 20px)')
+    // dx=30, dy=20; rect matches internal so no scaling. Each mousemove
+    // re-paints the full canvas (fillRect black, then putImageData at
+    // offset) — no CSS transform applied.
+    expect(ctxStub.fillRect).toHaveBeenLastCalledWith(0, 0, 800, 600)
+    expect(ctxStub.putImageData).toHaveBeenLastCalledWith(snapshot, 30, 20)
+    expect(canvas.style.transform).toBe('')
 
     document.dispatchEvent(
       new MouseEvent('mousemove', { clientX: 175, clientY: 100, bubbles: true }),
     )
-    expect(canvas.style.transform).toBe('translate(75px, 50px)')
+    expect(ctxStub.putImageData).toHaveBeenLastCalledWith(snapshot, 75, 50)
 
     document.dispatchEvent(new MouseEvent('mouseup', { clientX: 175, clientY: 100, bubbles: true }))
+    // No transform was ever applied; nothing to clear.
     expect(canvas.style.transform).toBe('')
+  })
+
+  it('scales the drag offset to canvas-internal pixels', () => {
+    viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
+    // Canvas is 800x600 internally but displayed at half size.
+    setRect(canvas, { left: 0, top: 0, width: 400, height: 300 })
+    new InputController(canvas, viewport as unknown as Viewport, onChange)
+
+    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
+    document.dispatchEvent(
+      new MouseEvent('mousemove', { clientX: 150, clientY: 80, bubbles: true }),
+    )
+    // 50 CSS px × (800/400) = 100 internal px; 30 CSS × (600/300) = 60.
+    expect(ctxStub.putImageData).toHaveBeenLastCalledWith(snapshot, 100, 60)
+
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 150, clientY: 80, bubbles: true }))
+    expect(viewport.pan_by_pixels).toHaveBeenCalledWith(100, 60)
   })
 
   it('completes the drag when mouseup is dispatched on document outside the canvas', () => {
