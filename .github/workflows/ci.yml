@@ -83,6 +83,10 @@ jobs:
         working-directory: web
         run: pnpm typecheck
 
+      - name: Vitest
+        working-directory: web
+        run: pnpm test
+
       - name: Build
         working-directory: web
         run: pnpm build
