@@ -52,3 +52,13 @@ confirmed when the `LICENSE` file is added in Slice 0.
 
 - The project README's [Contributing](../../README.md#contributing) section
   inherits this license.
+
+## Update — 2026-05-23
+
+SPDX identifier resolved to **`GPL-3.0-or-later`**. The canonical FSF
+GPL-3.0 text was added as `/LICENSE` in the same change.
+
+Rationale for `-or-later`: FSF-recommended; future-proofs the project
+against issues fixed in any later GPL version; conventional choice for
+new GPL projects. The trade-off (agreeing in advance to terms the FSF
+has not yet written) was accepted.

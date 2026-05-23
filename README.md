@@ -134,7 +134,5 @@ process bureaucracy proportional to what exists to contribute *to*).
 
 ## License
 
-GPL-3.0. See [LICENSE](LICENSE) (added in Slice 0) and
-[ADR-0010](docs/decisions/0010-gpl-3-license.md). The SPDX identifier
-(`GPL-3.0-only` vs `GPL-3.0-or-later`) is to be confirmed when the LICENSE
-file is added.
+[GPL-3.0-or-later](LICENSE). See
+[ADR-0010](docs/decisions/0010-gpl-3-license.md) for the reasoning.
