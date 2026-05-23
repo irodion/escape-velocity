@@ -1,4 +1,4 @@
-# ADR-0010: License under GPL-3.0
+# ADR-0010: License under GPL-3.0-or-later
 
 - Status: Accepted
 - Date: 2026-05-23

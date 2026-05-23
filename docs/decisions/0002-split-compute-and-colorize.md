@@ -7,7 +7,7 @@
 
 A fractal pixel goes through three stages:
 
-```
+```text
 viewport coords  →  escape iteration count  →  RGBA color
 ```
 

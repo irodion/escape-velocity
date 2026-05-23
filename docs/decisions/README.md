@@ -42,7 +42,7 @@ Numbering is zero-padded to four digits and never reused.
 | 0007 | [Parallelism via WASM threads (rayon), introduced worker-first](0007-parallelism-via-wasm-threads.md) | Accepted |
 | 0008 | [Host on Cloudflare Pages](0008-host-on-cloudflare-pages.md)                           | Accepted |
 | 0009 | [PWA as a late, dedicated slice](0009-pwa-as-late-slice.md)                            | Accepted |
-| 0010 | [License under GPL-3.0](0010-gpl-3-license.md)                                         | Accepted |
+| 0010 | [License under GPL-3.0-or-later](0010-gpl-3-license.md)                                | Accepted |
 
 ## Adding a new ADR
 

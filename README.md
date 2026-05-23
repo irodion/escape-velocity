@@ -99,7 +99,7 @@ Things that bite *late* — captured here so they don't ambush slice 7 or 8.
 
 ## Repository layout
 
-```
+```text
 escape-velocity/
 ├── Cargo.toml              # workspace
 ├── rust-toolchain.toml     # pins Rust 1.94.1 stable
