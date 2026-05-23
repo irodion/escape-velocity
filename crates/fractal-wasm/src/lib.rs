@@ -2,27 +2,79 @@
 //!
 //! A deliberately thin pass-through (ADR-0005). All math lives in
 //! `fractal-core`; this crate only flattens the `Complex64` newtype for
-//! JS, validates inputs at the WASM↔JS boundary, and exposes pointer +
-//! length handles into WASM linear memory so the JS side can build
-//! `Uint32Array` / `Uint8ClampedArray` views without copying.
+//! JS, validates inputs at the WASM↔JS boundary, surfaces typed enum
+//! mirrors of the core's `Palette` / `NormalizationMode` so JS sees a
+//! discriminant-checked enum surface instead of magic numbers, and
+//! exposes pointer + length handles into WASM linear memory so the JS
+//! side can build typed-array views without copying.
 //!
-//! ## Buffer lifetime (Slice 1)
+//! ## Buffer lifetime
 //!
-//! Slice 1 issues exactly one `compute` and one `colorize` call per page
-//! load. Buffer ownership is therefore trivial: two `thread_local`
-//! `Vec`s, each rewritten on every call. The general invalidation
-//! protocol (generation counters, lifetime tokens, who releases what)
-//! is out of scope for Slice 1 and will land in a small ADR before
-//! Slice 2 introduces pan/zoom.
+//! `compute` returns a pointer into a `thread_local!` `Vec<f32>`; that
+//! pointer is invalidated as soon as the next `compute` runs and the
+//! `Vec` is reassigned (which can move the underlying allocation).
+//! `colorize` may be called repeatedly against the same `(iter_ptr,
+//! len)` pair — that is the load-bearing fast-path payoff of Slice 4:
+//! changing palette or normalisation alone reuses the same iteration
+//! buffer instead of triggering a recompute. The caller is responsible
+//! for not interleaving a fresh `compute` between a cached
+//! `(iter_ptr, len)` and its next `colorize`; the JS render layer
+//! enforces this with a module-level cache that is invalidated only
+//! after a full `render` cycle.
 
 use std::cell::RefCell;
 
-use fractal_core::{Complex64, Viewport as CoreViewport};
+use fractal_core::{
+    Complex64, NormalizationMode as CoreMode, Palette as CorePalette, Viewport as CoreViewport,
+};
 use wasm_bindgen::prelude::*;
 
 thread_local! {
-    static ITER_BUFFER: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    static ITER_BUFFER: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
     static RGBA_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Numeric discriminants are explicit so the JS↔WASM boundary stays
+/// stable even if the variant order in `fractal-core` changes.
+/// `wasm-bindgen` already rejects out-of-range integers at the binding
+/// layer; no further boundary validation is needed inside the
+/// `From` impls below.
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug)]
+pub enum Palette {
+    Grayscale = 0,
+    Viridis = 1,
+    Magma = 2,
+    Inferno = 3,
+    Twilight = 4,
+}
+
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug)]
+pub enum NormalizationMode {
+    Cycled = 0,
+    Histogram = 1,
+}
+
+impl From<Palette> for CorePalette {
+    fn from(p: Palette) -> Self {
+        match p {
+            Palette::Grayscale => CorePalette::Grayscale,
+            Palette::Viridis => CorePalette::Viridis,
+            Palette::Magma => CorePalette::Magma,
+            Palette::Inferno => CorePalette::Inferno,
+            Palette::Twilight => CorePalette::Twilight,
+        }
+    }
+}
+
+impl From<NormalizationMode> for CoreMode {
+    fn from(m: NormalizationMode) -> Self {
+        match m {
+            NormalizationMode::Cycled => CoreMode::Cycled,
+            NormalizationMode::Histogram => CoreMode::Histogram,
+        }
+    }
 }
 
 /// JS-visible `Viewport`. Wraps the `fractal_core::Viewport` newtype
@@ -130,11 +182,19 @@ impl Viewport {
     }
 }
 
-/// Compute the iteration buffer for `viewport` and return a pointer
-/// into WASM linear memory. JS pairs this with [`compute_len`] to
-/// build a `Uint32Array` view.
+/// Compute the smooth-iteration buffer for `viewport` and return a
+/// pointer into WASM linear memory. JS pairs this with [`compute_len`]
+/// to build a `Float32Array` view; the values are the continuous
+/// escape-time count `nu` (NaN for inside-set pixels).
+///
+/// The returned `(ptr, len)` pair is the only handle JS keeps to the
+/// iteration buffer; it is valid until the next `compute` rewrites the
+/// underlying `Vec`. The render layer's module-level cache (see
+/// `web/src/render.ts`) encodes this lifetime explicitly so a
+/// palette/normalisation-only change can call [`colorize`] against the
+/// cached pair without re-iterating.
 #[wasm_bindgen]
-pub fn compute(viewport: &Viewport, max_iter: u32) -> *const u32 {
+pub fn compute(viewport: &Viewport, max_iter: u32) -> *const f32 {
     let buf = fractal_core::compute(&viewport.inner, max_iter);
     ITER_BUFFER.with(|cell| {
         let mut iters = cell.borrow_mut();
@@ -150,25 +210,34 @@ pub fn compute_len() -> usize {
     ITER_BUFFER.with(|cell| cell.borrow().len())
 }
 
-/// Colorize an iteration buffer and return a pointer to the RGBA bytes
-/// in WASM linear memory. JS pairs this with [`colorize_len`] to build
-/// a `Uint8ClampedArray` view.
+/// Colorize a smooth-iteration buffer with the given palette and
+/// normalisation mode, and return a pointer to the RGBA bytes in WASM
+/// linear memory. JS pairs this with [`colorize_len`] to build a
+/// `Uint8ClampedArray` view.
 ///
 /// `iter_ptr` / `len` must be the pair previously returned by
-/// [`compute`] + [`compute_len`]. Slice 1's call-once-per-load
-/// discipline makes this invariant trivially upheld; the pre-Slice-2
-/// buffer-lifetime ADR encodes it more rigorously.
+/// [`compute`] + [`compute_len`]. Slice 4's render-layer cache lets
+/// this be called repeatedly against the same `(iter_ptr, len)` pair
+/// — the fast-path payoff of ADR-0002: a palette or normalisation
+/// change repaints in milliseconds because no iteration runs.
 #[wasm_bindgen]
 #[allow(
     clippy::not_unsafe_ptr_arg_deref,
-    reason = "wasm-bindgen exports cannot be marked `unsafe` while remaining callable from JS; the JS-side caller upholds the (ptr, len) pairing invariant described in this function's doc comment. The pre-Slice-2 buffer-lifetime ADR will encode the invariant more rigorously."
+    reason = "wasm-bindgen exports cannot be marked `unsafe` while remaining callable from JS; the JS-side caller upholds the (ptr, len) pairing invariant described in this function's doc comment. The render-layer cache in `web/src/render.ts` encodes that invariant explicitly."
 )]
-pub fn colorize(iter_ptr: *const u32, len: usize, max_iter: u32) -> *const u8 {
+pub fn colorize(
+    iter_ptr: *const f32,
+    len: usize,
+    palette: Palette,
+    mode: NormalizationMode,
+    max_iter: u32,
+) -> *const u8 {
     // SAFETY: caller guarantees (iter_ptr, len) was previously returned
-    // by `compute` + `compute_len`. The ITER_BUFFER it points into is
-    // owned by this module and outlives the call.
+    // by `compute` + `compute_len` and has not been invalidated by an
+    // intervening `compute`. The ITER_BUFFER it points into is owned
+    // by this module and outlives the call.
     let iters = unsafe { std::slice::from_raw_parts(iter_ptr, len) };
-    let rgba = fractal_core::colorize(iters, max_iter);
+    let rgba = fractal_core::colorize(iters, palette.into(), mode.into(), max_iter);
     RGBA_BUFFER.with(|cell| {
         let mut buf = cell.borrow_mut();
         *buf = rgba;

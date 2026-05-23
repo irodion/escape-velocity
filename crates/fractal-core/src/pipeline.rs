@@ -1,20 +1,29 @@
-//! End-to-end pipeline: viewport → iteration buffer → RGBA buffer.
+//! End-to-end pipeline: viewport → smooth-iteration buffer → RGBA buffer.
 //!
-//! The split between `compute` and `colorize` is the contract pinned
-//! by ADR-0002. `compute` is mathematics; `colorize` is presentation.
-//! Slice 4 replaces the body of `colorize` with smooth coloring and
-//! palettes — the *signature* of `colorize` is the load-bearing
-//! interface, not the greyscale rule it currently encodes.
+//! The split between [`compute`] and [`colorize`] is the contract
+//! pinned by ADR-0002. `compute` is mathematics — it returns the
+//! continuous escape-time count `nu` for every pixel. `colorize` is
+//! presentation — it folds `nu` through a normalisation and a palette
+//! into RGBA bytes. The two halves stay decoupled so a palette or
+//! normalisation change can run without re-iterating; that fast-path
+//! is wired up in the WASM crate (Slice 4B).
+//!
+//! Inside-set pixels carry [`f32::NAN`] through `compute` and are
+//! always rendered as opaque black; `colorize` checks `nu.is_nan()`
+//! explicitly (NaN compares unequal to itself, so `==` would silently
+//! treat every NaN as an escape).
 
 use crate::escape_time::escape_time;
+use crate::palette::{NormalizationMode, Palette};
 use crate::viewport::Viewport;
 
-/// Run the escape-time iteration for every pixel in `viewport`.
+/// Run the smooth escape-time iteration for every pixel in `viewport`.
 ///
 /// Returns a row-major buffer of length `viewport.width *
-/// viewport.height` whose entry `[py * width + px]` is
-/// `escape_time(viewport.pixel_to_complex(px, py), max_iter)`.
-pub fn compute(viewport: &Viewport, max_iter: u32) -> Vec<u32> {
+/// viewport.height` whose entry `[py * width + px]` is the smooth
+/// continuous count for `viewport.pixel_to_complex(px, py)`. Inside-set
+/// pixels are encoded as [`f32::NAN`].
+pub fn compute(viewport: &Viewport, max_iter: u32) -> Vec<f32> {
     let total = (viewport.width as usize) * (viewport.height as usize);
     let mut buf = Vec::with_capacity(total);
     for py in 0..viewport.height {
@@ -26,38 +35,118 @@ pub fn compute(viewport: &Viewport, max_iter: u32) -> Vec<u32> {
     buf
 }
 
-/// Convert iteration counts to RGBA8 pixels using a hardcoded greyscale rule.
+/// Convert smooth-iteration counts to RGBA8 pixels.
 ///
-/// **Convention** (Slice 1 only; Slice 4 replaces this with palettes):
+/// Output buffer length is `4 * nus.len()`, in RGBA order. Alpha is
+/// always 255 — the canvas is fully opaque. `nu.is_nan()` always maps
+/// to opaque black regardless of palette or mode.
 ///
-/// - `iter == max_iter` (point did not escape — "inside" the set) → `(0, 0, 0, 255)` (black).
-/// - Otherwise `grey = (iter * 255 / max_iter) as u8`; output `(grey, grey, grey, 255)`.
+/// ## Modes
 ///
-/// Note that `iter == 0` *also* maps to black (`grey = 0`). Both
-/// endpoints of the iteration range are dark, with the brightest
-/// pixels coming from orbits that escaped near the end of the
-/// iteration budget. This is the canonical "void" look: the set
-/// itself is black and the surrounding rings darken back toward black
-/// as orbits escape faster.
-///
-/// Output buffer length is `4 * iters.len()`, in RGBA order. Alpha is
-/// always 255 — the canvas is fully opaque.
-pub fn colorize(iters: &[u32], max_iter: u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(iters.len() * 4);
-    for &iter in iters {
-        let grey: u8 = if iter >= max_iter {
-            0
-        } else {
-            // u64 intermediate: `iter * 255` could overflow u32 for
-            // pathologically large `max_iter`, but never u64.
-            (u64::from(iter) * 255 / u64::from(max_iter)) as u8
-        };
-        out.push(grey);
-        out.push(grey);
-        out.push(grey);
-        out.push(255);
+/// - [`NormalizationMode::Cycled`] divides each `nu` by
+///   [`Palette::period`] and takes the Euclidean fractional part. The
+///   bands repeat as `nu` advances, foregrounding the iteration-count
+///   structure.
+/// - [`NormalizationMode::Histogram`] equalises the finite-`nu`
+///   distribution across `[0, 1]` via a two-pass CDF on the integer
+///   floor of `nu`. The CDF lookup interpolates linearly between
+///   `cdf[floor(nu)]` and `cdf[floor(nu) + 1]` by the fractional part,
+///   keeping the smooth-iteration smoothness inside each integer
+///   bucket. An all-NaN input short-circuits to all-black with no
+///   panic.
+pub fn colorize(nus: &[f32], palette: Palette, mode: NormalizationMode, max_iter: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(nus.len() * 4);
+    match mode {
+        NormalizationMode::Cycled => colorize_cycled(nus, palette, &mut out),
+        NormalizationMode::Histogram => colorize_histogram(nus, palette, max_iter, &mut out),
     }
     out
+}
+
+fn colorize_cycled(nus: &[f32], palette: Palette, out: &mut Vec<u8>) {
+    let period = palette.period();
+    for &nu in nus {
+        // Treat any non-finite `nu` (NaN inside-set sentinel and the
+        // theoretical ±Inf escapees alike) as opaque black so the
+        // mode-dispatch behaviour is symmetric with Histogram pass 1.
+        if !nu.is_finite() {
+            out.extend_from_slice(&[0, 0, 0, 255]);
+            continue;
+        }
+        let t = (nu / period).rem_euclid(1.0);
+        let [r, g, b] = palette.sample(t);
+        out.extend_from_slice(&[r, g, b, 255]);
+    }
+}
+
+fn colorize_histogram(nus: &[f32], palette: Palette, max_iter: u32, out: &mut Vec<u8>) {
+    // Pass 1 — count escapers per integer bin. `nu` is bounded above
+    // by `max_iter` (the loop exits earlier with NaN otherwise) and
+    // bounded below by `i + 1 − log₂(log₂(BAILOUT_SQR)/2)`, which can
+    // dip negative for first-iteration escapers far from the set —
+    // clamp `k` into `[0, max_iter]` so those escapers still appear
+    // in the distribution. Without this, a viewport composed entirely
+    // of negative-`nu` pixels would land `total = 0` and paint
+    // all-black on pass 2 even though every pixel escaped; clamping
+    // here keeps Pass 1 and Pass 2 (which clamps the same way for
+    // the CDF lookup) in lockstep.
+    let bin_count = (max_iter as usize) + 1;
+    let last_idx = bin_count - 1;
+    let mut bins: Vec<u32> = vec![0; bin_count];
+    for &nu in nus {
+        if !nu.is_finite() {
+            continue;
+        }
+        let k_signed = nu.floor() as i64;
+        let k = k_signed.clamp(0, last_idx as i64) as usize;
+        bins[k] = bins[k].saturating_add(1);
+    }
+
+    let total: u64 = bins.iter().map(|&b| u64::from(b)).sum();
+    if total == 0 {
+        // All-NaN (or all-non-finite) input — every pixel is inside
+        // the set, no escape statistics to equalise.
+        for _ in nus {
+            out.extend_from_slice(&[0, 0, 0, 255]);
+        }
+        return;
+    }
+
+    // Compute the CDF in place: bins[k] becomes Σ original_bins[0..=k].
+    let mut cum: u32 = 0;
+    for bin in &mut bins {
+        cum = cum.saturating_add(*bin);
+        *bin = cum;
+    }
+    let total_f = total as f32;
+
+    // Pass 2 — palette lookup with linear interpolation between
+    // adjacent CDF entries by the fractional part of `nu`. Reject
+    // any non-finite value (NaN and ±Inf alike) symmetrically with
+    // pass 1 — keeping the two passes consistent forecloses a
+    // latent asymmetry where ±Inf would skip the bin count yet
+    // still land at a clamped colour.
+    for &nu in nus {
+        if !nu.is_finite() {
+            out.extend_from_slice(&[0, 0, 0, 255]);
+            continue;
+        }
+        let k_signed = nu.floor() as i64;
+        let k = k_signed.clamp(0, last_idx as i64) as usize;
+        let frac = (nu - k as f32).clamp(0.0, 1.0);
+        let cdf_k = bins[k] as f32 / total_f;
+        let cdf_kp1 = if k + 1 < bin_count {
+            bins[k + 1] as f32 / total_f
+        } else {
+            // cdf[max_iter + 1] is defined as 1.0 (the PRD sentinel).
+            // bins[max_iter] already equals total → cdf[max_iter] = 1.0,
+            // so this branch is only entered when `k == max_iter`.
+            1.0
+        };
+        let t = cdf_k + (cdf_kp1 - cdf_k) * frac;
+        let [r, g, b] = palette.sample(t);
+        out.extend_from_slice(&[r, g, b, 255]);
+    }
 }
 
 #[cfg(test)]
@@ -67,64 +156,18 @@ mod tests {
 
     const MAX_ITER: u32 = 256;
 
-    // --- colorize -----------------------------------------------------
+    const ALL_PALETTES: &[Palette] = &[
+        Palette::Grayscale,
+        Palette::Viridis,
+        Palette::Magma,
+        Palette::Inferno,
+        Palette::Twilight,
+    ];
 
-    #[test]
-    fn colorize_max_iter_is_black() {
-        let out = colorize(&[MAX_ITER], MAX_ITER);
-        assert_eq!(out, vec![0, 0, 0, 255]);
-    }
+    const ALL_MODES: &[NormalizationMode] =
+        &[NormalizationMode::Cycled, NormalizationMode::Histogram];
 
-    #[test]
-    fn colorize_zero_is_also_black() {
-        // Both endpoints collapse to black under the greyscale rule;
-        // documented in the colorize doc-comment.
-        let out = colorize(&[0], MAX_ITER);
-        assert_eq!(out, vec![0, 0, 0, 255]);
-    }
-
-    #[test]
-    fn colorize_is_monotone_on_open_interval() {
-        let iters: Vec<u32> = (1..MAX_ITER).collect();
-        let rgba = colorize(&iters, MAX_ITER);
-        let greys: Vec<u8> = rgba.chunks_exact(4).map(|p| p[0]).collect();
-        for w in greys.windows(2) {
-            assert!(
-                w[0] <= w[1],
-                "greyscale not monotone non-decreasing: {} > {}",
-                w[0],
-                w[1]
-            );
-        }
-    }
-
-    #[test]
-    fn colorize_buffer_length_is_four_times_iters() {
-        let iters = vec![0_u32, 1, 2, 3, 4, 100, 200, MAX_ITER];
-        let out = colorize(&iters, MAX_ITER);
-        assert_eq!(out.len(), iters.len() * 4);
-    }
-
-    #[test]
-    fn colorize_all_pixels_have_alpha_255() {
-        let iters: Vec<u32> = (0..=MAX_ITER).collect();
-        let rgba = colorize(&iters, MAX_ITER);
-        for pixel in rgba.chunks_exact(4) {
-            assert_eq!(pixel[3], 255);
-        }
-    }
-
-    #[test]
-    fn colorize_rgb_channels_are_equal_per_pixel() {
-        let iters = vec![0_u32, 17, 99, 128, MAX_ITER];
-        let rgba = colorize(&iters, MAX_ITER);
-        for pixel in rgba.chunks_exact(4) {
-            assert_eq!(pixel[0], pixel[1]);
-            assert_eq!(pixel[1], pixel[2]);
-        }
-    }
-
-    // --- end-to-end compute() shape -----------------------------------
+    // --- compute() shape -----------------------------------------------
 
     fn seahorse_viewport() -> Viewport {
         Viewport::new(Complex64::new(-0.7435, 0.1314), 200.0, 800, 600)
@@ -138,47 +181,173 @@ mod tests {
     }
 
     #[test]
-    fn compute_values_are_in_zero_to_max_iter_inclusive() {
+    fn compute_values_are_nan_or_below_max_iter() {
         let vp = seahorse_viewport();
         let buf = compute(&vp, MAX_ITER);
-        for &iter in &buf {
-            assert!(iter <= MAX_ITER);
+        for &nu in &buf {
+            assert!(
+                nu.is_nan() || nu <= (MAX_ITER as f32),
+                "out-of-range nu: {nu}",
+            );
         }
     }
 
     #[test]
-    fn compute_center_pixel_matches_direct_escape_time_call() {
-        // Plumbing check: compute's center cell must equal an
-        // independent `escape_time` call at the same complex point.
-        // This verifies sampling + buffer indexing without depending on
-        // whether that specific point is in the Mandelbrot set.
-        //
-        // (PRD #2 claimed the Seahorse Valley centre at
-        // `(-0.7435, 0.1314)` is inside the set; empirically it sits
-        // ~0.6% outside the main cardioid and escapes in 62 iterations.
-        // The viewport is still the right hardcoded Slice 1 render
-        // target — Seahorse Valley *is* mostly escape-land, which is
-        // why seahorses are visible at all.)
-        use crate::escape_time::escape_time;
-
-        let vp = seahorse_viewport();
-        let buf = compute(&vp, MAX_ITER);
-        let cx = vp.width / 2;
-        let cy = vp.height / 2;
-        let center_idx = (cy as usize) * (vp.width as usize) + (cx as usize);
-        let expected = escape_time(vp.pixel_to_complex(cx, cy), MAX_ITER);
-        assert_eq!(buf[center_idx], expected);
-    }
-
-    #[test]
-    fn compute_center_pixel_of_origin_viewport_is_inside_the_set() {
+    fn compute_center_pixel_of_origin_viewport_is_nan() {
         // A viewport centred on c = 0 (deep inside the main cardioid)
-        // *does* have its centre pixel return max_iter — locking down
-        // the "inside the set returns max_iter" contract on a viewport
-        // where that claim is mathematically true.
+        // has its centre pixel return NaN — locking down the
+        // "inside the set returns NaN" contract on a viewport where
+        // that claim is mathematically true.
         let vp = Viewport::new(Complex64::new(0.0, 0.0), 1.0, 800, 600);
         let buf = compute(&vp, MAX_ITER);
         let center_idx = (vp.height / 2) as usize * (vp.width as usize) + (vp.width / 2) as usize;
-        assert_eq!(buf[center_idx], MAX_ITER);
+        assert!(buf[center_idx].is_nan());
+    }
+
+    // --- colorize() shape ----------------------------------------------
+
+    #[test]
+    fn colorize_output_length_is_four_times_input_for_every_combo() {
+        let nus = vec![f32::NAN, 0.0, 1.5, 10.25, 63.75, f32::NAN, 17.0];
+        for &p in ALL_PALETTES {
+            for &m in ALL_MODES {
+                let out = colorize(&nus, p, m, MAX_ITER);
+                assert_eq!(out.len(), nus.len() * 4, "{p:?}/{m:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn colorize_alpha_is_255_everywhere() {
+        let nus = vec![f32::NAN, 0.0, 1.5, 10.25, 63.75, f32::NAN, 17.0];
+        for &p in ALL_PALETTES {
+            for &m in ALL_MODES {
+                let out = colorize(&nus, p, m, MAX_ITER);
+                for pixel in out.chunks_exact(4) {
+                    assert_eq!(pixel[3], 255, "{p:?}/{m:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn colorize_nan_maps_to_opaque_black_for_every_combo() {
+        let nus = vec![f32::NAN];
+        for &p in ALL_PALETTES {
+            for &m in ALL_MODES {
+                let out = colorize(&nus, p, m, MAX_ITER);
+                assert_eq!(out, vec![0, 0, 0, 255], "{p:?}/{m:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn cycled_mode_wraps_by_palette_period() {
+        // The Cycled-mode invariant: shifting `nu` by exactly one
+        // period reproduces the same colour. This is what makes the
+        // bands look continuous around the orbits. Pick `nu`s that
+        // are exact multiples of `period * 2^-k` so that the `/`
+        // and the wrap step are bit-exact on both sides of the
+        // comparison — otherwise an epsilon-sized ratio drift can
+        // round to an adjacent palette stop.
+        for &p in ALL_PALETTES {
+            let period = p.period();
+            for &fraction in &[0.0_f32, 0.25, 0.5, 0.75] {
+                let nu = period * fraction;
+                let base = vec![nu];
+                let shifted = vec![nu + period];
+                let a = colorize(&base, p, NormalizationMode::Cycled, MAX_ITER);
+                let b = colorize(&shifted, p, NormalizationMode::Cycled, MAX_ITER);
+                assert_eq!(a, b, "{p:?} at fraction {fraction}");
+            }
+        }
+    }
+
+    #[test]
+    fn colorize_is_pure_for_every_combo() {
+        let nus = vec![f32::NAN, 0.0, 1.5, 10.25, 63.75, 17.0];
+        for &p in ALL_PALETTES {
+            for &m in ALL_MODES {
+                let a = colorize(&nus, p, m, MAX_ITER);
+                let b = colorize(&nus, p, m, MAX_ITER);
+                assert_eq!(a, b, "{p:?}/{m:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn histogram_all_negative_finite_input_is_not_painted_as_inside_set() {
+        // A viewport composed entirely of fast escapers can produce
+        // only negative `nu` values under the smooth formula at
+        // bailout 256 (`nu ≈ i - 2 - δ` for `i = 1`). The Histogram
+        // mode must treat those as escapers — not collapse them to
+        // bin 0's count being zero and short-circuiting to all-black,
+        // which would mis-paint them as if they were inside the set.
+        let nus = vec![-1.5_f32, -0.7, -2.0, -3.25];
+        for &p in ALL_PALETTES {
+            let out = colorize(&nus, p, NormalizationMode::Histogram, MAX_ITER);
+            assert_eq!(out.len(), nus.len() * 4);
+            // The escapers should land at `t = cdf[0]`, sampled at the
+            // first stop. For Grayscale that's RGB (0, 0, 0), so the
+            // "not painted as inside-set" check there would be
+            // vacuous — but every other palette has a non-black first
+            // stop, which proves the all-NaN short-circuit didn't
+            // fire.
+            if p == Palette::Grayscale {
+                continue;
+            }
+            for pixel in out.chunks_exact(4) {
+                assert_ne!(
+                    pixel,
+                    &[0, 0, 0, 255],
+                    "{p:?}: negative-nu escapers painted as inside-set",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn histogram_all_nan_input_is_all_black_no_panic() {
+        let nus = vec![f32::NAN; 17];
+        for &p in ALL_PALETTES {
+            let out = colorize(&nus, p, NormalizationMode::Histogram, MAX_ITER);
+            assert_eq!(out.len(), nus.len() * 4);
+            for pixel in out.chunks_exact(4) {
+                assert_eq!(pixel, &[0, 0, 0, 255], "{p:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn histogram_uniform_input_produces_approximately_uniform_output() {
+        // Uniform input → uniform CDF → uniform output. Bin the
+        // resulting red channel into 16 buckets; no bucket should hold
+        // more than 2× the average count. Grayscale is the cleanest
+        // palette to assert on because red == green == blue, so the
+        // CDF maps directly to the red channel — we measure
+        // distribution uniformity without palette-specific shape
+        // confounding the assertion.
+        let n = 4096_usize;
+        let nus: Vec<f32> = (0..n)
+            .map(|i| (i as f32) * (MAX_ITER as f32) / (n as f32))
+            .collect();
+        let out = colorize(
+            &nus,
+            Palette::Grayscale,
+            NormalizationMode::Histogram,
+            MAX_ITER,
+        );
+        let mut buckets = [0_u32; 16];
+        for pixel in out.chunks_exact(4) {
+            let bucket = (pixel[0] as usize) * 16 / 256;
+            buckets[bucket] += 1;
+        }
+        let avg = n / 16;
+        for (i, &count) in buckets.iter().enumerate() {
+            assert!(
+                (count as usize) <= 2 * avg,
+                "bucket {i} overloaded: {count} > 2 × {avg}",
+            );
+        }
     }
 }
