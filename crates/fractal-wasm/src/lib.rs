@@ -197,6 +197,39 @@ impl Viewport {
             inner: self.inner.with_resolution(width, height),
         })
     }
+
+    // Flat-primitive accessors. Slice 6 introduces a coordinating
+    // Web Worker that owns its own WASM instance; a `Viewport` class
+    // instance cannot survive `postMessage` (structured-clone breaks
+    // wasm-bindgen class identity across realms), so the main thread
+    // reads these five scalars off its `Viewport` and ships them as
+    // primitives. The worker reconstructs a fresh `Viewport` on the
+    // far side via the existing constructor.
+
+    #[wasm_bindgen]
+    pub fn center_re(&self) -> f64 {
+        self.inner.center.re
+    }
+
+    #[wasm_bindgen]
+    pub fn center_im(&self) -> f64 {
+        self.inner.center.im
+    }
+
+    #[wasm_bindgen]
+    pub fn zoom(&self) -> f64 {
+        self.inner.zoom
+    }
+
+    #[wasm_bindgen]
+    pub fn width(&self) -> u32 {
+        self.inner.width
+    }
+
+    #[wasm_bindgen]
+    pub fn height(&self) -> u32 {
+        self.inner.height
+    }
 }
 
 /// Compute the smooth-iteration buffer for `viewport` and return a
