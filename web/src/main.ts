@@ -150,9 +150,20 @@ new Controls(controlsForm, current, (rawNext) => {
   // on the whole structure instead of an arbitrary deep dive that
   // happened to be loaded for the previous family. Resolution is
   // preserved.
+  //
+  // Today only one form control fires per `change` event, so a
+  // mode-change snapshot can't simultaneously differ in resolution
+  // — but the canvas-dim sync here keeps branch 1 symmetric with
+  // branch 2 so a future multi-field commit (e.g. a "reset to
+  // defaults" button) can't desync the canvas-vs-viewport sizes and
+  // throw inside `new ImageData(...)`.
   if (next.mode !== current.mode) {
     const view = next.mode === 'mandelbrot' ? MANDELBROT_DEFAULT_VIEW : JULIA_DEFAULT_VIEW
     viewport = new Viewport(view.re, view.im, view.zoom, next.width, next.height)
+    if (next.width !== current.width || next.height !== current.height) {
+      canvas.width = next.width
+      canvas.height = next.height
+    }
     inputController.setViewport(viewport)
     current = next
     rerender()
