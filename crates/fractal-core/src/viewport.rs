@@ -153,6 +153,38 @@ impl Viewport {
             height: self.height,
         }
     }
+
+    /// Return a viewport at different pixel dimensions, preserving
+    /// `center` and `zoom` exactly.
+    ///
+    /// `pixel_scale` follows the new `width` per the formula in
+    /// [`Self::pixel_scale`] — doubling `width` halves the per-pixel
+    /// step.
+    ///
+    /// ## What is preserved
+    ///
+    /// The sampled real-axis span is `BASE_RE_SPAN / zoom`, independent
+    /// of `width` — so the real-axis window is preserved across every
+    /// resize, aspect-preserving or not. The sampled imaginary-axis
+    /// span is `(height / width) × BASE_RE_SPAN / zoom` — it depends on
+    /// the aspect ratio. **To preserve the full complex-plane window
+    /// across a resize, callers must pass dimensions with the same
+    /// `height / width` ratio as `self`.** Slice 3's Controls presets
+    /// are all 4:3, matching the default 800×600.
+    ///
+    /// Validation follows the PR #5 convention: `fractal-core` trusts
+    /// callers, so neither `width == 0` nor aspect-ratio changes are
+    /// rejected here. The `fractal-wasm` binding rejects zero at the
+    /// WASM boundary; the Slice 3B Controls module only emits
+    /// aspect-preserving resizes.
+    pub fn with_resolution(&self, width: u32, height: u32) -> Viewport {
+        Self {
+            center: self.center,
+            zoom: self.zoom,
+            width,
+            height,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -415,5 +447,84 @@ mod tests {
         let zoomed = vp.zoom_around(123.0, 77.0, 2.5);
         assert_eq!(zoomed.width, vp.width);
         assert_eq!(zoomed.height, vp.height);
+    }
+
+    // --- with_resolution ----------------------------------------------
+
+    #[test]
+    fn with_resolution_preserves_center_exactly() {
+        let vp = sample_viewport();
+        let resized = vp.with_resolution(1600, 1200);
+        assert_eq!(resized.center, vp.center);
+    }
+
+    #[test]
+    fn with_resolution_preserves_zoom_exactly() {
+        let vp = sample_viewport();
+        let resized = vp.with_resolution(1600, 1200);
+        assert_eq!(resized.zoom, vp.zoom);
+    }
+
+    #[test]
+    fn with_resolution_sets_dimensions_exactly() {
+        let vp = sample_viewport();
+        let resized = vp.with_resolution(1600, 1200);
+        assert_eq!(resized.width, 1600);
+        assert_eq!(resized.height, 1200);
+    }
+
+    #[test]
+    fn with_resolution_identity_at_same_dimensions() {
+        let vp = sample_viewport();
+        assert_eq!(vp.with_resolution(vp.width, vp.height), vp);
+    }
+
+    #[test]
+    fn with_resolution_halves_pixel_scale_at_double_width() {
+        let vp = sample_viewport();
+        let resized = vp.with_resolution(vp.width * 2, vp.height * 2);
+        assert_eq!(resized.pixel_scale(), vp.pixel_scale() / 2.0);
+    }
+
+    #[test]
+    fn with_resolution_preserves_real_axis_span_across_arbitrary_dims() {
+        // pixel_scale × width = BASE_RE_SPAN / zoom is fixed by `zoom`
+        // alone, so the sampled real-axis span is preserved by every
+        // resolution change — including aspect-changing ones. The
+        // imaginary-axis span depends on `height / width` and is NOT
+        // preserved when the aspect ratio changes; the doc comment
+        // calls out same-aspect-ratio as a caller precondition for
+        // preserving the full window.
+        let vp = sample_viewport();
+        let original = f64::from(vp.width) * vp.pixel_scale();
+        for &(w, h) in &[
+            (1600_u32, 1200_u32),
+            (400, 300),
+            (1600, 600),
+            (400, 1200),
+            (123, 456),
+        ] {
+            let resized = vp.with_resolution(w, h);
+            let span = f64::from(resized.width) * resized.pixel_scale();
+            assert!(
+                (span - original).abs() < 1e-15,
+                "real-axis span drifted at ({w}, {h}): {span} vs {original}",
+            );
+        }
+    }
+
+    #[test]
+    fn with_resolution_center_pixel_maps_to_same_complex_point() {
+        // The pixel grid's geometric centre maps to `center` in both
+        // viewports; choosing the integer pixel nearest the centre
+        // introduces at most one pixel-scale of drift, which the new
+        // (finer) pixel-scale bounds.
+        let vp = sample_viewport();
+        let resized = vp.with_resolution(1600, 1200);
+        let before = vp.pixel_to_complex(vp.width / 2, vp.height / 2);
+        let after = resized.pixel_to_complex(resized.width / 2, resized.height / 2);
+        let tolerance = vp.pixel_scale();
+        assert!((after.re - before.re).abs() <= tolerance);
+        assert!((after.im - before.im).abs() <= tolerance);
     }
 }
