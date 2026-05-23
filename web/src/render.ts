@@ -3,6 +3,7 @@ import {
   colorize_len,
   compute,
   compute_len,
+  type FractalKind,
   type InitOutput,
   type NormalizationMode,
   type Palette,
@@ -43,8 +44,11 @@ export function render(
   maxIter: number,
   palette: Palette,
   mode: NormalizationMode,
+  kind: FractalKind,
+  cRe: number,
+  cIm: number,
 ): void {
-  const iterPtr = compute(viewport, maxIter)
+  const iterPtr = compute(viewport, maxIter, kind, cRe, cIm)
   const iterLen = compute_len()
   cachedIterPtr = iterPtr
   cachedIterLen = iterLen

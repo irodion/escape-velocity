@@ -1,4 +1,4 @@
-import init, { NormalizationMode, Palette, Viewport } from '../wasm/fractal_wasm.js'
+import init, { FractalKind, NormalizationMode, Palette, Viewport } from '../wasm/fractal_wasm.js'
 import { Controls, type NormalisationName, type PaletteName, type Settings } from './controls.js'
 import { InputController } from './input.js'
 import { recolorize, render } from './render.js'
@@ -16,6 +16,16 @@ const INITIAL_NORMALISATION: NormalisationName = 'cycled'
 const CENTER_RE = -0.7435
 const CENTER_IM = 0.1314
 const ZOOM = 200.0
+
+// Slice 5B carries the Julia parameter through `render` so the WASM
+// seam is fully Julia-capable, but pins `kind` to Mandelbrot at boot
+// — Slice 5C adds the form controls that let the user flip to Julia.
+// `INITIAL_C_RE`/`INITIAL_C_IM` are carried-but-ignored in this slice
+// (the WASM side validates them for `is_finite()` regardless of
+// `kind`, so they must be real numbers even when ignored).
+const INITIAL_KIND: FractalKind = FractalKind.Mandelbrot
+const INITIAL_C_RE = -0.7
+const INITIAL_C_IM = 0.27015
 
 const canvas = document.getElementById('fractal')
 if (!(canvas instanceof HTMLCanvasElement)) {
@@ -73,6 +83,9 @@ const rerender = (): void => {
     current.maxIter,
     paletteEnum(current.palette),
     modeEnum(current.normalisation),
+    INITIAL_KIND,
+    INITIAL_C_RE,
+    INITIAL_C_IM,
   )
 }
 

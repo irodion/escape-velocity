@@ -13,23 +13,50 @@
 //! explicitly (NaN compares unequal to itself, so `==` would silently
 //! treat every NaN as an escape).
 
+use crate::complex::Complex64;
 use crate::escape_time::escape_time;
+use crate::fractal_kind::FractalKind;
 use crate::palette::{NormalizationMode, Palette};
 use crate::viewport::Viewport;
 
-/// Run the smooth escape-time iteration for every pixel in `viewport`.
+/// Per-pixel `z_0` for Mandelbrot dispatch. Lifted out of the inner
+/// loop so the constant doesn't get rebuilt at every pixel.
+const ORIGIN: Complex64 = Complex64::new(0.0, 0.0);
+
+/// Run the smooth escape-time iteration for every pixel in `viewport`,
+/// dispatching on `kind`.
 ///
 /// Returns a row-major buffer of length `viewport.width *
 /// viewport.height` whose entry `[py * width + px]` is the smooth
-/// continuous count for `viewport.pixel_to_complex(px, py)`. Inside-set
-/// pixels are encoded as [`f32::NAN`].
-pub fn compute(viewport: &Viewport, max_iter: u32) -> Vec<f32> {
+/// continuous count for the pixel under `kind`'s `(z_0, c)` rule:
+///
+/// - [`FractalKind::Mandelbrot`]: `z_0 = 0`, `c = pixel` — the
+///   classic Mandelbrot rendering.
+/// - [`FractalKind::Julia { c }`]: `z_0 = pixel`, `c = <fixed>` —
+///   the filled Julia set for the chosen `c` parameter.
+///
+/// Inside-set pixels are encoded as [`f32::NAN`]. The match on `kind`
+/// is hoisted out of the inner loop so the branch predictor sees the
+/// same target every pixel within one frame.
+pub fn compute(viewport: &Viewport, max_iter: u32, kind: FractalKind) -> Vec<f32> {
     let total = (viewport.width as usize) * (viewport.height as usize);
     let mut buf = Vec::with_capacity(total);
-    for py in 0..viewport.height {
-        for px in 0..viewport.width {
-            let c = viewport.pixel_to_complex(px, py);
-            buf.push(escape_time(c, max_iter));
+    match kind {
+        FractalKind::Mandelbrot => {
+            for py in 0..viewport.height {
+                for px in 0..viewport.width {
+                    let p = viewport.pixel_to_complex(px, py);
+                    buf.push(escape_time(ORIGIN, p, max_iter));
+                }
+            }
+        }
+        FractalKind::Julia { c } => {
+            for py in 0..viewport.height {
+                for px in 0..viewport.width {
+                    let p = viewport.pixel_to_complex(px, py);
+                    buf.push(escape_time(p, c, max_iter));
+                }
+            }
         }
     }
     buf
@@ -156,6 +183,16 @@ mod tests {
 
     const MAX_ITER: u32 = 256;
 
+    // Canonical Julia c shared by every Julia-mode test: the Douady
+    // rabbit (`c = -0.123 + 0.745i`). Picked because `c` sits inside
+    // the period-3 bulb of the Mandelbrot set, so the corresponding
+    // filled Julia set is connected and `z_0 = 0` is inside it —
+    // giving every test a clean "inside vs outside" witness.
+    //
+    // The Slice 5C UI defaults to a different `c` (which renders a
+    // Cantor-dust Julia) — the two choices are independent.
+    const JULIA_C: Complex64 = Complex64::new(-0.123, 0.745);
+
     const ALL_PALETTES: &[Palette] = &[
         Palette::Grayscale,
         Palette::Viridis,
@@ -173,17 +210,25 @@ mod tests {
         Viewport::new(Complex64::new(-0.7435, 0.1314), 200.0, 800, 600)
     }
 
+    fn origin_viewport() -> Viewport {
+        Viewport::new(Complex64::new(0.0, 0.0), 1.0, 800, 600)
+    }
+
+    fn center_idx(vp: &Viewport) -> usize {
+        (vp.height / 2) as usize * (vp.width as usize) + (vp.width / 2) as usize
+    }
+
     #[test]
     fn compute_output_length_matches_viewport_pixels() {
         let vp = seahorse_viewport();
-        let buf = compute(&vp, MAX_ITER);
+        let buf = compute(&vp, MAX_ITER, FractalKind::Mandelbrot);
         assert_eq!(buf.len(), (vp.width as usize) * (vp.height as usize));
     }
 
     #[test]
     fn compute_values_are_nan_or_below_max_iter() {
         let vp = seahorse_viewport();
-        let buf = compute(&vp, MAX_ITER);
+        let buf = compute(&vp, MAX_ITER, FractalKind::Mandelbrot);
         for &nu in &buf {
             assert!(
                 nu.is_nan() || nu <= (MAX_ITER as f32),
@@ -198,10 +243,62 @@ mod tests {
         // has its centre pixel return NaN — locking down the
         // "inside the set returns NaN" contract on a viewport where
         // that claim is mathematically true.
-        let vp = Viewport::new(Complex64::new(0.0, 0.0), 1.0, 800, 600);
-        let buf = compute(&vp, MAX_ITER);
-        let center_idx = (vp.height / 2) as usize * (vp.width as usize) + (vp.width / 2) as usize;
-        assert!(buf[center_idx].is_nan());
+        let vp = origin_viewport();
+        let buf = compute(&vp, MAX_ITER, FractalKind::Mandelbrot);
+        assert!(buf[center_idx(&vp)].is_nan());
+    }
+
+    // --- Julia-mode dispatch ----------------------------------------------
+
+    #[test]
+    fn julia_compute_output_length_matches_mandelbrot() {
+        // Both kinds visit every pixel once and push one f32 per pixel.
+        let vp = origin_viewport();
+        let m = compute(&vp, MAX_ITER, FractalKind::Mandelbrot);
+        let j = compute(&vp, MAX_ITER, FractalKind::Julia { c: JULIA_C });
+        assert_eq!(m.len(), j.len());
+        assert_eq!(j.len(), (vp.width as usize) * (vp.height as usize));
+    }
+
+    #[test]
+    fn julia_compute_center_pixel_of_origin_viewport_is_nan() {
+        // An origin-centred viewport has its centre pixel map to
+        // `z_0 = 0`, which is inside the `c = (-0.7, 0.27015)` Julia
+        // set — so the centre pixel must come back as NaN.
+        let vp = origin_viewport();
+        let buf = compute(&vp, MAX_ITER, FractalKind::Julia { c: JULIA_C });
+        assert!(buf[center_idx(&vp)].is_nan());
+    }
+
+    #[test]
+    fn julia_compute_has_at_least_one_finite_escaper() {
+        // The four corners of an origin-centred zoom=1 viewport sit at
+        // |z_0| ≈ 2, comfortably outside the filled Julia set for
+        // c = (-0.7, 0.27015) — so the buffer must contain at least
+        // one finite (non-NaN) entry. Without this, an "all inside the
+        // set" bug in the Julia path could hide behind the NaN sentinel.
+        let vp = origin_viewport();
+        let buf = compute(&vp, MAX_ITER, FractalKind::Julia { c: JULIA_C });
+        assert!(
+            buf.iter().any(|nu| nu.is_finite()),
+            "Julia buffer has no escapers — dispatch broken?",
+        );
+    }
+
+    #[test]
+    fn julia_and_mandelbrot_produce_different_buffers() {
+        // Locks in that the two modes actually dispatch differently.
+        // A regression that wired Julia mode back to the Mandelbrot
+        // recurrence would still pass the length and NaN-centre checks
+        // (the origin viewport's centre maps to z_0=0 either way) —
+        // this assertion is the one that breaks.
+        let vp = origin_viewport();
+        let m = compute(&vp, MAX_ITER, FractalKind::Mandelbrot);
+        let j = compute(&vp, MAX_ITER, FractalKind::Julia { c: JULIA_C });
+        assert_ne!(
+            m, j,
+            "Mandelbrot and Julia compute produced identical buffers"
+        );
     }
 
     // --- colorize() shape ----------------------------------------------

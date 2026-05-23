@@ -9,20 +9,25 @@
 //! - [`Viewport`] — rectangular window onto the complex plane.
 //! - [`MIN_ZOOM`] / [`MAX_ZOOM`] — zoom clamping range used by
 //!   [`Viewport::zoom_around`].
-//! - [`escape_time`] — smooth (continuous) single-point Mandelbrot
-//!   iteration; returns `f32::NAN` for inside-set points.
+//! - [`FractalKind`] — selects which family (`Mandelbrot` or
+//!   `Julia { c }`) `compute` dispatches.
+//! - [`escape_time`] — smooth (continuous) single-point iteration of
+//!   `z_{n+1} = z_n² + c` for an arbitrary `(z_0, c)`; returns
+//!   `f32::NAN` for inside-set points.
 //! - [`compute`] — viewport → per-pixel smooth-iteration buffer.
 //! - [`colorize`] — smooth-iteration buffer → RGBA8 pixels via a
 //!   [`Palette`] and a [`NormalizationMode`].
 
 mod complex;
 mod escape_time;
+mod fractal_kind;
 mod palette;
 mod pipeline;
 mod viewport;
 
 pub use complex::Complex64;
 pub use escape_time::escape_time;
+pub use fractal_kind::FractalKind;
 pub use palette::{NormalizationMode, Palette};
 pub use pipeline::{colorize, compute};
 pub use viewport::{MAX_ZOOM, MIN_ZOOM, Viewport};
