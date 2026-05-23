@@ -60,7 +60,6 @@ export class InputController {
       startViewport: this.currentViewport,
       snapshot: ctx.getImageData(0, 0, this.canvas.width, this.canvas.height),
     }
-    this.canvas.classList.add('dragging')
     document.addEventListener('mousemove', this.handleMouseMove)
     document.addEventListener('mouseup', this.handleMouseUp)
   }
@@ -91,7 +90,6 @@ export class InputController {
     const { startClientX, startClientY, startViewport } = this.dragState
 
     this.dragState = null
-    this.canvas.classList.remove('dragging')
     document.removeEventListener('mousemove', this.handleMouseMove)
     document.removeEventListener('mouseup', this.handleMouseUp)
 

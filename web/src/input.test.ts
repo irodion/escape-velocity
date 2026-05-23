@@ -172,17 +172,6 @@ describe('InputController', () => {
     expect(viewport.pan_by_pixels).toHaveBeenCalledTimes(1)
   })
 
-  it('toggles the dragging class on mousedown / mouseup', () => {
-    viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
-
-    expect(canvas.classList.contains('dragging')).toBe(false)
-    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, clientY: 0, bubbles: true }))
-    expect(canvas.classList.contains('dragging')).toBe(true)
-    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 0, clientY: 0, bubbles: true }))
-    expect(canvas.classList.contains('dragging')).toBe(false)
-  })
-
   it('wheel emits one onChange with zoom_around at the cursor and the expected factor', () => {
     const zoomed = { sentinel: 'zoomed' } as unknown as Viewport
     viewport.zoom_around.mockReturnValue(zoomed)
