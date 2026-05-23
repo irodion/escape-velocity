@@ -62,6 +62,55 @@ impl Viewport {
             inner: CoreViewport::new(Complex64::new(re, im), zoom, width, height),
         })
     }
+
+    /// Return a new viewport panned by `(dx_pixels, dy_pixels)` canvas
+    /// pixels (sub-pixel deltas allowed). Validates finite inputs at
+    /// the JS↔WASM boundary; the math itself lives in `fractal_core`.
+    ///
+    /// Sign convention is the same as `fractal_core::Viewport::pan_by_pixels`:
+    /// positive `dx_pixels` shifts the rendered image right on screen,
+    /// positive `dy_pixels` shifts it down.
+    #[wasm_bindgen]
+    pub fn pan_by_pixels(&self, dx_pixels: f64, dy_pixels: f64) -> Result<Viewport, JsError> {
+        if !dx_pixels.is_finite() {
+            return Err(JsError::new("pan_by_pixels: dx_pixels must be finite"));
+        }
+        if !dy_pixels.is_finite() {
+            return Err(JsError::new("pan_by_pixels: dy_pixels must be finite"));
+        }
+        Ok(Self {
+            inner: self.inner.pan_by_pixels(dx_pixels, dy_pixels),
+        })
+    }
+
+    /// Return a new viewport whose zoom is `self.zoom * factor`
+    /// (clamped to `[MIN_ZOOM, MAX_ZOOM]` inside `fractal_core`) with
+    /// `center` adjusted so the complex-plane point under
+    /// `(pixel_x, pixel_y)` is invariant across the step.
+    ///
+    /// Validates finite inputs and `factor > 0` at the boundary —
+    /// `factor <= 0` would invert orientation, which is meaningless
+    /// for wheel-zoom UX.
+    #[wasm_bindgen]
+    pub fn zoom_around(
+        &self,
+        pixel_x: f64,
+        pixel_y: f64,
+        factor: f64,
+    ) -> Result<Viewport, JsError> {
+        if !pixel_x.is_finite() {
+            return Err(JsError::new("zoom_around: pixel_x must be finite"));
+        }
+        if !pixel_y.is_finite() {
+            return Err(JsError::new("zoom_around: pixel_y must be finite"));
+        }
+        if !factor.is_finite() || factor <= 0.0 {
+            return Err(JsError::new("zoom_around: factor must be finite and > 0"));
+        }
+        Ok(Self {
+            inner: self.inner.zoom_around(pixel_x, pixel_y, factor),
+        })
+    }
 }
 
 /// Compute the iteration buffer for `viewport` and return a pointer
