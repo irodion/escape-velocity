@@ -83,19 +83,23 @@ fn colorize_histogram(nus: &[f32], palette: Palette, max_iter: u32, out: &mut Ve
     // Pass 1 — count escapers per integer bin. `nu` is bounded above
     // by `max_iter` (the loop exits earlier with NaN otherwise) and
     // bounded below by `i + 1 − log₂(log₂(BAILOUT_SQR)/2)`, which can
-    // dip slightly negative for first-iteration escapers; clamp
-    // negative and over-range `floor(nu)` so the index is always a
-    // valid bin position.
+    // dip negative for first-iteration escapers far from the set —
+    // clamp `k` into `[0, max_iter]` so those escapers still appear
+    // in the distribution. Without this, a viewport composed entirely
+    // of negative-`nu` pixels would land `total = 0` and paint
+    // all-black on pass 2 even though every pixel escaped; clamping
+    // here keeps Pass 1 and Pass 2 (which clamps the same way for
+    // the CDF lookup) in lockstep.
     let bin_count = (max_iter as usize) + 1;
+    let last_idx = bin_count - 1;
     let mut bins: Vec<u32> = vec![0; bin_count];
     for &nu in nus {
         if !nu.is_finite() {
             continue;
         }
-        let k = nu.floor() as i64;
-        if (0..bin_count as i64).contains(&k) {
-            bins[k as usize] = bins[k as usize].saturating_add(1);
-        }
+        let k_signed = nu.floor() as i64;
+        let k = k_signed.clamp(0, last_idx as i64) as usize;
+        bins[k] = bins[k].saturating_add(1);
     }
 
     let total: u64 = bins.iter().map(|&b| u64::from(b)).sum();
@@ -122,7 +126,6 @@ fn colorize_histogram(nus: &[f32], palette: Palette, max_iter: u32, out: &mut Ve
     // pass 1 — keeping the two passes consistent forecloses a
     // latent asymmetry where ±Inf would skip the bin count yet
     // still land at a clamped colour.
-    let last_idx = bin_count - 1;
     for &nu in nus {
         if !nu.is_finite() {
             out.extend_from_slice(&[0, 0, 0, 255]);
@@ -268,6 +271,37 @@ mod tests {
                 let a = colorize(&nus, p, m, MAX_ITER);
                 let b = colorize(&nus, p, m, MAX_ITER);
                 assert_eq!(a, b, "{p:?}/{m:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn histogram_all_negative_finite_input_is_not_painted_as_inside_set() {
+        // A viewport composed entirely of fast escapers can produce
+        // only negative `nu` values under the smooth formula at
+        // bailout 256 (`nu ≈ i - 2 - δ` for `i = 1`). The Histogram
+        // mode must treat those as escapers — not collapse them to
+        // bin 0's count being zero and short-circuiting to all-black,
+        // which would mis-paint them as if they were inside the set.
+        let nus = vec![-1.5_f32, -0.7, -2.0, -3.25];
+        for &p in ALL_PALETTES {
+            let out = colorize(&nus, p, NormalizationMode::Histogram, MAX_ITER);
+            assert_eq!(out.len(), nus.len() * 4);
+            // The escapers should land at `t = cdf[0]`, sampled at the
+            // first stop. For Grayscale that's RGB (0, 0, 0), so the
+            // "not painted as inside-set" check there would be
+            // vacuous — but every other palette has a non-black first
+            // stop, which proves the all-NaN short-circuit didn't
+            // fire.
+            if p == Palette::Grayscale {
+                continue;
+            }
+            for pixel in out.chunks_exact(4) {
+                assert_ne!(
+                    pixel,
+                    &[0, 0, 0, 255],
+                    "{p:?}: negative-nu escapers painted as inside-set",
+                );
             }
         }
     }
