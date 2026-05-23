@@ -52,6 +52,12 @@ export class InputController {
   private dragState: DragState | null = null
 
   private readonly handleMouseDown = (event: MouseEvent): void => {
+    // Only the primary (left) button starts a pan. Right- and
+    // middle-click belong to the browser (context menu, paste); they
+    // would otherwise leave the controller in a stuck drag state
+    // because the matching `mouseup` may never reach us — e.g. the
+    // context menu swallows it.
+    if (event.button !== 0) return
     const ctx = this.canvas.getContext('2d')
     if (ctx === null) return
     this.dragState = {

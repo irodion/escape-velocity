@@ -261,6 +261,27 @@ describe('InputController', () => {
     expect(viewport.zoom_around).toHaveBeenCalledWith(100, 50, 1.25 ** (-(1 * 800) / 100))
   })
 
+  it('ignores non-primary mouse buttons on mousedown', () => {
+    new InputController(canvas, viewport as unknown as Viewport, onChange)
+
+    // Right-click (button 2) and middle-click (button 1) should not
+    // start a drag. No snapshot, no class toggle, no document
+    // listeners (so a later mousemove/mouseup is also a no-op).
+    canvas.dispatchEvent(
+      new MouseEvent('mousedown', { button: 2, clientX: 50, clientY: 50, bubbles: true }),
+    )
+    canvas.dispatchEvent(
+      new MouseEvent('mousedown', { button: 1, clientX: 50, clientY: 50, bubbles: true }),
+    )
+    expect(ctxStub.getImageData).not.toHaveBeenCalled()
+    expect(canvas.classList.contains('dragging')).toBe(false)
+
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 80, clientY: 70, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 80, clientY: 70, bubbles: true }))
+    expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
   it('bails out cleanly when the canvas rect is 0×0 (display:none, detached)', () => {
     // A degenerate rect (display:none, detached element, etc.) would
     // otherwise divide by zero — producing NaN/Infinity which would
