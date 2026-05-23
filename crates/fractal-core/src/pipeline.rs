@@ -66,7 +66,10 @@ pub fn colorize(nus: &[f32], palette: Palette, mode: NormalizationMode, max_iter
 fn colorize_cycled(nus: &[f32], palette: Palette, out: &mut Vec<u8>) {
     let period = palette.period();
     for &nu in nus {
-        if nu.is_nan() {
+        // Treat any non-finite `nu` (NaN inside-set sentinel and the
+        // theoretical ±Inf escapees alike) as opaque black so the
+        // mode-dispatch behaviour is symmetric with Histogram pass 1.
+        if !nu.is_finite() {
             out.extend_from_slice(&[0, 0, 0, 255]);
             continue;
         }
@@ -114,10 +117,14 @@ fn colorize_histogram(nus: &[f32], palette: Palette, max_iter: u32, out: &mut Ve
     let total_f = total as f32;
 
     // Pass 2 — palette lookup with linear interpolation between
-    // adjacent CDF entries by the fractional part of `nu`.
+    // adjacent CDF entries by the fractional part of `nu`. Reject
+    // any non-finite value (NaN and ±Inf alike) symmetrically with
+    // pass 1 — keeping the two passes consistent forecloses a
+    // latent asymmetry where ±Inf would skip the bin count yet
+    // still land at a clamped colour.
     let last_idx = bin_count - 1;
     for &nu in nus {
-        if nu.is_nan() {
+        if !nu.is_finite() {
             out.extend_from_slice(&[0, 0, 0, 255]);
             continue;
         }

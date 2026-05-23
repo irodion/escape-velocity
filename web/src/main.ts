@@ -1,14 +1,18 @@
-import init, { Viewport } from '../wasm/fractal_wasm.js'
-import { Controls } from './controls.js'
+import init, { NormalizationMode, Palette, Viewport } from '../wasm/fractal_wasm.js'
+import { Controls, type NormalisationName, type PaletteName, type Settings } from './controls.js'
 import { InputController } from './input.js'
-import { render } from './render.js'
+import { recolorize, render } from './render.js'
 
 // Slice 1 hardcoded initial render constants (PRD #2); Slice 3 promotes
 // `maxIter` and canvas dimensions to form-driven `let`s but preserves
-// the same opening view.
+// the same opening view. Slice 4 adds palette + normalisation; the
+// page lands on coloured smooth output (Viridis + Cycled) rather than
+// the grey baseline.
 const INITIAL_WIDTH = 800
 const INITIAL_HEIGHT = 600
 const INITIAL_MAX_ITER = 256
+const INITIAL_PALETTE: PaletteName = 'viridis'
+const INITIAL_NORMALISATION: NormalisationName = 'cycled'
 const CENTER_RE = -0.7435
 const CENTER_IM = 0.1314
 const ZOOM = 200.0
@@ -29,41 +33,87 @@ if (!(controlsForm instanceof HTMLFormElement)) {
 const wasm = await init()
 
 let viewport = new Viewport(CENTER_RE, CENTER_IM, ZOOM, INITIAL_WIDTH, INITIAL_HEIGHT)
-let maxIter = INITIAL_MAX_ITER
-// `Viewport` from wasm-bindgen does not expose `width`/`height` as JS
-// getters (keeping the WASM surface minimal). Track the current dims
-// here so the resolution-change branch can detect a real resize.
-let currentWidth = INITIAL_WIDTH
-let currentHeight = INITIAL_HEIGHT
+let current: Settings = {
+  maxIter: INITIAL_MAX_ITER,
+  width: INITIAL_WIDTH,
+  height: INITIAL_HEIGHT,
+  palette: INITIAL_PALETTE,
+  normalisation: INITIAL_NORMALISATION,
+}
+
+const paletteEnum = (name: PaletteName): Palette => {
+  switch (name) {
+    case 'grayscale':
+      return Palette.Grayscale
+    case 'viridis':
+      return Palette.Viridis
+    case 'magma':
+      return Palette.Magma
+    case 'inferno':
+      return Palette.Inferno
+    case 'twilight':
+      return Palette.Twilight
+  }
+}
+
+const modeEnum = (name: NormalisationName): NormalizationMode => {
+  switch (name) {
+    case 'cycled':
+      return NormalizationMode.Cycled
+    case 'histogram':
+      return NormalizationMode.Histogram
+  }
+}
 
 const rerender = (): void => {
-  render(viewport, ctx, wasm, maxIter)
+  render(
+    viewport,
+    ctx,
+    wasm,
+    current.maxIter,
+    paletteEnum(current.palette),
+    modeEnum(current.normalisation),
+  )
 }
 
 rerender()
 
 const inputController = new InputController(canvas, viewport, (next) => {
+  // Every pan/zoom invalidates the iteration buffer by definition —
+  // route through `render`, which refreshes the cache too.
   viewport = next
   rerender()
 })
 
-new Controls(
-  controlsForm,
-  { maxIter: INITIAL_MAX_ITER, width: INITIAL_WIDTH, height: INITIAL_HEIGHT },
-  ({ maxIter: nextMaxIter, width, height }) => {
-    maxIter = nextMaxIter
-    if (width !== currentWidth || height !== currentHeight) {
+new Controls(controlsForm, current, (next) => {
+  const recomputeNeeded =
+    next.maxIter !== current.maxIter ||
+    next.width !== current.width ||
+    next.height !== current.height
+  const visualOnly =
+    !recomputeNeeded &&
+    (next.palette !== current.palette || next.normalisation !== current.normalisation)
+
+  if (recomputeNeeded) {
+    if (next.width !== current.width || next.height !== current.height) {
       // Lockstep: viewport dims, canvas internal dims, and the
       // controller's viewport reference all advance together so
       // `putImageData` receives a buffer sized to the canvas and
       // subsequent pan/zoom uses the right `pixel_scale`.
-      viewport = viewport.with_resolution(width, height)
-      canvas.width = width
-      canvas.height = height
-      currentWidth = width
-      currentHeight = height
+      viewport = viewport.with_resolution(next.width, next.height)
+      canvas.width = next.width
+      canvas.height = next.height
       inputController.setViewport(viewport)
     }
+    current = next
     rerender()
-  },
-)
+  } else if (visualOnly) {
+    // Fast path: the ADR-0002 payoff. Same iteration buffer, new
+    // palette / normalisation, no recompute.
+    current = next
+    recolorize(ctx, wasm, paletteEnum(next.palette), modeEnum(next.normalisation))
+  } else {
+    // No-op change (the user re-selected the same value).
+    current = next
+  }
+})
