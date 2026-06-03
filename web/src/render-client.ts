@@ -22,11 +22,23 @@ import type {
  * mouse-wheel scrub, a slider drag) can issue requests far faster than
  * the worker drains them; replaying every one would render a flipbook
  * of stale frames the user already scrolled past. Instead this client
- * keeps a single pending slot — at most one queued request — and a
- * newer request overwrites the older. When the in-flight response
- * returns, only the latest queued request is dispatched; everything in
- * between is dropped. The user always converges on the last viewport
- * they actually asked for.
+ * keeps a single pending slot — at most one queued request. When the
+ * in-flight response returns, only the latest queued request is
+ * dispatched; everything in between is dropped. The user always
+ * converges on the last viewport they actually asked for.
+ *
+ * Collapsing into one slot is *not* a blind overwrite, because the two
+ * request kinds are not interchangeable. A render recomputes the
+ * iteration buffer for a viewport and colourises it; a recolorize only
+ * re-tints whatever buffer the worker last computed. So a render can
+ * supersede anything queued — it is a superset, carrying its own
+ * current colours — but a recolorize must never *replace* a queued
+ * render: doing so would strand the user's latest pan/zoom and leave
+ * the worker re-colourising a stale viewport (or, before the first
+ * render completes, recolourising a buffer that does not exist yet).
+ * Instead a recolorize *folds* its palette/mode into a pending render,
+ * which already carries colour fields, so the single eventual dispatch
+ * both recomputes the right frame and paints it in the right colours.
  *
  * Each issued request carries a monotonically increasing `epoch`. A
  * response is painted only if its epoch is still the latest one issued;
@@ -102,14 +114,25 @@ function flush(): void {
 }
 
 /**
- * Stamp a request with the next epoch, record its target context, and
- * place it in the single pending slot (overwriting any older queued
- * request — that's the coalescing), then try to flush.
+ * Stamp a request with the next epoch, record its target context, place
+ * it in the single pending slot, then try to flush.
+ *
+ * Coalescing rule (see the module doc): a recolorize folds its colours
+ * into a pending render rather than replacing it, so the queued compute
+ * is never lost. Every other case is newest-wins.
  */
 function issue(req: ClientRequest, ctx: CanvasRenderingContext2D): void {
   latestEpoch += 1
-  pending = { ...req, epoch: latestEpoch }
   targetCtx = ctx
+  if (req.kind === 'recolorize' && pending !== null && pending.kind === 'render') {
+    // Keep the queued render's compute (its newer viewport); swap only
+    // the colours it will be painted with. Bump the epoch onto the
+    // merged render so its eventual response is recognised as the latest
+    // frame and paints.
+    pending = { ...pending, palette: req.palette, mode: req.mode, epoch: latestEpoch }
+  } else {
+    pending = { ...req, epoch: latestEpoch }
+  }
   flush()
 }
 
@@ -158,11 +181,16 @@ export function render(
 /**
  * Re-colorize the worker's cached iteration buffer with new palette /
  * normalisation — the ADR-0002 fast path, no recompute. Fire-and-
- * forget, same coalescing as `render`. Relies on the worker having
- * rendered at least once; a recolorize that reaches the worker with no
- * cached buffer throws there (the programmer-error guard in the
- * handler), which surfaces as an unhandled worker error rather than a
- * silent no-op.
+ * forget.
+ *
+ * If a render is already queued, this folds its colours into that
+ * render (see `issue`) rather than replacing it, so a visual-only
+ * change can never strand a pending compute. A recolorize is only
+ * dispatched as a standalone request when the worker already holds a
+ * computed buffer (the in-flight or last-completed render); reaching
+ * the worker with no cached buffer would throw there (the
+ * programmer-error guard in the handler), which the fold rule makes
+ * unreachable in normal dispatch ordering.
  */
 export function recolorize(
   ctx: CanvasRenderingContext2D,

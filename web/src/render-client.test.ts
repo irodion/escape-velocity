@@ -59,8 +59,14 @@ interface RenderClient {
 }
 
 const VIEWPORT = { centerRe: -0.5, centerIm: 0, zoom: 1, width: 2, height: 2 }
+// A distinct viewport (different centre + zoom) so a fold test can prove
+// the queued render's compute survives — i.e. the dispatched request
+// still carries THIS viewport, not the earlier one.
+const VIEWPORT_B = { centerRe: 0.25, centerIm: 0.5, zoom: 4, width: 2, height: 2 }
 const PALETTE_VIRIDIS = 1
+const PALETTE_MAGMA = 2
 const MODE_CYCLED = 0
+const MODE_HISTOGRAM = 1
 const KIND_MANDELBROT = 0
 
 // A fresh module per test resets the client's module-level coalescing
@@ -192,6 +198,66 @@ describe('render-client', () => {
     expect(worker.posted).toHaveLength(2)
     expect((worker.posted[1] as { kind: string }).kind).toBe('recolorize')
     expect((worker.posted[1] as RenderRequest).epoch).toBe(2)
+  })
+
+  it('folds a recolorize into a pending render instead of replacing it', async () => {
+    // P1 regression: render A in flight, render B queued (newer
+    // viewport), then a palette change. The recolorize must not evict
+    // B — otherwise B's viewport is never computed and the worker
+    // re-tints A's stale buffer. Instead B's compute is kept and the
+    // new colours are folded in.
+    const { client, worker } = await loadClient()
+    const ctx = makeCtx()
+    deliver(worker, readyMsg())
+
+    doRender(client, ctx) // render A → epoch 1, posted, in flight
+    client.render(
+      VIEWPORT_B,
+      ctx,
+      256,
+      PALETTE_VIRIDIS,
+      MODE_CYCLED,
+      KIND_MANDELBROT,
+      -0.7,
+      0.27015,
+    ) // render B → epoch 2, queued
+    client.recolorize(ctx, PALETTE_MAGMA, MODE_HISTOGRAM) // epoch 3 → folds into B
+
+    expect(worker.posted).toHaveLength(1) // worker still busy with A
+
+    deliver(worker, response(1)) // A returns → flush the merged request
+
+    expect(worker.posted).toHaveLength(2)
+    const dispatched = worker.posted[1] as RenderRequest
+    // The compute survives: it is still a render carrying B's viewport.
+    expect(dispatched.kind).toBe('render')
+    expect(dispatched.centerRe).toBe(VIEWPORT_B.centerRe)
+    expect(dispatched.centerIm).toBe(VIEWPORT_B.centerIm)
+    expect(dispatched.zoom).toBe(VIEWPORT_B.zoom)
+    // The colours are the recolorize's, folded in.
+    expect(dispatched.palette).toBe(PALETTE_MAGMA)
+    expect(dispatched.mode).toBe(MODE_HISTOGRAM)
+    // Epoch bumped onto the merged render so its response still paints.
+    expect(dispatched.epoch).toBe(3)
+  })
+
+  it('folds a recolorize into a render still buffered before `ready` (no empty-cache wedge)', async () => {
+    // A recolorize issued before the boot render has completed must not
+    // replace that render — sending a standalone recolorize to a worker
+    // with no cached buffer throws there and wedges the client.
+    const { client, worker } = await loadClient()
+    const ctx = makeCtx()
+
+    doRender(client, ctx) // boot render → buffered (not ready yet)
+    client.recolorize(ctx, PALETTE_MAGMA, MODE_HISTOGRAM) // folds into the buffered render
+
+    deliver(worker, readyMsg())
+
+    expect(worker.posted).toHaveLength(1)
+    const dispatched = worker.posted[0] as RenderRequest
+    expect(dispatched.kind).toBe('render')
+    expect(dispatched.palette).toBe(PALETTE_MAGMA)
+    expect(dispatched.mode).toBe(MODE_HISTOGRAM)
   })
 
   it('buffers a render issued before `ready` and posts it once ready arrives', async () => {
