@@ -49,6 +49,20 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - name: Install nightly Rust for the WASM thread build (Slice 7B)
+        # wasm-bindgen-rayon needs `std` recompiled with shared-memory
+        # atomics (`build-std`), which is nightly-only and requires the
+        # `rust-src` component. Pinned to a fixed date so the multicore
+        # artifact is reproducible. Native fmt/clippy/test stay on the
+        # stable toolchain above (the `rust` job); only the WASM build
+        # uses this nightly, invoked via `rustup run` in the build step
+        # and the `wasm:build` npm script.
+        uses: dtolnay/rust-toolchain@aad518f59d88bae90133242f9ddac7f8bbc5dddf # action pinned; toolchain set below
+        with:
+          toolchain: nightly-2025-11-15
+          targets: wasm32-unknown-unknown
+          components: rust-src
+
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Install wasm-pack
@@ -58,8 +72,8 @@ jobs:
         # every CI run (~30s with a warm registry).
         run: cargo install --locked wasm-pack@0.15.0
 
-      - name: Build WASM artifact
-        run: wasm-pack build crates/fractal-wasm --target web --out-dir ../../web/wasm --release
+      - name: Build WASM artifact (nightly + build-std for WASM threads, Slice 7B)
+        run: rustup run nightly-2025-11-15 wasm-pack build crates/fractal-wasm --target web --out-dir ../../web/wasm --release
 
       - uses: pnpm/action-setup@v4
         with:

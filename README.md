@@ -118,8 +118,14 @@ escape-velocity/
 
 Toolchain:
 
-- **Rust** pinned via [`rust-toolchain.toml`](rust-toolchain.toml) (currently `1.94.1`).
+- **Rust (stable)** pinned via [`rust-toolchain.toml`](rust-toolchain.toml) (currently `1.94.1`).
   Install [`rustup`](https://rustup.rs) and `cd` into the repo — it auto-installs the right toolchain.
+  This is the toolchain for everyday work: `cargo test`, `clippy`, `fmt`.
+- **Rust (nightly), for the WASM build only** — since Slice 7, the browser artifact links
+  shared-memory WASM threads (`wasm-bindgen-rayon`, ADR-0007), which needs `std` recompiled
+  with atomics (`build-std`) — nightly-only. Install the pinned nightly once:
+  `rustup toolchain install nightly-2025-11-15 --component rust-src --target wasm32-unknown-unknown`.
+  The `wasm:build` script (and CI) invoke it via `rustup run`; native work stays on stable.
 - **Node.js 24** (current LTS).
 - **pnpm 10.30.1** — pinned in `web/package.json#packageManager`. Run `corepack enable` if you don't have it.
 - [`wasm-pack`](https://rustwasm.github.io/wasm-pack/) — needed from Slice 1 onward.

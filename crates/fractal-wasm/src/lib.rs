@@ -30,6 +30,19 @@ use fractal_core::{
 };
 use wasm_bindgen::prelude::*;
 
+/// Stand up the rayon thread pool that backs `fractal_core::compute`'s
+/// parallel iterator inside the worker (ADR-0007, Slice 7). Re-exported
+/// from `wasm-bindgen-rayon` so the generated glue surfaces it as the
+/// async JS function `initThreadPool(numThreads)`. The worker awaits it
+/// once, after `init()` and before announcing readiness, so the pool is
+/// live before the first `compute` runs (Slice 7C). On a single-core
+/// device a pool of one is created and rendering still works.
+///
+/// This is the *only* export Slice 7 adds; `compute` / `colorize` and
+/// their lengths, and the `Viewport` class, keep their exact Slice 6
+/// signatures — the parallelism is internal to `compute`.
+pub use wasm_bindgen_rayon::init_thread_pool;
+
 thread_local! {
     static ITER_BUFFER: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
     static RGBA_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };

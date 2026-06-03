@@ -11,3 +11,9 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 fractal-core = { path = "../fractal-core" }
 wasm-bindgen = "0.2"
+# Stands up a shared-memory rayon thread pool inside the worker (Slice
+# 7B). Exposes `init_thread_pool`, re-exported from `lib.rs` as the
+# JS-visible `initThreadPool`. Requires the WASM binary to be built with
+# atomics + build-std — see `.cargo/config.toml` and the `wasm:build`
+# script, both gated to the pinned nightly toolchain.
+wasm-bindgen-rayon = "1.3"
