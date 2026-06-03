@@ -135,13 +135,17 @@ function paint(
   maxIter: number,
   palette: RenderRequest['palette'],
   mode: RenderRequest['mode'],
-): Uint8ClampedArray {
+): Uint8ClampedArray<ArrayBuffer> {
   const rgbaPtr = colorize(iterPtr, iterLen, palette, mode, maxIter)
   const rgbaLen = colorize_len()
-  // View aliases WASM linear memory; the `Uint8ClampedArray` copy
-  // constructor allocates a fresh backing buffer and copies the bytes,
-  // so the returned array is safe to transfer without detaching the
-  // WASM heap.
+  // `view` aliases WASM linear memory, whose buffer is `ArrayBufferLike`
+  // (it becomes `SharedArrayBuffer` once the rayon slice enables shared
+  // memory). Copy into a freshly-allocated, non-shared `ArrayBuffer` so
+  // the result is safe to both `postMessage`-transfer and feed to
+  // `ImageData` on the client — neither accepts a shared-backed view —
+  // and the transfer detaches only this copy, never the WASM heap.
   const view = new Uint8ClampedArray(wasm.memory.buffer, rgbaPtr, rgbaLen)
-  return new Uint8ClampedArray(view)
+  const out = new Uint8ClampedArray(rgbaLen)
+  out.set(view)
+  return out
 }

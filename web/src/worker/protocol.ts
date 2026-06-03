@@ -64,7 +64,13 @@ export interface RenderResponse {
   // Must be copied OUT of WASM linear memory before transfer — sending
   // a view that aliases WASM memory would detach the worker's entire
   // WASM heap.
-  readonly rgba: Uint8ClampedArray
+  //
+  // Pinned to a non-shared `ArrayBuffer` (not the default
+  // `ArrayBufferLike`): the bytes are always a fresh standalone copy, and
+  // `ImageData` / `Transferable` both reject `SharedArrayBuffer`-backed
+  // views. When the rayon slice (ADR-0007) introduces a shared heap, the
+  // copy-out step keeps this response buffer non-shared regardless.
+  readonly rgba: Uint8ClampedArray<ArrayBuffer>
   readonly width: number
   readonly height: number
 }
