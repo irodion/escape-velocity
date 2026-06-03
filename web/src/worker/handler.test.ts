@@ -32,8 +32,13 @@ vi.mock('../../wasm/fractal_wasm.js', () => {
   }
 })
 
-import type { InitOutput } from '../../wasm/fractal_wasm.js'
 import * as wasmModule from '../../wasm/fractal_wasm.js'
+import {
+  FractalKind,
+  type InitOutput,
+  NormalizationMode,
+  Palette,
+} from '../../wasm/fractal_wasm.js'
 import { createWorkerState, handleMessage } from './handler.js'
 import type { RecolorizeRequest, RenderRequest } from './protocol.js'
 
@@ -44,17 +49,31 @@ interface MockedWasm {
   colorize_len: ReturnType<typeof vi.fn>
 }
 
+// Shape the mock `Viewport` class records its constructor inputs under,
+// so a test can read them back off the value handed to `compute`.
+interface MockViewport {
+  re: number
+  im: number
+  zoom: number
+  width: number
+  height: number
+}
+
 const wasm = wasmModule as unknown as MockedWasm
 
-const PALETTE_VIRIDIS = 1
-const PALETTE_MAGMA = 2
-const MODE_CYCLED = 0
-const MODE_HISTOGRAM = 1
-const KIND_MANDELBROT = 0
-const KIND_JULIA = 1
-// Pinned to the Slice 5C UI defaults so a divergence in the production
-// constants surfaces as a test failure here rather than silently
-// passing through the WASM seam.
+// Enum discriminants come from the (mocked) WASM module's own exports
+// rather than re-declared literals, so request construction and the
+// matching assertions read from one source — a drift between the two
+// can't hide behind duplicated magic numbers. Importing them as values
+// also carries the real enum types, which removes the per-field
+// `as RenderRequest['palette']` casts below.
+//
+// `cRe` / `cIm` stay pinned literals: the handler module defines no
+// shared default for them (it is pure compute), and the only runtime
+// source is `main.ts`'s boot constants — importing that into a worker
+// unit test would invert the dependency and drag in DOM bootstrap. The
+// pinned pair mirrors `render.test.ts` and still flags a divergence in
+// the Slice 5C UI defaults as a failure here.
 const C_RE_DEFAULT = -0.7
 const C_IM_DEFAULT = 0.27015
 
@@ -77,9 +96,9 @@ function renderRequest(overrides: Partial<RenderRequest> = {}): RenderRequest {
     centerIm: 0,
     zoom: 1,
     maxIter: 256,
-    palette: PALETTE_VIRIDIS as RenderRequest['palette'],
-    mode: MODE_CYCLED as RenderRequest['mode'],
-    fractalKind: KIND_MANDELBROT as RenderRequest['fractalKind'],
+    palette: Palette.Viridis,
+    mode: NormalizationMode.Cycled,
+    fractalKind: FractalKind.Mandelbrot,
     cRe: C_RE_DEFAULT,
     cIm: C_IM_DEFAULT,
     ...overrides,
@@ -90,8 +109,8 @@ function recolorizeRequest(overrides: Partial<RecolorizeRequest> = {}): Recolori
   return {
     kind: 'recolorize',
     epoch: 2,
-    palette: PALETTE_MAGMA as RecolorizeRequest['palette'],
-    mode: MODE_HISTOGRAM as RecolorizeRequest['mode'],
+    palette: Palette.Magma,
+    mode: NormalizationMode.Histogram,
     ...overrides,
   }
 }
@@ -122,16 +141,23 @@ describe('handleMessage', () => {
     expect(response.height).toBe(2)
   })
 
-  it('forwards (kind, cRe, cIm) into the compute call positionally', () => {
-    handleMessage(
-      createWorkerState(),
-      renderRequest({ fractalKind: KIND_JULIA as RenderRequest['fractalKind'] }),
-      wasmInit,
-    )
+  it('reconstructs the Viewport and forwards (kind, cRe, cIm) into the compute call positionally', () => {
+    handleMessage(createWorkerState(), renderRequest({ fractalKind: FractalKind.Julia }), wasmInit)
     expect(wasm.compute).toHaveBeenCalledTimes(1)
-    const args = wasm.compute.mock.calls[0] as [unknown, number, number, number, number]
+    const args = wasm.compute.mock.calls[0] as [MockViewport, number, number, number, number]
+    // arg 0 is the freshly reconstructed Viewport — assert the flat
+    // primitives landed in the constructor in the right order so a
+    // regression in `new Viewport(centerRe, centerIm, zoom, width,
+    // height)` fails loudly here rather than silently rendering the
+    // wrong frame.
+    const viewport = args[0]
+    expect(viewport.re).toBe(-0.5)
+    expect(viewport.im).toBe(0)
+    expect(viewport.zoom).toBe(1)
+    expect(viewport.width).toBe(2)
+    expect(viewport.height).toBe(2)
     expect(args[1]).toBe(256)
-    expect(args[2]).toBe(KIND_JULIA)
+    expect(args[2]).toBe(FractalKind.Julia)
     expect(args[3]).toBe(C_RE_DEFAULT)
     expect(args[4]).toBe(C_IM_DEFAULT)
   })
@@ -147,8 +173,8 @@ describe('handleMessage', () => {
     const secondCall = wasm.colorize.mock.calls[1] as [number, number, number, number, number]
     expect(secondCall[0]).toBe(iterPtr)
     expect(secondCall[1]).toBe(iterLen)
-    expect(secondCall[2]).toBe(PALETTE_MAGMA)
-    expect(secondCall[3]).toBe(MODE_HISTOGRAM)
+    expect(secondCall[2]).toBe(Palette.Magma)
+    expect(secondCall[3]).toBe(NormalizationMode.Histogram)
     // Recolorize echoes the cached render's dimensions.
     expect(response.width).toBe(2)
     expect(response.height).toBe(2)
@@ -176,17 +202,13 @@ describe('handleMessage', () => {
     // Julia, so each render must call `compute` again.
     const first = handleMessage(
       createWorkerState(),
-      renderRequest({ fractalKind: KIND_MANDELBROT as RenderRequest['fractalKind'] }),
+      renderRequest({ fractalKind: FractalKind.Mandelbrot }),
       wasmInit,
     )
-    handleMessage(
-      first.state,
-      renderRequest({ fractalKind: KIND_JULIA as RenderRequest['fractalKind'] }),
-      wasmInit,
-    )
+    handleMessage(first.state, renderRequest({ fractalKind: FractalKind.Julia }), wasmInit)
     expect(wasm.compute).toHaveBeenCalledTimes(2)
-    expect((wasm.compute.mock.calls[0] as unknown[])[2]).toBe(KIND_MANDELBROT)
-    expect((wasm.compute.mock.calls[1] as unknown[])[2]).toBe(KIND_JULIA)
+    expect((wasm.compute.mock.calls[0] as unknown[])[2]).toBe(FractalKind.Mandelbrot)
+    expect((wasm.compute.mock.calls[1] as unknown[])[2]).toBe(FractalKind.Julia)
   })
 
   it('two renders in Julia mode with different (cRe, cIm) trigger two distinct computes', () => {
@@ -196,7 +218,7 @@ describe('handleMessage', () => {
     const first = handleMessage(
       createWorkerState(),
       renderRequest({
-        fractalKind: KIND_JULIA as RenderRequest['fractalKind'],
+        fractalKind: FractalKind.Julia,
         cRe: -0.7,
         cIm: 0.27015,
       }),
@@ -205,7 +227,7 @@ describe('handleMessage', () => {
     handleMessage(
       first.state,
       renderRequest({
-        fractalKind: KIND_JULIA as RenderRequest['fractalKind'],
+        fractalKind: FractalKind.Julia,
         cRe: -0.123,
         cIm: 0.745,
       }),
