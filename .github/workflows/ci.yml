@@ -53,15 +53,12 @@ jobs:
         # wasm-bindgen-rayon needs `std` recompiled with shared-memory
         # atomics (`build-std`), which is nightly-only and requires the
         # `rust-src` component. Pinned to a fixed date so the multicore
-        # artifact is reproducible. Native fmt/clippy/test stay on the
-        # stable toolchain above (the `rust` job); only the WASM build
-        # uses this nightly, invoked via `rustup run` in the build step
-        # and the `wasm:build` npm script.
-        uses: dtolnay/rust-toolchain@aad518f59d88bae90133242f9ddac7f8bbc5dddf # action pinned; toolchain set below
-        with:
-          toolchain: nightly-2025-11-15
-          targets: wasm32-unknown-unknown
-          components: rust-src
+        # artifact is reproducible. Installed explicitly via rustup (which
+        # is preinstalled on the runner) rather than the dtolnay action,
+        # so `rustup run nightly-2025-11-15` in the build step and the
+        # `wasm:build` script resolves it by name. Native fmt/clippy/test
+        # stay on the stable toolchain above (the `rust` job).
+        run: rustup toolchain install nightly-2025-11-15 --profile minimal --component rust-src --target wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
