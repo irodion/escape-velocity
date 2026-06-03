@@ -4,3 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Mandelbrot/Julia escape-time iteration and coloring. Pure Rust, no WebAssembly dependency."
+
+[dependencies]
+# Data-parallelism for the per-pixel escape-time loop (Slice 7A). Pure
+# Rust with no WebAssembly dependency, so the crate keeps its charter:
+# natively it fans out over OS threads; in the browser the worker drives
+# it through the `wasm-bindgen-rayon` thread pool (wired in Slice 7C).
+rayon = "1"

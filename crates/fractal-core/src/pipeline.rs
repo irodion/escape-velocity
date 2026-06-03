@@ -13,6 +13,8 @@
 //! explicitly (NaN compares unequal to itself, so `==` would silently
 //! treat every NaN as an escape).
 
+use rayon::prelude::*;
+
 use crate::complex::Complex64;
 use crate::escape_time::escape_time;
 use crate::fractal_kind::FractalKind;
@@ -36,30 +38,40 @@ const ORIGIN: Complex64 = Complex64::new(0.0, 0.0);
 ///   the filled Julia set for the chosen `c` parameter.
 ///
 /// Inside-set pixels are encoded as [`f32::NAN`]. The match on `kind`
-/// is hoisted out of the inner loop so the branch predictor sees the
-/// same target every pixel within one frame.
+/// is hoisted out of the per-pixel work so the branch predictor sees
+/// the same target every pixel within one frame.
+///
+/// The per-pixel escape-time calls are independent, so the work fans
+/// out across a `rayon` parallel iterator over the flat row-major pixel
+/// index `i` (`px = i % width`, `py = i / width`). Collecting an
+/// [`IndexedParallelIterator`] preserves index order, so the result is
+/// bit-identical to a serial walk and the `buf[py * width + px]` layout
+/// is unchanged — parallelism is invisible in the output. Natively this
+/// uses rayon's OS-thread pool; in the browser the worker first stands
+/// up a `wasm-bindgen-rayon` thread pool (Slice 7C) that backs the same
+/// `par_iter`.
 pub fn compute(viewport: &Viewport, max_iter: u32, kind: FractalKind) -> Vec<f32> {
-    let total = (viewport.width as usize) * (viewport.height as usize);
-    let mut buf = Vec::with_capacity(total);
+    let width = viewport.width as usize;
+    let total = width * (viewport.height as usize);
+    // Map a flat index back to its pixel and the complex point under it.
+    let point_at = |i: usize| {
+        let px = (i % width) as u32;
+        let py = (i / width) as u32;
+        viewport.pixel_to_complex(px, py)
+    };
+    // Dispatch on `kind` once, outside the parallel map, so the hot
+    // closure carries a single escape-time rule per frame — the same
+    // branch-hoist the serial nested loops relied on.
     match kind {
-        FractalKind::Mandelbrot => {
-            for py in 0..viewport.height {
-                for px in 0..viewport.width {
-                    let p = viewport.pixel_to_complex(px, py);
-                    buf.push(escape_time(ORIGIN, p, max_iter));
-                }
-            }
-        }
-        FractalKind::Julia { c } => {
-            for py in 0..viewport.height {
-                for px in 0..viewport.width {
-                    let p = viewport.pixel_to_complex(px, py);
-                    buf.push(escape_time(p, c, max_iter));
-                }
-            }
-        }
+        FractalKind::Mandelbrot => (0..total)
+            .into_par_iter()
+            .map(|i| escape_time(ORIGIN, point_at(i), max_iter))
+            .collect(),
+        FractalKind::Julia { c } => (0..total)
+            .into_par_iter()
+            .map(|i| escape_time(point_at(i), c, max_iter))
+            .collect(),
     }
-    buf
 }
 
 /// Convert smooth-iteration counts to RGBA8 pixels.
@@ -299,6 +311,88 @@ mod tests {
             m, j,
             "Mandelbrot and Julia compute produced identical buffers"
         );
+    }
+
+    // --- compute() parallelism -----------------------------------------
+
+    // A serial reference computation, structurally the pre-Slice-7A
+    // nested-loop walk. The parallel `compute` must reproduce this
+    // buffer exactly; keeping the reference inline pins the contract
+    // independently of the production implementation.
+    fn compute_serial(viewport: &Viewport, max_iter: u32, kind: FractalKind) -> Vec<f32> {
+        let total = (viewport.width as usize) * (viewport.height as usize);
+        let mut buf = Vec::with_capacity(total);
+        match kind {
+            FractalKind::Mandelbrot => {
+                for py in 0..viewport.height {
+                    for px in 0..viewport.width {
+                        buf.push(escape_time(
+                            ORIGIN,
+                            viewport.pixel_to_complex(px, py),
+                            max_iter,
+                        ));
+                    }
+                }
+            }
+            FractalKind::Julia { c } => {
+                for py in 0..viewport.height {
+                    for px in 0..viewport.width {
+                        buf.push(escape_time(viewport.pixel_to_complex(px, py), c, max_iter));
+                    }
+                }
+            }
+        }
+        buf
+    }
+
+    // Compare two `nu` buffers by raw bits, so the `f32::NAN` inside-set
+    // sentinels compare equal by representation (`NaN == NaN` is false,
+    // which would make a plain `assert_eq!` on the buffers spuriously
+    // fail wherever the set is hit).
+    fn assert_buffers_bit_identical(a: &[f32], b: &[f32], ctx: &str) {
+        assert_eq!(a.len(), b.len(), "length mismatch: {ctx}");
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            assert_eq!(x.to_bits(), y.to_bits(), "pixel {i} differs: {ctx}");
+        }
+    }
+
+    // A deliberately non-square viewport (width != height): an
+    // accidental `px`/`py` transpose in the flat-index → pixel mapping
+    // would still produce a buffer of the right length, so only a
+    // non-square frame makes the bit-for-bit comparison catch it.
+    // Centred in the seahorse valley so the buffer mixes inside-set
+    // (NaN) and escaping pixels, exercising both arms of the bit check.
+    // Small enough to keep the test snappy.
+    fn mapping_viewport() -> Viewport {
+        Viewport::new(Complex64::new(-0.7435, 0.1314), 200.0, 173, 97)
+    }
+
+    #[test]
+    fn parallel_compute_matches_serial_reference_bit_for_bit() {
+        // The load-bearing parallelism test: the parallel `compute`
+        // output must equal the serial reference element-for-element for
+        // both fractal families, guarding the flat-index mapping against
+        // a transpose or off-by-one that would silently corrupt or
+        // mirror the image.
+        let vp = mapping_viewport();
+        for kind in [FractalKind::Mandelbrot, FractalKind::Julia { c: JULIA_C }] {
+            let parallel = compute(&vp, MAX_ITER, kind);
+            let serial = compute_serial(&vp, MAX_ITER, kind);
+            assert_buffers_bit_identical(&parallel, &serial, &format!("{kind:?}"));
+        }
+    }
+
+    #[test]
+    fn parallel_compute_is_deterministic_across_repeated_calls() {
+        // Repeated calls must return identical buffers, so the
+        // non-deterministic scheduling of the parallel iterator can
+        // never leak into the output.
+        let vp = mapping_viewport();
+        for kind in [FractalKind::Mandelbrot, FractalKind::Julia { c: JULIA_C }] {
+            let first = compute(&vp, MAX_ITER, kind);
+            let second = compute(&vp, MAX_ITER, kind);
+            assert_buffers_bit_identical(&first, &second, &format!("{kind:?}"));
+        }
     }
 
     // --- colorize() shape ----------------------------------------------
