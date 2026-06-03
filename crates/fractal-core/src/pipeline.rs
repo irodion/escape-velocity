@@ -42,34 +42,36 @@ const ORIGIN: Complex64 = Complex64::new(0.0, 0.0);
 /// the same target every pixel within one frame.
 ///
 /// The per-pixel escape-time calls are independent, so the work fans
-/// out across a `rayon` parallel iterator over the flat row-major pixel
-/// index `i` (`px = i % width`, `py = i / width`). Collecting an
-/// [`IndexedParallelIterator`] preserves index order, so the result is
-/// bit-identical to a serial walk and the `buf[py * width + px]` layout
-/// is unchanged — parallelism is invisible in the output. Natively this
-/// uses rayon's OS-thread pool; in the browser the worker first stands
-/// up a `wasm-bindgen-rayon` thread pool (Slice 7C) that backs the same
-/// `par_iter`.
+/// out across a `rayon` parallel iterator over pixel **rows**: each row
+/// `py` contributes its `width` pixels in order via `flat_map_iter`, and
+/// rayon preserves the produced order, so the buffer stays row-major
+/// (`buf[py * width + px]`) and bit-identical to a serial walk —
+/// parallelism is invisible in the output. Iterating rows keeps the
+/// parallel bound a `u32` row count and never forms the `width * height`
+/// product, which would overflow `usize` on a 32-bit target such as
+/// wasm32. Natively this uses rayon's OS-thread pool; in the browser the
+/// worker first stands up a `wasm-bindgen-rayon` thread pool (Slice 7C)
+/// that backs the same `par_iter`.
 pub fn compute(viewport: &Viewport, max_iter: u32, kind: FractalKind) -> Vec<f32> {
-    let width = viewport.width as usize;
-    let total = width * (viewport.height as usize);
-    // Map a flat index back to its pixel and the complex point under it.
-    let point_at = |i: usize| {
-        let px = (i % width) as u32;
-        let py = (i / width) as u32;
-        viewport.pixel_to_complex(px, py)
-    };
+    let width = viewport.width;
+    let height = viewport.height;
     // Dispatch on `kind` once, outside the parallel map, so the hot
     // closure carries a single escape-time rule per frame — the same
     // branch-hoist the serial nested loops relied on.
     match kind {
-        FractalKind::Mandelbrot => (0..total)
+        FractalKind::Mandelbrot => (0..height)
             .into_par_iter()
-            .map(|i| escape_time(ORIGIN, point_at(i), max_iter))
+            .flat_map_iter(|py| {
+                (0..width)
+                    .map(move |px| escape_time(ORIGIN, viewport.pixel_to_complex(px, py), max_iter))
+            })
             .collect(),
-        FractalKind::Julia { c } => (0..total)
+        FractalKind::Julia { c } => (0..height)
             .into_par_iter()
-            .map(|i| escape_time(point_at(i), c, max_iter))
+            .flat_map_iter(|py| {
+                (0..width)
+                    .map(move |px| escape_time(viewport.pixel_to_complex(px, py), c, max_iter))
+            })
             .collect(),
     }
 }
