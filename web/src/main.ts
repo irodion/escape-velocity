@@ -7,7 +7,7 @@ import {
   type Settings,
 } from './controls.js'
 import { InputController } from './input.js'
-import { recolorize, render } from './render.js'
+import { recolorize, render } from './render-client.js'
 
 // Slice 1 hardcoded initial render constants (PRD #2); Slice 3 promotes
 // `maxIter` and canvas dimensions to form-driven `let`s but preserves
@@ -50,7 +50,12 @@ if (!(controlsForm instanceof HTMLFormElement)) {
   throw new Error('form#controls not found in index.html')
 }
 
-const wasm = await init()
+// Initialise the WASM module on the main thread so the synchronous
+// `Viewport` class (used by the input controller and the dispatcher
+// below) is callable. The render worker bootstraps its own separate
+// WASM instance; the main thread no longer needs the `InitOutput`
+// handle now that pixel work has moved off-thread.
+await init()
 
 let viewport = new Viewport(CENTER_RE, CENTER_IM, ZOOM, INITIAL_WIDTH, INITIAL_HEIGHT)
 let current: Settings = {
@@ -98,10 +103,19 @@ const kindEnum = (name: FractalMode): FractalKind => {
 }
 
 const rerender = (): void => {
+  // Flatten the `Viewport` instance into primitives: the wasm-bindgen
+  // class cannot survive `postMessage` to the worker, so the client
+  // ships the five accessor values and the worker rebuilds a Viewport
+  // against its own WASM instance.
   render(
-    viewport,
+    {
+      centerRe: viewport.center_re(),
+      centerIm: viewport.center_im(),
+      zoom: viewport.zoom(),
+      width: viewport.width(),
+      height: viewport.height(),
+    },
     ctx,
-    wasm,
     current.maxIter,
     paletteEnum(current.palette),
     modeEnum(current.normalisation),
@@ -212,7 +226,7 @@ const controls = new Controls(controlsForm, current, (rawNext) => {
   // iteration buffer, new palette / normalisation, no recompute.
   if (next.palette !== current.palette || next.normalisation !== current.normalisation) {
     current = next
-    recolorize(ctx, wasm, paletteEnum(next.palette), modeEnum(next.normalisation))
+    recolorize(ctx, paletteEnum(next.palette), modeEnum(next.normalisation))
     return
   }
 
