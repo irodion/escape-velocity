@@ -373,12 +373,15 @@ describe('InputController', () => {
     expect(onChange).toHaveBeenLastCalledWith(next)
   })
 
-  it('a mousedown during a pending Settle commits the zoom once and cancels the timer', () => {
+  it('a pan starting mid-zoom carries the zoom into the pan without an extra render', () => {
     const zoomed = makeZoomResult(0.8)
     viewport.zoom_around.mockReturnValue(zoomed)
-    viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
+    const panned = { sentinel: 'panned' } as unknown as Viewport
+    zoomed.pan_by_pixels.mockReturnValue(panned)
+    const onInvalidate = vi.fn()
+    new InputController(canvas, viewport as unknown as Viewport, onChange, onInvalidate)
 
+    // Zoom scrub: Settle pending, currentViewport advanced to `zoomed`.
     canvas.dispatchEvent(
       new WheelEvent('wheel', {
         deltaY: 100,
@@ -390,14 +393,22 @@ describe('InputController', () => {
     )
     expect(onChange).not.toHaveBeenCalled()
 
-    // Pan starts before the Settle fires: it commits the zoom immediately.
+    // Pan starts before the Settle fires: no render is issued here (firing the
+    // zoom's Settle would paint an intermediate frame mid-drag); any in-flight
+    // render is discarded so it can't clobber the pan snapshot.
     canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
-    expect(onChange).toHaveBeenCalledTimes(1)
-    expect(onChange).toHaveBeenCalledWith(zoomed)
-
-    // The cancelled timer must not fire a second (stale) onChange.
+    expect(onChange).not.toHaveBeenCalled()
+    expect(onInvalidate).toHaveBeenCalledTimes(1)
+    // The cancelled Settle can't fire later either.
     vi.advanceTimersByTime(WHEEL_SETTLE_MS)
+    expect(onChange).not.toHaveBeenCalled()
+
+    // Mouseup issues the single render: the zoomed viewport, panned. The pan
+    // operates on the accumulated zoom via the start viewport.
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 130, clientY: 70, bubbles: true }))
+    expect(zoomed.pan_by_pixels).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith(panned)
   })
 
   it('discards in-flight renders on notches while a Preview is active, but not the first', () => {

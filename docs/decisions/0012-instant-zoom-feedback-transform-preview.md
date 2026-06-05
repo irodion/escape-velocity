@@ -54,9 +54,12 @@ already has, built from four parts:
    mid-gesture, so the transform accumulates undisturbed until the Settle frame
    clears it.
 
-A new gesture (including a pan `mousedown`) that starts inside the pending-Settle
-window cancels the debounce and commits the zoom immediately; the authoritative
-Viewport is already exact, so the committed math is always correct. Zoom-out is
+A new gesture (a pan `mousedown`) that starts inside the pending-Settle window
+tears the Preview down *without* rendering: the authoritative Viewport already
+carries the accumulated zoom, so it rides into the pan's start viewport and the
+pan's mouseup issues the single render — the zoom is never separately
+re-rendered (and an already in-flight Settle render is discarded so it can't
+paint mid-drag). Zoom-out is
 letterboxed with black (the outside-the-set colour) and zoom-in overflow is
 clipped with `overflow: hidden`. Pan is untouched; the zoom transform is
 additive.

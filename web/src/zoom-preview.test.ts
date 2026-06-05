@@ -9,6 +9,13 @@ import { applyZoomNotch, beginZoomPreview, zoomPreviewTransform } from './zoom-p
 // exercised with the real bounds. The pixel/anchor args do not affect the
 // zoom here (the cursor-invariant centre maths lives in `fractal-core` and
 // is tested there); this double isolates the matrix accumulation.
+//
+// Source of truth: `MIN_ZOOM` / `MAX_ZOOM` in
+// `crates/fractal-core/src/viewport.rs`. They are mirrored here (not
+// imported) because this is a self-contained test fake — the real clamp
+// runs in Rust inside `zoom_around`, and these values only need to make the
+// fake clamp the same way. The wasm bindings don't currently export them;
+// if they ever do, import from there and delete this mirror.
 const MIN_ZOOM = 0.25
 const MAX_ZOOM = 1e13
 

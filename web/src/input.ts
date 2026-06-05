@@ -79,7 +79,9 @@ export const WHEEL_SETTLE_MS = 150
  * frame replaces the Preview when it paints — `render-client`'s `paint`
  * clears the transform in the same tick, an atomic swap (so this file
  * never clears it). A new gesture (a pan `mousedown`) inside the pending
- * Settle window commits the zoom immediately so pan never double-renders.
+ * Settle window tears the Preview down without rendering: the accumulated
+ * zoom rides in the pan's start viewport, so the pan's mouseup issues a
+ * single render rather than the zoom and the pan each issuing one.
  */
 export class InputController {
   private currentViewport: Viewport
@@ -105,15 +107,16 @@ export class InputController {
     if (event.button !== 0) return
     const ctx = this.canvas.getContext('2d')
     if (ctx === null) return
-    // A pan starting inside a pending zoom Settle commits the zoom now, so
-    // the deferred Settle can't fire later and clobber the pan's viewport
-    // (ADR-0012 boundary rule). The committed viewport is already exact.
-    this.commitPendingZoom()
-    // Drop any active Preview transform before snapshotting/measuring: a
-    // live transform skews `getBoundingClientRect`, which would scale the
-    // pan delta computed on mouseup (not just the preview). Pan operates on
-    // an untransformed canvas.
+    // A pan starting mid-zoom tears the Preview down *without* rendering: the
+    // accumulated zoom already rides in `currentViewport` (the start viewport
+    // below), so firing the zoom's Settle here would only dispatch an
+    // intermediate frame that paints mid-drag and clobbers the pan snapshot.
+    // The pan's mouseup issues the single render. Clearing the transform also
+    // means the snapshot/measurement below read an untransformed canvas (a
+    // live transform would scale the pan delta). Discard any already in-flight
+    // render for the same reason (ADR-0012 boundary rule).
     this.clearZoomPreview()
+    this.onInvalidate()
     this.dragState = {
       startClientX: event.clientX,
       startClientY: event.clientY,
@@ -240,21 +243,20 @@ export class InputController {
     this.onChange(this.zoomPreview.viewport)
   }
 
-  /** Flush a pending Settle immediately (a new gesture is starting). */
-  private commitPendingZoom(): void {
-    if (this.settleTimer === undefined) return
-    clearTimeout(this.settleTimer)
-    this.settleZoom()
-  }
-
   /**
-   * Drop any active wheel Preview and clear its CSS transform. The
-   * committed viewport is unchanged (it was advanced per notch); this only
-   * tears down the visual Preview so a starting pan reads an untransformed
-   * canvas. The eventual in-flight Settle render is superseded by the pan's
-   * own `onChange` via the render epoch.
+   * Tear down any wheel Preview: cancel a pending Settle, drop the
+   * accumulator and cached rect, and clear the CSS transform. Fires **no**
+   * `onChange` — the accumulated zoom already rides in `currentViewport`
+   * (advanced per notch), so a caller (a starting pan, or an external
+   * `setViewport`) carries it forward without an extra render. Clearing the
+   * transform also lets a starting pan read an untransformed
+   * `getBoundingClientRect` (a live transform would scale the pan delta).
    */
   private clearZoomPreview(): void {
+    if (this.settleTimer !== undefined) {
+      clearTimeout(this.settleTimer)
+      this.settleTimer = undefined
+    }
     this.zoomPreview = null
     this.scrubRect = null
     if (this.canvas.style.transform !== '') {
@@ -296,10 +298,6 @@ export class InputController {
    * caller's render paints would anchor the new zoom to the wrong box).
    */
   setViewport(viewport: Viewport): void {
-    if (this.settleTimer !== undefined) {
-      clearTimeout(this.settleTimer)
-      this.settleTimer = undefined
-    }
     this.clearZoomPreview()
     this.currentViewport = viewport
   }
