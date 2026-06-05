@@ -8,16 +8,30 @@ import {
   type Settings,
 } from './controls.js'
 import { InputController } from './input.js'
+import { createPwaLifecycle } from './pwa-lifecycle.js'
+import { mountPwaUi } from './pwa-ui.js'
 import { recolorize, render } from './render-client.js'
 
-// Slice 8A: register the production service worker so the app precaches for
-// offline use. With `registerType: 'prompt'` a newly built SW waits instead
-// of auto-reloading; surfacing the "new version — reload" prompt and the
-// install button is Slice 8B (the pwa-lifecycle controller). Here we only
-// need the precache to activate, so a bare registration is enough. This is a
-// no-op in dev: `devOptions.enabled` is false, so `registerSW` is a stub and
-// no service worker is installed while iterating (ADR-0009).
-registerSW({ immediate: true })
+// PWA install + update lifecycle (Slice 8B). The controller (a deep, tested
+// state machine) is fed the real platform adapters here: the SW registrar is
+// vite-plugin-pwa's `registerSW` (which still registers immediately so the
+// app precaches — the Slice 8A behaviour — but now routes its update
+// callbacks into the controller), and the install-event source is `window`'s
+// `beforeinstallprompt` / `appinstalled`. The thin presenter then renders the
+// Install button + update toast. All a no-op in dev: `devOptions.enabled` is
+// false, so `registerSW` is a stub and `beforeinstallprompt` never fires.
+const pwa = createPwaLifecycle({
+  registerServiceWorker: ({ onNeedRefresh, onOfflineReady }) =>
+    registerSW({ immediate: true, onNeedRefresh, onOfflineReady }),
+  installPrompt: {
+    onBeforeInstallPrompt: (handler) =>
+      window.addEventListener('beforeinstallprompt', (event) => {
+        handler(event as unknown as Parameters<typeof handler>[0])
+      }),
+    onAppInstalled: (handler) => window.addEventListener('appinstalled', () => handler()),
+  },
+})
+mountPwaUi(pwa, document.body)
 
 // Slice 1 hardcoded initial render constants (PRD #2); Slice 3 promotes
 // `maxIter` and canvas dimensions to form-driven `let`s but preserves
