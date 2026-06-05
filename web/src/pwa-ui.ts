@@ -42,12 +42,24 @@ export function mountPwaUi(lifecycle: PwaLifecycle, container: HTMLElement): voi
 
   let offlineNoticeTimer: ReturnType<typeof setTimeout> | undefined
 
+  const clearOfflineNoticeTimer = (): void => {
+    if (offlineNoticeTimer !== undefined) {
+      clearTimeout(offlineNoticeTimer)
+      offlineNoticeTimer = undefined
+    }
+  }
+
   const renderState = (state: PwaLifecycleState): void => {
     installButton.hidden = !state.installable
 
     if (state.needRefresh) {
       // A waiting update takes precedence over the offline notice: it needs an
-      // explicit Reload to activate the new build.
+      // explicit Reload to activate the new build. Cancel any pending
+      // offline-ready auto-dismiss timer first — its callback calls the
+      // controller's `dismiss()`, which clears BOTH notices, so left running
+      // it would silently wipe this update prompt a few seconds after it
+      // appeared.
+      clearOfflineNoticeTimer()
       message.textContent = 'New version available.'
       reloadButton.hidden = false
       toast.hidden = false
@@ -57,9 +69,15 @@ export function mountPwaUi(lifecycle: PwaLifecycle, container: HTMLElement): voi
       toast.hidden = false
       // Transient: auto-dismiss so the confirmation doesn't linger forever.
       if (offlineNoticeTimer === undefined) {
-        offlineNoticeTimer = setTimeout(() => lifecycle.dismiss(), OFFLINE_NOTICE_MS)
+        offlineNoticeTimer = setTimeout(() => {
+          offlineNoticeTimer = undefined
+          lifecycle.dismiss()
+        }, OFFLINE_NOTICE_MS)
       }
     } else {
+      // Notices gone (e.g. user dismissed) — drop any pending timer so it
+      // can't fire a stale `dismiss()` later.
+      clearOfflineNoticeTimer()
       toast.hidden = true
     }
   }
