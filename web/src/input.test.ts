@@ -2,18 +2,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Viewport } from '../wasm/fractal_wasm.js'
 import { InputController } from './input.js'
 
-// Plain JS double for Viewport. The InputController only ever calls
-// `pan_by_pixels` and `zoom_around` on its viewport, so a structural
-// double covers the surface. Each method is a `vi.fn` returning a
-// sentinel viewport so we can assert which call produced the
-// `onChange` argument.
+// Plain JS double for Viewport. The InputController calls
+// `pan_by_pixels` / `zoom_around` (which produce new viewports) and
+// reads `width()` / `height()` (the logical grid it maps CSS deltas
+// onto), so a structural double covers the surface. The pan/zoom
+// methods are `vi.fn`s returning a sentinel viewport so we can assert
+// which call produced the `onChange` argument; `width`/`height` report
+// the logical 800×600 grid (the production display size).
 function makeViewportDouble(): {
   pan_by_pixels: ReturnType<typeof vi.fn>
   zoom_around: ReturnType<typeof vi.fn>
+  width: ReturnType<typeof vi.fn>
+  height: ReturnType<typeof vi.fn>
 } {
   return {
     pan_by_pixels: vi.fn(),
     zoom_around: vi.fn(),
+    width: vi.fn(() => 800),
+    height: vi.fn(() => 600),
   }
 }
 
@@ -111,6 +117,27 @@ describe('InputController', () => {
     // so internal deltas equal CSS deltas. Sign matches Slice 2A:
     // positive delta = image shifts in that direction.
     expect(viewport.pan_by_pixels).toHaveBeenCalledTimes(1)
+    expect(viewport.pan_by_pixels).toHaveBeenCalledWith(50, 40)
+  })
+
+  it('maps pan by the logical viewport grid, not the render buffer, when they differ', () => {
+    // Slice 3: at render scale 2 the canvas buffer (1600×1200) is twice
+    // the viewport's logical grid (800×600), while the CSS display stays
+    // 800×600. A drag must move the viewport by *logical* pixels (so the
+    // pan distance is independent of render scale) — i.e. scaled by
+    // viewport.width()/rect.width (= 1 here), NOT canvas.width/rect.width
+    // (= 2), which would double the pan.
+    canvas.width = 1600
+    canvas.height = 1200
+    setRect(canvas, { width: 800, height: 600 })
+    const panned = { sentinel: 'panned' } as unknown as Viewport
+    viewport.pan_by_pixels.mockReturnValue(panned)
+    new InputController(canvas, viewport as unknown as Viewport, onChange)
+
+    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 150, clientY: 90, bubbles: true }))
+    // dx = 50, dy = 40 CSS; logical mapping (800/800, 600/600) leaves
+    // them unchanged. Buffer mapping would have produced (100, 80).
     expect(viewport.pan_by_pixels).toHaveBeenCalledWith(50, 40)
   })
 

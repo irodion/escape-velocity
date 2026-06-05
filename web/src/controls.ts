@@ -18,8 +18,10 @@
  * `<input type="number">` fires `change` on blur or Enter — both match
  * the desired UX.
  *
- * Resolution `<select>` values are encoded `"<width>x<height>"`
- * (no spaces) so the parser is a single `split('x').map(Number)`.
+ * The render-scale `<select>` values are plain multipliers (`"0.5"`,
+ * `"1"`, `"2"`) parsed with a single `Number(...)`. The multiplier is a
+ * pure quality knob: it scales the render buffer relative to the display
+ * size without changing the framing (ADR-0011 / Slice 3).
  *
  * `palette`, `normalisation`, and `mode` values are tag strings —
  * `main.ts` maps them to the wasm-bindgen enum discriminants at the
@@ -40,8 +42,12 @@ export type FractalMode = 'mandelbrot' | 'julia'
 
 export interface Settings {
   readonly maxIter: number
-  readonly width: number
-  readonly height: number
+  /**
+   * Render-buffer multiplier relative to the display size (a quality /
+   * sharpness knob, not a framing knob). `1` renders one buffer pixel
+   * per display pixel; `2` supersamples; `0.5` subsamples for speed.
+   */
+  readonly renderScale: number
   readonly palette: PaletteName
   readonly normalisation: NormalisationName
   readonly mode: FractalMode
@@ -55,7 +61,7 @@ export class Controls {
 
   constructor(form: HTMLFormElement, initial: Settings, onChange: (settings: Settings) => void) {
     const maxIterSelect = form.elements.namedItem('max-iter')
-    const resolutionSelect = form.elements.namedItem('resolution')
+    const renderScaleSelect = form.elements.namedItem('render-scale')
     const paletteSelect = form.elements.namedItem('palette')
     const normalisationSelect = form.elements.namedItem('normalisation')
     const modeSelect = form.elements.namedItem('mode')
@@ -64,8 +70,8 @@ export class Controls {
     if (!(maxIterSelect instanceof HTMLSelectElement)) {
       throw new Error('Controls: form is missing a <select name="max-iter">')
     }
-    if (!(resolutionSelect instanceof HTMLSelectElement)) {
-      throw new Error('Controls: form is missing a <select name="resolution">')
+    if (!(renderScaleSelect instanceof HTMLSelectElement)) {
+      throw new Error('Controls: form is missing a <select name="render-scale">')
     }
     if (!(paletteSelect instanceof HTMLSelectElement)) {
       throw new Error('Controls: form is missing a <select name="palette">')
@@ -92,11 +98,11 @@ export class Controls {
     if (maxIterSelect.value === '') {
       throw new Error(`Controls: initial.maxIter=${initial.maxIter} has no matching <option>`)
     }
-    const initialResolution = `${initial.width}x${initial.height}`
-    resolutionSelect.value = initialResolution
-    if (resolutionSelect.value === '') {
+    const initialRenderScale = String(initial.renderScale)
+    renderScaleSelect.value = initialRenderScale
+    if (renderScaleSelect.value === '') {
       throw new Error(
-        `Controls: initial resolution "${initialResolution}" has no matching <option>`,
+        `Controls: initial render scale "${initialRenderScale}" has no matching <option>`,
       )
     }
     paletteSelect.value = initial.palette
@@ -143,11 +149,10 @@ export class Controls {
     // above, every parser/cast below sees a well-formed string.
     const emit = (): void => {
       const maxIter = Number(maxIterSelect.value)
-      const [width, height] = resolutionSelect.value.split('x').map(Number)
+      const renderScale = Number(renderScaleSelect.value)
       onChange({
         maxIter,
-        width,
-        height,
+        renderScale,
         palette: paletteSelect.value as PaletteName,
         normalisation: normalisationSelect.value as NormalisationName,
         mode: modeSelect.value as FractalMode,
@@ -167,7 +172,7 @@ export class Controls {
     // are the boundary where we want a recompute (or, for the visual-
     // only selects, a fast re-colorize).
     maxIterSelect.addEventListener('change', emit)
-    resolutionSelect.addEventListener('change', emit)
+    renderScaleSelect.addEventListener('change', emit)
     paletteSelect.addEventListener('change', emit)
     normalisationSelect.addEventListener('change', emit)
     modeSelect.addEventListener('change', () => {

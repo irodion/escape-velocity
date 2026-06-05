@@ -39,8 +39,13 @@ mountPwaUi(pwa, document.body)
 // page lands on coloured smooth output (Viridis + Cycled) rather than
 // the grey baseline. Slice 5C inherits the same Slice 1 zoom — the
 // per-mode default views below are consulted only on a mode toggle.
-const INITIAL_WIDTH = 800
-const INITIAL_HEIGHT = 600
+// The display (logical) size of the viewport in CSS pixels. The render
+// buffer is this size times the render-scale multiplier (below); the
+// viewport itself — and therefore the framing — always uses the display
+// size, so changing render scale never alters what region is shown.
+const DISPLAY_WIDTH = 800
+const DISPLAY_HEIGHT = 600
+const INITIAL_RENDER_SCALE = 1
 const INITIAL_MAX_ITER = 256
 const INITIAL_PALETTE: PaletteName = 'viridis'
 const INITIAL_NORMALISATION: NormalisationName = 'cycled'
@@ -81,11 +86,10 @@ if (!(controlsForm instanceof HTMLFormElement)) {
 // handle now that pixel work has moved off-thread.
 await init()
 
-let viewport = new Viewport(CENTER_RE, CENTER_IM, ZOOM, INITIAL_WIDTH, INITIAL_HEIGHT)
+let viewport = new Viewport(CENTER_RE, CENTER_IM, ZOOM, DISPLAY_WIDTH, DISPLAY_HEIGHT)
 let current: Settings = {
   maxIter: INITIAL_MAX_ITER,
-  width: INITIAL_WIDTH,
-  height: INITIAL_HEIGHT,
+  renderScale: INITIAL_RENDER_SCALE,
   palette: INITIAL_PALETTE,
   normalisation: INITIAL_NORMALISATION,
   mode: INITIAL_MODE,
@@ -126,18 +130,38 @@ const kindEnum = (name: FractalMode): FractalKind => {
   }
 }
 
+// Size the canvas backing store (the render buffer) to the display
+// size times the current render-scale multiplier. The CSS display size
+// is fixed at 800×600 (index.html), so a scale >1 supersamples and <1
+// subsamples; the browser scales the buffer to the display box. Must be
+// kept in lockstep with the dimensions `rerender` sends the worker, so
+// `putImageData` receives a buffer sized to the canvas.
+const syncCanvasToRenderScale = (): void => {
+  canvas.width = Math.round(viewport.width() * current.renderScale)
+  canvas.height = Math.round(viewport.height() * current.renderScale)
+}
+
 const rerender = (): void => {
   // Flatten the `Viewport` instance into primitives: the wasm-bindgen
   // class cannot survive `postMessage` to the worker, so the client
-  // ships the five accessor values and the worker rebuilds a Viewport
+  // ships the accessor values and the worker rebuilds a Viewport
   // against its own WASM instance.
+  //
+  // Render scale is applied here, at the render seam: the buffer is the
+  // display size × scale, and `zoom` is multiplied by the same scale so
+  // the larger/smaller buffer covers the *same* framing at higher/lower
+  // sample density (ADR-0011 keys pixel-scale to a fixed reference
+  // width, so dimensions × zoom must move together to hold the window).
+  // The stored `viewport` keeps the true zoom and display dimensions —
+  // this scaling is a transient property of the render request only.
+  const scale = current.renderScale
   render(
     {
       centerRe: viewport.center_re(),
       centerIm: viewport.center_im(),
-      zoom: viewport.zoom(),
-      width: viewport.width(),
-      height: viewport.height(),
+      zoom: viewport.zoom() * scale,
+      width: Math.round(viewport.width() * scale),
+      height: Math.round(viewport.height() * scale),
     },
     ctx,
     current.maxIter,
@@ -149,6 +173,7 @@ const rerender = (): void => {
   )
 }
 
+syncCanvasToRenderScale()
 rerender()
 
 const inputController = new InputController(canvas, viewport, (next) => {
@@ -197,38 +222,28 @@ const controls = new Controls(controlsForm, current, (rawNext) => {
   // Branch 1: fractal-family change. Reset the viewport to the
   // canonical "starting frame" for the new family so the user lands
   // on the whole structure instead of an arbitrary deep dive that
-  // happened to be loaded for the previous family. Resolution is
-  // preserved.
-  //
-  // Today only one form control fires per `change` event, so a
-  // mode-change snapshot can't simultaneously differ in resolution
-  // — but the canvas-dim sync here keeps branch 1 symmetric with
-  // branch 2 so a future multi-field commit (e.g. a "reset to
-  // defaults" button) can't desync the canvas-vs-viewport sizes and
-  // throw inside `new ImageData(...)`.
+  // happened to be loaded for the previous family. The viewport always
+  // uses the fixed display size; render scale is applied later, at the
+  // render seam, so it is not part of the viewport here.
   if (next.mode !== current.mode) {
     const view = next.mode === 'mandelbrot' ? MANDELBROT_DEFAULT_VIEW : JULIA_DEFAULT_VIEW
-    viewport = new Viewport(view.re, view.im, view.zoom, next.width, next.height)
-    if (next.width !== current.width || next.height !== current.height) {
-      canvas.width = next.width
-      canvas.height = next.height
-    }
+    viewport = new Viewport(view.re, view.im, view.zoom, DISPLAY_WIDTH, DISPLAY_HEIGHT)
     inputController.setViewport(viewport)
     current = next
     rerender()
     return
   }
 
-  // Branch 2: resolution change. Lockstep: viewport dims, canvas
-  // internal dims, and the controller's viewport reference all
-  // advance together so `putImageData` receives a buffer sized to the
-  // canvas and subsequent pan/zoom uses the right `pixel_scale`.
-  if (next.width !== current.width || next.height !== current.height) {
-    viewport = viewport.with_resolution(next.width, next.height)
-    canvas.width = next.width
-    canvas.height = next.height
-    inputController.setViewport(viewport)
+  // Branch 2: render-scale change. A pure quality knob: the viewport
+  // (framing) is untouched, so neither the stored viewport nor the
+  // input controller's reference changes. Only the canvas backing-store
+  // size advances — `rerender` re-derives the buffer dimensions and the
+  // scale-compensated zoom from `current.renderScale`. The drag preview
+  // in InputController reads the live `canvas.width`, so it tracks the
+  // new buffer automatically.
+  if (next.renderScale !== current.renderScale) {
     current = next
+    syncCanvasToRenderScale()
     rerender()
     return
   }

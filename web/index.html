@@ -6,9 +6,10 @@
     <title>Escape Velocity</title>
     <style>
       /* The canvas's CSS display size stays at 800×600 across all
-         resolution selections. Resolution becomes a quality knob
-         (super/sub-sampling), not a layout knob — the page never
-         reflows when the user changes it. */
+         render-scale selections. The render-scale multiplier sizes the
+         buffer (super/sub-sampling) without changing the framing or the
+         display size — a pure quality knob, so the page never reflows
+         when the user changes it. */
       canvas#fractal {
         cursor: crosshair;
         width: 800px;
@@ -62,11 +63,10 @@
       </label>
       <label>
         Resolution:
-        <select name="resolution">
-          <option value="400x300">400 × 300</option>
-          <option value="800x600" selected>800 × 600</option>
-          <option value="1200x900">1200 × 900</option>
-          <option value="1600x1200">1600 × 1200</option>
+        <select name="render-scale">
+          <option value="0.5">0.5× (faster)</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2× (sharper)</option>
         </select>
       </label>
       <label>
