@@ -1,38 +1,56 @@
 import { defineConfig, type Plugin } from 'vite'
 
-// wasm-bindgen-rayon's `workerHelpers` stores its spawned thread workers in a
-// module-level `let _workers = await Promise.all(...)`. That variable is
-// written but never read — its sole purpose (per the upstream comment) is to
-// *root* the Worker instances so Firefox doesn't garbage-collect workers that
-// share WebAssembly memory with their parent but aren't otherwise referenced
-// (https://bugzilla.mozilla.org/show_bug.cgi?id=1702191). A production
-// minifier sees a write-only variable and eliminates the store, un-rooting the
-// pool — so after boot Firefox can collect the workers and rendering stalls.
-// Dev is unaffected (unminified), so this only bites the built bundle.
+// Patch wasm-bindgen-rayon's generated `workerHelpers` snippet for two
+// Vite-specific problems. Runs in BOTH dev and build (fix #1 is a dev-only
+// failure; fix #2 a build-only one), and warns loudly if either upstream
+// pattern disappears so a snippet change can't silently drop a fix.
 //
-// Re-root the workers on a global property instead: a write to `globalThis`
-// is an observable side effect that no minifier drops, and it keeps the pool
-// alive for the worker's lifetime exactly as the original did. Build-only —
-// dev keeps the upstream code verbatim. Fails loudly if the upstream snippet
-// shape changes, so the GC protection can't silently regress.
-function preserveRayonWorkerRefs(): Plugin {
+// Fix #1 — dev import resolution. Each spawned thread worker re-imports the
+// glue via a bare *directory* specifier, `import('../../..')` (the wasm-pack
+// package root). Rollup resolves that through package.json at build time, but
+// Vite's dev import-analysis cannot resolve a relative directory import and
+// fails the dev server with "Failed to resolve import '../../..'". Rewrite it
+// to the explicit glue file (`../../../fractal_wasm.js`), which resolves in
+// both dev and build.
+//
+// Fix #2 — build worker retention (Firefox GC, bugzilla 1702191). The snippet
+// keeps its spawned workers alive via a module-level `_workers = await
+// Promise.all(...)` — a variable written but never read, whose sole job is to
+// root the Worker instances so Firefox doesn't collect workers that share
+// WebAssembly memory with their parent. A production minifier eliminates that
+// write-only store, un-rooting the pool so rendering stalls after boot. Re-root
+// on a `globalThis` property instead: a global write is an observable side
+// effect no minifier drops, retaining the pool for the worker's lifetime
+// exactly as the original did. (Harmless in dev, where nothing is minified.)
+function patchRayonWorkerHelper(): Plugin {
+  const dirImport = "import('../../..')"
+  const fileImport = "import('../../../fractal_wasm.js')"
   const retention = '_workers = await Promise.all('
   const rooted = 'globalThis.__wasmBindgenRayonWorkers = await Promise.all('
   return {
-    name: 'preserve-rayon-worker-refs',
-    apply: 'build',
+    name: 'patch-rayon-worker-helper',
     transform(code, id) {
       if (!id.includes('wasm-bindgen-rayon') || !id.endsWith('workerHelpers.js')) return null
-      if (!code.includes(retention)) {
+      let out = code
+      if (out.includes(dirImport)) {
+        out = out.replace(dirImport, fileImport)
+      } else {
         this.warn(
-          'preserve-rayon-worker-refs: the wasm-bindgen-rayon worker-retention ' +
-            'assignment was not found — the snippet may have changed shape. The ' +
-            'Firefox GC protection (bugzilla 1702191) is no longer applied; ' +
-            'update this plugin.',
+          'patch-rayon-worker-helper: the glue directory import was not found — ' +
+            'the snippet may have changed shape; the Vite dev server may fail to ' +
+            'resolve it. Update this plugin.',
         )
-        return null
       }
-      return { code: code.replace(retention, rooted), map: null }
+      if (out.includes(retention)) {
+        out = out.replace(retention, rooted)
+      } else {
+        this.warn(
+          'patch-rayon-worker-helper: the worker-retention assignment was not ' +
+            'found — the snippet may have changed shape; the Firefox GC ' +
+            'protection (bugzilla 1702191) is no longer applied. Update this plugin.',
+        )
+      }
+      return out === code ? null : { code: out, map: null }
     },
   }
 }
@@ -64,10 +82,10 @@ const isExpectedGlueDynamicImportWarning = (code: string | undefined, message: s
 
 export default defineConfig({
   // The render worker is the context that actually calls `startWorkers`
-  // (worker.ts → initThreadPool), so the retention fix must apply to the
-  // worker build; the main build carries a copy of the snippet too, so apply
-  // it there as well for consistency.
-  plugins: [preserveRayonWorkerRefs()],
+  // (worker.ts → initThreadPool), so the patch must apply to the worker build
+  // and to dev (where the top-level plugins transform worker modules); the
+  // main build carries a copy of the snippet too, so apply it there as well.
+  plugins: [patchRayonWorkerHelper()],
   server: {
     headers: crossOriginIsolationHeaders,
   },
@@ -80,7 +98,7 @@ export default defineConfig({
   // `iife` worker format rejects both, so the module format is required.
   worker: {
     format: 'es',
-    plugins: () => [preserveRayonWorkerRefs()],
+    plugins: () => [patchRayonWorkerHelper()],
   },
   build: {
     rollupOptions: {
