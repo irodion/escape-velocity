@@ -13,7 +13,7 @@ set"** — with square pixels preserved, so the image is never distorted.
 The original viewport convention ([viewport.rs](../../crates/fractal-core/src/viewport.rs))
 defined the per-pixel complex-plane scale as:
 
-```
+```text
 pixel_scale = (BASE_RE_SPAN / width) / zoom        // 3.5 / (width · zoom)
 ```
 
@@ -33,7 +33,7 @@ The opposite of "fill the space, reveal more."
 Key the per-pixel scale to a **fixed reference width of 800**, not the actual
 buffer width:
 
-```
+```text
 const REFERENCE_WIDTH: f64 = 800.0;
 pixel_scale = (BASE_RE_SPAN / REFERENCE_WIDTH) / zoom    // (3.5/800) / zoom
 ```
