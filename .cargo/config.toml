@@ -1,0 +1,36 @@
+# WASM thread build configuration (Slice 7B, ADR-0007).
+#
+# `wasm-bindgen-rayon` needs the WASM binary built with shared-memory
+# atomics, and `std` itself recompiled with those features — hence
+# `build-std`, which requires the pinned nightly toolchain + `rust-src`
+# (see the `wasm:build` script and CI). These keys do not affect native
+# builds: the `[target.wasm32-unknown-unknown]` rustflags apply only when
+# targeting wasm, and `build-std` is a no-op unless a build opts into the
+# wasm target under nightly. Native `cargo test`/`clippy` stay on the
+# pinned stable toolchain (rust-toolchain.toml), untouched.
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals",
+  # Atomics alone do not make the memory shared; `--shared-memory` does,
+  # and it requires a `--max-memory` cap. `--import-memory` lets the JS
+  # glue create one SharedArrayBuffer-backed memory and hand the same
+  # instance to the main module and every spawned worker thread, which
+  # is how rayon threads share `fractal-core`'s iteration buffer. Without
+  # these the build still emits `initThreadPool` but the memory is
+  # non-shared and the pool fails at runtime. Max is 4 GiB (wasm32's
+  # ceiling, ADR-0006's f64 zoom ceiling is unaffected).
+  "-C", "link-arg=--shared-memory",
+  "-C", "link-arg=--import-memory",
+  "-C", "link-arg=--max-memory=4294967296",
+  # wasm-bindgen's threading transform needs the thread-local-storage
+  # bootstrap symbols exported so each spawned worker can initialise its
+  # own TLS against the shared memory; without `--export=__wasm_init_tls`
+  # wasm-bindgen aborts with "failed to find `__wasm_init_tls`".
+  "-C", "link-arg=--export=__wasm_init_tls",
+  "-C", "link-arg=--export=__tls_size",
+  "-C", "link-arg=--export=__tls_align",
+  "-C", "link-arg=--export=__tls_base",
+]
+
+[unstable]
+build-std = ["panic_abort", "std"]
