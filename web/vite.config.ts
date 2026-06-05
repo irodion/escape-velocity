@@ -18,8 +18,10 @@ const crossOriginIsolationHeaders = {
 // lands in a shared chunk that every importer — main thread, render worker,
 // and the rayon thread workers — resolves to. Silence only this one warning
 // for the glue (matched by code *and* module) so any genuinely new warning
-// still surfaces. The check is applied to both the app bundle and the worker
-// bundle, which Vite builds in separate Rollup passes.
+// still surfaces. One `build.rollupOptions.onwarn` handler covers both the app
+// and worker bundles: under Vite 8 (Rolldown) the worker-bundle warnings
+// funnel through the top-level build handler, and `worker.rollupOptions`
+// deliberately omits `onwarn` anyway.
 const isExpectedGlueDynamicImportWarning = (code: string | undefined, message: string): boolean =>
   code === 'INEFFECTIVE_DYNAMIC_IMPORT' && message.includes('fractal_wasm.js')
 
@@ -36,12 +38,6 @@ export default defineConfig({
   // `iife` worker format rejects both, so the module format is required.
   worker: {
     format: 'es',
-    rollupOptions: {
-      onwarn(warning, warn) {
-        if (isExpectedGlueDynamicImportWarning(warning.code, warning.message)) return
-        warn(warning)
-      },
-    },
   },
   build: {
     rollupOptions: {
