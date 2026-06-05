@@ -43,6 +43,7 @@ Numbering is zero-padded to four digits and never reused.
 | 0008 | [Host on Cloudflare Pages](0008-host-on-cloudflare-pages.md)                           | Accepted |
 | 0009 | [PWA as a late, dedicated slice](0009-pwa-as-late-slice.md)                            | Accepted |
 | 0010 | [License under GPL-3.0-or-later](0010-gpl-3-license.md)                                | Accepted |
+| 0011 | [Zoom keyed to a fixed reference width, not the buffer width](0011-zoom-keyed-to-reference-width.md) | Accepted |
 
 ## Adding a new ADR
 

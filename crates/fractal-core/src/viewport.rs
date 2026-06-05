@@ -7,23 +7,42 @@
 //!
 //! ## Coordinate convention
 //!
-//! At `zoom = 1.0`, the viewport's real-axis span is `3.5` — the
-//! canonical full-Mandelbrot width. For any zoom, the per-pixel
-//! complex-plane scale is `(3.5 / width) / zoom`, applied symmetrically
-//! to both axes so one pixel is square in the complex plane (the
-//! imaginary-axis span follows from the canvas aspect ratio).
+//! The per-pixel complex-plane scale is `(3.5 / REFERENCE_WIDTH) /
+//! zoom`, keyed to a fixed [`REFERENCE_WIDTH`] of 800 — *not* to the
+//! viewport's actual `width`. It is applied symmetrically to both axes,
+//! so one pixel is square in the complex plane. `zoom` is therefore pure
+//! magnification (complex-plane units per reference pixel): at any zoom,
+//! a wider buffer reveals *more* of the real axis and a taller buffer
+//! more of the imaginary axis, rather than only adding pixel density.
+//! At `width == REFERENCE_WIDTH` and `zoom == 1.0` the real-axis span is
+//! `3.5` — the canonical full-Mandelbrot width, and byte-identical to
+//! the project's pre-ADR-0011 convention.
 //!
 //! Pixel `(0, 0)` is the top-left of the canvas. Image-y grows
 //! downwards; the imaginary axis grows upwards — so the y-mapping is
 //! negated. The geometric centre of the pixel grid maps to
 //! `viewport.center`.
+//!
+//! See ADR-0011 for why the scale is keyed to a fixed reference width
+//! rather than the live buffer width.
 
 use crate::complex::Complex64;
 
-/// At `zoom = 1.0`, the viewport spans this much of the real axis.
-/// 3.5 is wide enough to show the full canonical Mandelbrot set
-/// (`re ∈ [−2.5, 1.0]`).
+/// At `zoom = 1.0` and `width = REFERENCE_WIDTH`, the viewport spans
+/// this much of the real axis. 3.5 is wide enough to show the full
+/// canonical Mandelbrot set (`re ∈ [−2.5, 1.0]`).
 const BASE_RE_SPAN: f64 = 3.5;
+
+/// The buffer width at which `zoom = 1.0` yields a real-axis span of
+/// exactly [`BASE_RE_SPAN`]. The per-pixel scale is keyed to this fixed
+/// value rather than the live buffer `width`, so a larger window reveals
+/// *more* of the plane instead of only adding pixel density (ADR-0011).
+///
+/// 800 is the project's historical default width; pinning the reference
+/// here makes every view at 800 px wide byte-identical to the
+/// pre-ADR-0011 convention, so existing default views and saved zoom
+/// values are unaffected.
+const REFERENCE_WIDTH: f64 = 800.0;
 
 /// Floor for `zoom`. Below `0.25` the set shrinks to a few pixels and
 /// the interaction stops being useful — a UX floor, not a numerical
@@ -57,8 +76,12 @@ impl Viewport {
 
     /// Complex-plane size of one pixel. Identical on both axes
     /// (square pixels in the complex plane).
+    ///
+    /// Keyed to the fixed [`REFERENCE_WIDTH`], not `self.width`, so the
+    /// scale depends only on `zoom` — a wider/taller buffer reveals more
+    /// of the plane rather than shrinking the per-pixel step (ADR-0011).
     pub fn pixel_scale(&self) -> f64 {
-        (BASE_RE_SPAN / f64::from(self.width)) / self.zoom
+        (BASE_RE_SPAN / REFERENCE_WIDTH) / self.zoom
     }
 
     /// Map an integer pixel index to its complex-plane sample point.
@@ -157,26 +180,27 @@ impl Viewport {
     /// Return a viewport at different pixel dimensions, preserving
     /// `center` and `zoom` exactly.
     ///
-    /// `pixel_scale` follows the new `width` per the formula in
-    /// [`Self::pixel_scale`] — doubling `width` halves the per-pixel
-    /// step.
+    /// Under the ADR-0011 convention `pixel_scale` is keyed to
+    /// [`REFERENCE_WIDTH`], so it does **not** change with the new
+    /// dimensions — resizing the buffer changes how much of the plane is
+    /// sampled, not the per-pixel step.
     ///
     /// ## What is preserved
     ///
-    /// The sampled real-axis span is `BASE_RE_SPAN / zoom`, independent
-    /// of `width` — so the real-axis window is preserved across every
-    /// resize, aspect-preserving or not. The sampled imaginary-axis
-    /// span is `(height / width) × BASE_RE_SPAN / zoom` — it depends on
-    /// the aspect ratio. **To preserve the full complex-plane window
-    /// across a resize, callers must pass dimensions with the same
-    /// `height / width` ratio as `self`.** Slice 3's Controls presets
-    /// are all 4:3, matching the default 800×600.
+    /// `center` and `zoom` are preserved exactly; the per-pixel scale is
+    /// unchanged. The sampled real-axis span is `(width /
+    /// REFERENCE_WIDTH) × BASE_RE_SPAN / zoom` and the imaginary span is
+    /// `(height / REFERENCE_WIDTH) × BASE_RE_SPAN / zoom` — both scale
+    /// linearly with the respective dimension. A resize therefore
+    /// *intentionally* reveals more or less of the plane (a wider buffer
+    /// shows more real axis, a taller one more imaginary axis), with
+    /// square pixels and the set's proportions preserved regardless of
+    /// the new aspect ratio. This is what lets the fit-to-window layer
+    /// size the buffer freely to any window shape.
     ///
     /// Validation follows the PR #5 convention: `fractal-core` trusts
-    /// callers, so neither `width == 0` nor aspect-ratio changes are
-    /// rejected here. The `fractal-wasm` binding rejects zero at the
-    /// WASM boundary; the Slice 3B Controls module only emits
-    /// aspect-preserving resizes.
+    /// callers, so `width == 0` is not rejected here. The `fractal-wasm`
+    /// binding rejects zero at the WASM boundary.
     pub fn with_resolution(&self, width: u32, height: u32) -> Viewport {
         Self {
             center: self.center,
@@ -245,13 +269,52 @@ mod tests {
 
     #[test]
     fn re_axis_span_at_zoom_one_is_canonical() {
-        // At zoom = 1.0 the viewport should span exactly 3.5 on the
-        // real axis from pixel 0 to pixel width (one pixel past the
-        // last sample); the sample-to-sample span is one pixel less.
+        // At zoom = 1.0 and width = REFERENCE_WIDTH the viewport should
+        // span exactly 3.5 on the real axis from pixel 0 to pixel width
+        // (one pixel past the last sample); the sample-to-sample span is
+        // one pixel less. This is the ADR-0011 backward-compatibility
+        // anchor: at the reference width the convention is unchanged.
         let vp = Viewport::new(Complex64::new(0.0, 0.0), 1.0, 800, 600);
         let sample_span = vp.pixel_to_complex(vp.width - 1, 0).re - vp.pixel_to_complex(0, 0).re;
         let expected = BASE_RE_SPAN * f64::from(vp.width - 1) / f64::from(vp.width);
         assert!((sample_span - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pixel_scale_keys_off_reference_width_not_buffer_width() {
+        // ADR-0011: the per-pixel scale depends only on `zoom`, fixed to
+        // REFERENCE_WIDTH. At the reference width it equals the legacy
+        // BASE_RE_SPAN / width form (backward compatibility); at any
+        // other width it is the SAME value, not the width-scaled one.
+        let zoom = 3.0;
+        let at_ref = Viewport::new(Complex64::new(0.0, 0.0), zoom, 800, 600);
+        assert_eq!(at_ref.pixel_scale(), (BASE_RE_SPAN / 800.0) / zoom);
+
+        for &(w, h) in &[(400_u32, 300_u32), (1600, 1200), (1920, 1080), (123, 456)] {
+            let vp = Viewport::new(Complex64::new(0.0, 0.0), zoom, w, h);
+            assert_eq!(
+                vp.pixel_scale(),
+                at_ref.pixel_scale(),
+                "pixel_scale should be width-independent, drifted at ({w}, {h})",
+            );
+        }
+    }
+
+    #[test]
+    fn wider_buffer_reveals_more_real_axis() {
+        // The headline ADR-0011 property: at a fixed zoom, a wider buffer
+        // shows strictly more of the real axis (square pixels preserved),
+        // rather than the same span at higher density.
+        let zoom = 1.0;
+        let narrow = Viewport::new(Complex64::new(0.0, 0.0), zoom, 800, 600);
+        let wide = Viewport::new(Complex64::new(0.0, 0.0), zoom, 1600, 600);
+        let narrow_span =
+            narrow.pixel_to_complex(narrow.width - 1, 0).re - narrow.pixel_to_complex(0, 0).re;
+        let wide_span =
+            wide.pixel_to_complex(wide.width - 1, 0).re - wide.pixel_to_complex(0, 0).re;
+        assert!(wide_span > narrow_span);
+        // Pixels stay square: per-pixel step is identical at both widths.
+        assert_eq!(narrow.pixel_scale(), wide.pixel_scale());
     }
 
     // --- pixel_to_complex_f -------------------------------------------
@@ -480,23 +543,11 @@ mod tests {
     }
 
     #[test]
-    fn with_resolution_halves_pixel_scale_at_double_width() {
+    fn with_resolution_preserves_pixel_scale_across_arbitrary_dims() {
+        // ADR-0011: pixel_scale is keyed to REFERENCE_WIDTH, not the live
+        // `width`, so it is invariant under any resize — aspect-changing
+        // or not. (Pre-ADR-0011 this halved at double width.)
         let vp = sample_viewport();
-        let resized = vp.with_resolution(vp.width * 2, vp.height * 2);
-        assert_eq!(resized.pixel_scale(), vp.pixel_scale() / 2.0);
-    }
-
-    #[test]
-    fn with_resolution_preserves_real_axis_span_across_arbitrary_dims() {
-        // pixel_scale × width = BASE_RE_SPAN / zoom is fixed by `zoom`
-        // alone, so the sampled real-axis span is preserved by every
-        // resolution change — including aspect-changing ones. The
-        // imaginary-axis span depends on `height / width` and is NOT
-        // preserved when the aspect ratio changes; the doc comment
-        // calls out same-aspect-ratio as a caller precondition for
-        // preserving the full window.
-        let vp = sample_viewport();
-        let original = f64::from(vp.width) * vp.pixel_scale();
         for &(w, h) in &[
             (1600_u32, 1200_u32),
             (400, 300),
@@ -505,11 +556,29 @@ mod tests {
             (123, 456),
         ] {
             let resized = vp.with_resolution(w, h);
-            let span = f64::from(resized.width) * resized.pixel_scale();
-            assert!(
-                (span - original).abs() < 1e-15,
-                "real-axis span drifted at ({w}, {h}): {span} vs {original}",
+            assert_eq!(
+                resized.pixel_scale(),
+                vp.pixel_scale(),
+                "pixel_scale drifted at ({w}, {h})",
             );
+        }
+    }
+
+    #[test]
+    fn with_resolution_scales_axis_span_linearly_with_dimensions() {
+        // ADR-0011: because pixel_scale is fixed, the sampled span on
+        // each axis is `dimension × pixel_scale` — it scales linearly
+        // with that dimension. A wider buffer reveals proportionally more
+        // real axis; a taller one more imaginary axis. This is the
+        // "bigger window reveals more of the plane" property.
+        let vp = sample_viewport();
+        let scale = vp.pixel_scale();
+        for &(w, h) in &[(1600_u32, 1200_u32), (400, 300), (1600, 600), (400, 1200)] {
+            let resized = vp.with_resolution(w, h);
+            let re_span = f64::from(resized.width) * resized.pixel_scale();
+            let im_span = f64::from(resized.height) * resized.pixel_scale();
+            assert!((re_span - f64::from(w) * scale).abs() < 1e-15);
+            assert!((im_span - f64::from(h) * scale).abs() < 1e-15);
         }
     }
 
