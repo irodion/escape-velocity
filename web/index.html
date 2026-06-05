@@ -23,6 +23,26 @@
          rather than just the field. */
       input[type="number"]:disabled { opacity: 0.5; }
       form#controls label:has(input:disabled) { opacity: 0.6; }
+      /* PWA UI (Slice 8B): the Install button sits in normal flow under the
+         canvas; the update / offline-ready toast floats bottom-right. Both
+         are created and toggled by the pwa-ui presenter via the `hidden`
+         attribute, so they take no space until the lifecycle calls for them. */
+      #pwa-install { margin-top: 0.5rem; }
+      #pwa-install[hidden], .pwa-toast[hidden] { display: none; }
+      .pwa-toast {
+        position: fixed;
+        bottom: 1rem;
+        right: 1rem;
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        padding: 0.6rem 0.9rem;
+        border-radius: 6px;
+        background: #1a1a22;
+        color: #f0f0f0;
+        font-size: 0.9rem;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+      }
     </style>
   </head>
   <body>
