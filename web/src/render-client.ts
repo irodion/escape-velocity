@@ -153,6 +153,15 @@ function paint(ctx: CanvasRenderingContext2D, response: RenderResponse): void {
   if (canvas.height !== response.height) {
     canvas.height = response.height
   }
+  // Clear any wheel-zoom Preview transform before painting (ADR-0012).
+  // Every real frame is correct at identity transform — Settle, recolorize,
+  // resize, boot alike — so clearing it unconditionally here, in the same
+  // tick as `putImageData`, makes the Preview→true-frame swap atomic (no
+  // snap-back) without any callback back to the input layer. The guard
+  // avoids a needless style write on the common identity-already case.
+  if (canvas.style.transform !== '') {
+    canvas.style.transform = ''
+  }
   const image = new ImageData(response.rgba, response.width, response.height)
   ctx.putImageData(image, 0, 0)
 }
