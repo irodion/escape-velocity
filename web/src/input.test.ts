@@ -287,6 +287,55 @@ describe('InputController', () => {
     expect(onChange).toHaveBeenCalledWith(afterSecond)
   })
 
+  it('anchors every notch to the untransformed layout box, not the live transformed rect', () => {
+    // Regression: getBoundingClientRect reflects the live CSS transform, so
+    // after the first notch scales the canvas a re-read returns a
+    // scaled/translated box. The controller must keep using the box it
+    // captured at scrub start, or the cursor anchor drifts off the pointer.
+    const afterFirst = makeZoomResult(1.25)
+    const afterSecond = makeZoomResult(1.5625)
+    viewport.zoom_around.mockReturnValue(afterFirst)
+    afterFirst.zoom_around.mockReturnValue(afterSecond)
+
+    const layout = {
+      left: 0,
+      top: 0,
+      right: 800,
+      bottom: 600,
+      width: 800,
+      height: 600,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect
+    // What getBoundingClientRect would report once the canvas is scaled up
+    // and translated by the Preview — left/width shifted and enlarged.
+    const transformed = { ...layout, left: -100, width: 1000, right: 900 } as DOMRect
+    const rectSpy = vi.spyOn(canvas, 'getBoundingClientRect')
+    rectSpy.mockReturnValue(transformed)
+    rectSpy.mockReturnValueOnce(layout) // only the scrub-start read sees the true box
+    new InputController(canvas, viewport as unknown as Viewport, onChange)
+
+    const notch = (): void => {
+      canvas.dispatchEvent(
+        new WheelEvent('wheel', {
+          deltaY: -100,
+          clientX: 200,
+          clientY: 150,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+    }
+    notch()
+    notch()
+    // factor = 1.25 ^ (100/100) = 1.25 (zoom in). Both notches map the
+    // cursor through the layout box: pixelX = 200·800/800 = 200. The
+    // transformed box would have given (200−(−100))·800/1000 = 240.
+    expect(viewport.zoom_around).toHaveBeenCalledWith(200, 150, 1.25)
+    expect(afterFirst.zoom_around).toHaveBeenCalledWith(200, 150, 1.25)
+  })
+
   it('re-bases the Preview to the committed viewport once a paint clears the transform', () => {
     const committed = makeZoomResult(0.8)
     const next = makeZoomResult(0.64)

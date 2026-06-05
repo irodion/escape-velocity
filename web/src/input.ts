@@ -90,6 +90,11 @@ export class InputController {
   // paint has cleared the canvas transform (see `handleWheel`).
   private zoomPreview: ZoomPreview | null = null
   private settleTimer: ReturnType<typeof setTimeout> | undefined
+  // The canvas's *untransformed* layout box, captured at the start of a
+  // scrub. `getBoundingClientRect` reflects the live CSS transform, so
+  // once the Preview has scaled the canvas, re-reading it would feed
+  // drifting, scaled cursor coordinates into the zoom — see `handleWheel`.
+  private scrubRect: DOMRect | null = null
 
   private readonly handleMouseDown = (event: MouseEvent): void => {
     // Only the primary (left) button starts a pan. Right- and
@@ -168,8 +173,21 @@ export class InputController {
 
   private readonly handleWheel = (event: WheelEvent): void => {
     event.preventDefault()
-    const rect = this.canvas.getBoundingClientRect()
-    if (rect.width <= 0 || rect.height <= 0) return
+    // Begin a fresh Preview when no scrub is active, or when a paint has
+    // cleared the transform (the buffer now matches `currentViewport`, so
+    // the Preview re-bases to identity). Mid-scrub, keep accumulating the
+    // existing matrix so it stays relative to the frame still on screen.
+    const beginning = this.zoomPreview === null || this.canvas.style.transform === ''
+    // Capture the layout box only at the start of a scrub, while the
+    // transform is still cleared so the rect is untransformed. Reusing it
+    // for every notch keeps the cursor anchor pinned to the pointer; a
+    // mid-scrub `getBoundingClientRect` would return the already-scaled
+    // box and the anchor would creep away (the "shifted zoom centre" bug).
+    if (beginning) {
+      this.scrubRect = this.canvas.getBoundingClientRect()
+    }
+    const rect = this.scrubRect
+    if (rect === null || rect.width <= 0 || rect.height <= 0) return
     const cssX = event.clientX - rect.left
     const cssY = event.clientY - rect.top
     // zoom_around takes a point on the viewport's logical grid — scale
@@ -181,14 +199,18 @@ export class InputController {
     const pixelY = (cssY * this.currentViewport.height()) / rect.height
     const factor = 1.25 ** (-normalizeWheelDelta(event) / 100)
 
-    // Start a fresh Preview when no scrub is active, or when a paint has
-    // cleared the transform (the buffer now matches `currentViewport`, so
-    // the Preview re-bases to identity). Mid-scrub, keep accumulating the
-    // existing matrix so it stays relative to the frame still on screen.
-    if (this.zoomPreview === null || this.canvas.style.transform === '') {
+    if (beginning) {
       this.zoomPreview = beginZoomPreview(this.currentViewport)
     }
-    this.zoomPreview = applyZoomNotch(this.zoomPreview, pixelX, pixelY, cssX, cssY, factor)
+    // `beginning` guarantees zoomPreview is non-null here.
+    this.zoomPreview = applyZoomNotch(
+      this.zoomPreview as ZoomPreview,
+      pixelX,
+      pixelY,
+      cssX,
+      cssY,
+      factor,
+    )
     this.currentViewport = this.zoomPreview.viewport
     this.canvas.style.transform = zoomPreviewTransform(this.zoomPreview)
 
