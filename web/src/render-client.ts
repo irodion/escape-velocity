@@ -137,6 +137,22 @@ function issue(req: ClientRequest, ctx: CanvasRenderingContext2D): void {
 }
 
 function paint(ctx: CanvasRenderingContext2D, response: RenderResponse): void {
+  // Size the canvas backing store to the frame being painted, here at
+  // paint time rather than at dispatch. The buffer dimensions can change
+  // between requests (a window resize or a render-scale change), and
+  // resizing a canvas clears it — doing that at dispatch would blank the
+  // canvas for the whole duration of the compute. Deferring to paint
+  // keeps the previous frame on screen (CSS-stretched to the new display
+  // size as a live preview) until the fresh, correctly-sized frame is
+  // ready to replace it in one step. The guard avoids a needless clear
+  // when the dimensions are unchanged (the common pan/zoom case).
+  const canvas = ctx.canvas
+  if (canvas.width !== response.width) {
+    canvas.width = response.width
+  }
+  if (canvas.height !== response.height) {
+    canvas.height = response.height
+  }
   const image = new ImageData(response.rgba, response.width, response.height)
   ctx.putImageData(image, 0, 0)
 }

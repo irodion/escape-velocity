@@ -5,18 +5,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Escape Velocity</title>
     <style>
-      /* The canvas's CSS display size stays at 800×600 across all
-         render-scale selections. The render-scale multiplier sizes the
-         buffer (super/sub-sampling) without changing the framing or the
-         display size — a pure quality knob, so the page never reflows
-         when the user changes it. */
+      /* Fit-to-window (Slice 2): the page is a flex column — the controls
+         bar takes its natural height and the canvas fills the rest of the
+         window. The canvas's CSS box is the viewport's logical size;
+         main.ts measures it (and re-measures on resize) to size the
+         render buffer. The render-scale multiplier then super/sub-samples
+         that buffer without changing the framing or the display size. */
+      html, body { margin: 0; height: 100%; }
+      body { display: flex; flex-direction: column; min-height: 100vh; }
       canvas#fractal {
         cursor: crosshair;
-        width: 800px;
-        height: 600px;
+        flex: 1 1 auto;
+        min-height: 0;
+        width: 100%;
+        display: block;
       }
       canvas#fractal.dragging { cursor: all-scroll; }
-      form#controls { margin-bottom: 0.5rem; }
+      form#controls { flex: 0 0 auto; margin: 0; padding: 0.5rem; }
       form#controls label { margin-right: 1rem; }
       /* Visualise the Mandelbrot-mode state of the `c` inputs: dim the
          input itself, and use `:has()` to dim the surrounding <label>
