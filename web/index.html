@@ -5,12 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Escape Velocity</title>
     <style>
-      /* Fit-to-window (Slice 2): the page is a flex column — the controls
-         bar takes its natural height and the canvas fills the rest of the
-         window. The canvas's CSS box is the viewport's logical size;
-         main.ts measures it (and re-measures on resize) to size the
+      /* Fit-to-window (Slice 2): the page is a flex column whose canvas
+         fills the window. The canvas's CSS box is the viewport's logical
+         size; main.ts measures it (and re-measures on resize) to size the
          render buffer. The render-scale multiplier then super/sub-samples
-         that buffer without changing the framing or the display size. */
+         that buffer without changing the framing or the display size.
+
+         Controls drawer (Slice 4): the controls panel is fixed-positioned
+         and so removed from the flex flow — the canvas owns the whole
+         window, and opening the drawer overlays it without changing its
+         CSS box (so the fit-to-window ResizeObserver never fires). The
+         only in-flow sibling below the canvas is the PWA install button. */
       html, body { margin: 0; height: 100%; }
       body { display: flex; flex-direction: column; min-height: 100vh; }
       canvas#fractal {
@@ -21,8 +26,61 @@
         display: block;
       }
       canvas#fractal.dragging { cursor: all-scroll; }
-      form#controls { flex: 0 0 auto; margin: 0; padding: 0.5rem; }
-      form#controls label { margin-right: 1rem; }
+
+      /* The ☰ toggle floats above everything, always visible, in the
+         top-left corner. It stacks above the drawer so it doubles as the
+         close affordance once the panel slides over it. */
+      #controls-toggle {
+        position: fixed;
+        top: 0.75rem;
+        left: 0.75rem;
+        z-index: 20;
+        width: 2.5rem;
+        height: 2.5rem;
+        padding: 0;
+        font-size: 1.25rem;
+        line-height: 1;
+        color: #f0f0f0;
+        background: #1a1a22;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+      }
+
+      /* The drawer slides in from the left over the canvas. Closed by
+         default (translated fully off-screen + `inert`, set by drawer.ts);
+         `.open` slides it into view. `width: min(20rem, 85vw)` keeps it
+         from spanning a narrow phone screen, and the column layout +
+         `overflow-y: auto` stack the controls with no horizontal overflow
+         and scroll if they outrun a short viewport. */
+      form#controls {
+        position: fixed;
+        top: 0;
+        left: 0;
+        z-index: 10;
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        width: min(20rem, 85vw);
+        height: 100%;
+        margin: 0;
+        /* Top padding clears the floating ☰ button. */
+        padding: 3.75rem 1rem 1rem;
+        overflow-y: auto;
+        color: #f0f0f0;
+        background: #1a1a22;
+        box-shadow: 2px 0 12px rgba(0, 0, 0, 0.4);
+        transform: translateX(-100%);
+        transition: transform 0.2s ease;
+      }
+      form#controls.open { transform: translateX(0); }
+      form#controls label { display: block; margin: 0; }
+      /* Respect a reduced-motion preference: snap instead of slide. */
+      @media (prefers-reduced-motion: reduce) {
+        form#controls { transition: none; }
+      }
       /* Visualise the Mandelbrot-mode state of the `c` inputs: dim the
          input itself, and use `:has()` to dim the surrounding <label>
          so the visitor reads the whole c.re / c.im strip as "off"
@@ -52,6 +110,15 @@
     </style>
   </head>
   <body>
+    <button
+      id="controls-toggle"
+      type="button"
+      aria-label="Open controls"
+      aria-controls="controls"
+      aria-expanded="false"
+    >
+      ☰
+    </button>
     <form id="controls">
       <label>
         Iterations:

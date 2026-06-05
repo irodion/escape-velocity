@@ -7,6 +7,7 @@ import {
   type PaletteName,
   type Settings,
 } from './controls.js'
+import { mountDrawer } from './drawer.js'
 import { InputController } from './input.js'
 import { createPwaLifecycle } from './pwa-lifecycle.js'
 import { mountPwaUi } from './pwa-ui.js'
@@ -87,6 +88,15 @@ const controlsForm = document.getElementById('controls')
 if (!(controlsForm instanceof HTMLFormElement)) {
   throw new Error('form#controls not found in index.html')
 }
+const controlsToggle = document.getElementById('controls-toggle')
+if (!(controlsToggle instanceof HTMLButtonElement)) {
+  throw new Error('button#controls-toggle not found in index.html')
+}
+
+// Collapsible drawer (Slice 4): the controls panel is closed by default and
+// the ☰ button toggles it. Fixed-positioned (index.html), so this is purely
+// a visibility concern — it never touches the canvas box or the renderer.
+mountDrawer(controlsToggle, controlsForm)
 
 // Initialise the WASM module on the main thread so the synchronous
 // `Viewport` class (used by the input controller and the dispatcher
