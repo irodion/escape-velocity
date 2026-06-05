@@ -36,7 +36,18 @@
  * Mid-edit empty / dash-only states produce `NaN` snapshots — the
  * dispatcher in `main.ts` filters those.
  */
-export type PaletteName = 'grayscale' | 'viridis' | 'magma' | 'inferno' | 'twilight'
+export type PaletteName =
+  | 'grayscale'
+  | 'viridis'
+  | 'magma'
+  | 'inferno'
+  | 'plasma'
+  | 'turbo'
+  | 'cubehelix'
+  | 'twilight'
+  | 'earth-and-sky'
+  | 'rainbow'
+  | 'ocean'
 export type NormalisationName = 'cycled' | 'histogram'
 export type FractalMode = 'mandelbrot' | 'julia'
 
