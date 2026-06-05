@@ -289,17 +289,18 @@ export class InputController {
    * `onChange` fires — the caller already has the new viewport in
    * hand and is responsible for triggering the render.
    *
-   * An external viewport supersedes any in-progress wheel scrub: a
-   * pending Settle is cancelled and the Preview dropped, so the deferred
-   * `onChange` can't later fire with a stale viewport. The caller's own
-   * render repaints and clears the transform.
+   * An external viewport supersedes any in-progress wheel scrub: a pending
+   * Settle is cancelled and the Preview torn down — including its CSS
+   * transform, so the next scrub measures an untransformed canvas rather
+   * than the still-scaled box (otherwise a wheel event landing before the
+   * caller's render paints would anchor the new zoom to the wrong box).
    */
   setViewport(viewport: Viewport): void {
     if (this.settleTimer !== undefined) {
       clearTimeout(this.settleTimer)
       this.settleTimer = undefined
     }
-    this.zoomPreview = null
+    this.clearZoomPreview()
     this.currentViewport = viewport
   }
 }

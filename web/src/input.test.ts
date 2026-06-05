@@ -596,6 +596,31 @@ describe('InputController', () => {
     expect(onChange).toHaveBeenCalledTimes(1)
   })
 
+  it('setViewport clears an active Preview transform so the next scrub measures an untransformed box', () => {
+    const z1 = makeZoomResult(0.8)
+    viewport.zoom_around.mockReturnValue(z1)
+    const controller = new InputController(canvas, viewport as unknown as Viewport, onChange)
+
+    // Active zoom Preview transform on the canvas.
+    canvas.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: -100,
+        clientX: 200,
+        clientY: 150,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    expect(canvas.style.transform).not.toBe('')
+
+    // An external viewport change (resize / mode switch) arriving while the
+    // Preview is still on screen must tear down the transform too — leaving
+    // it would make the next wheel event capture a transformed rect.
+    const next = makeViewportDouble()
+    controller.setViewport(next as unknown as Viewport)
+    expect(canvas.style.transform).toBe('')
+  })
+
   it('wheel calls preventDefault', () => {
     viewport.zoom_around.mockReturnValue(makeZoomResult(1))
     new InputController(canvas, viewport as unknown as Viewport, onChange)

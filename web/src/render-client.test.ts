@@ -202,6 +202,23 @@ describe('render-client', () => {
     expect(ctx.putImageData).not.toHaveBeenCalled()
   })
 
+  it('discardInFlight also drops queued work so it never dispatches', async () => {
+    const { client, worker } = await loadClient()
+    const ctx = makeCtx()
+    deliver(worker, readyMsg())
+
+    doRender(client, ctx) // epoch 1, posted, in flight
+    doRender(client, ctx) // epoch 2, queued in the pending slot
+    client.discardInFlight() // bump the epoch AND clear the pending slot
+
+    deliver(worker, response(1)) // A returns, frees the worker → flush
+
+    // The queued epoch-2 render must never dispatch (no wasted compute),
+    // and the stale epoch-1 response must not paint.
+    expect(postedEpochs(worker)).toEqual([1])
+    expect(ctx.putImageData).not.toHaveBeenCalled()
+  })
+
   it('coalesces to a single pending slot: newest queued wins, older dropped', async () => {
     const { client, worker } = await loadClient()
     const ctx = makeCtx()

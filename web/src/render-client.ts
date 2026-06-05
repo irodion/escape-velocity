@@ -137,10 +137,13 @@ function issue(req: ClientRequest, ctx: CanvasRenderingContext2D): void {
 }
 
 /**
- * Discard any in-flight (or queued) render so its response will not paint.
- * Bumping the epoch past everything outstanding makes the next worker
- * response fail the `epoch === latestEpoch` check in `onmessage`, so it is
- * dropped and the canvas keeps whatever it currently shows.
+ * Discard any in-flight *or queued* render so it neither paints nor wastes
+ * worker time. Bumping the epoch past everything outstanding makes the next
+ * worker response fail the `epoch === latestEpoch` check in `onmessage`, so
+ * an in-flight render is dropped on arrival; clearing the pending slot stops
+ * a queued render from ever dispatching (it could otherwise run to
+ * completion on the worker, delaying the frame that will actually paint).
+ * The canvas keeps whatever it currently shows.
  *
  * The input controller calls this while a wheel-zoom Preview is active
  * (ADR-0012): a render committed by a premature Settle must not paint
@@ -150,6 +153,7 @@ function issue(req: ClientRequest, ctx: CanvasRenderingContext2D): void {
  */
 export function discardInFlight(): void {
   latestEpoch += 1
+  pending = null
 }
 
 function paint(ctx: CanvasRenderingContext2D, response: RenderResponse): void {
