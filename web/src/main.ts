@@ -206,29 +206,38 @@ const inputController = new InputController(canvas, viewport, (next) => {
   rerender()
 })
 
-// Fit-to-window: when the window resizes (or the device rotates), the
-// logical size changes, so re-fit the viewport to the new canvas box and
-// recompute. Debounced so a continuous drag triggers a single recompute
-// once it settles; in between, the full-bleed canvas CSS-stretches the
-// last buffer as a live preview. `with_resolution` preserves center and
-// zoom, so only the framing extent grows/shrinks with the window (more
-// or less of the plane), never the set's proportions.
+// Fit-to-window: re-fit the viewport whenever the canvas's measured box
+// changes, then recompute. A ResizeObserver on the canvas — rather than
+// a `window.resize` listener — ties the fit to the *actual* box, so it
+// also catches changes that fire no window resize: a sibling entering
+// flex flow (the PWA install button appearing below the canvas), a
+// device rotation, or any reflow. Debounced so a continuous window drag
+// triggers a single recompute once it settles; in between, the
+// full-bleed canvas CSS-stretches the last buffer as a live preview.
+// `with_resolution` preserves center and zoom, so only the framing
+// extent grows/shrinks with the box, never the set's proportions.
 let resizeTimer: ReturnType<typeof setTimeout> | undefined
-window.addEventListener('resize', () => {
+const refitToCanvas = (): void => {
+  resizeTimer = undefined
+  const { width, height } = measureLogicalSize()
+  if (width === viewport.width() && height === viewport.height()) {
+    return
+  }
+  viewport = viewport.with_resolution(width, height)
+  inputController.setViewport(viewport)
+  rerender()
+}
+// ResizeObserver delivers an initial callback on observe(); the no-op
+// guard above absorbs it, since the boot viewport already matches the
+// measured box. Resizing the backing store at paint time changes only
+// the canvas's intrinsic size, not its CSS box, so this never loops.
+const resizeObserver = new ResizeObserver(() => {
   if (resizeTimer !== undefined) {
     clearTimeout(resizeTimer)
   }
-  resizeTimer = setTimeout(() => {
-    resizeTimer = undefined
-    const { width, height } = measureLogicalSize()
-    if (width === viewport.width() && height === viewport.height()) {
-      return
-    }
-    viewport = viewport.with_resolution(width, height)
-    inputController.setViewport(viewport)
-    rerender()
-  }, RESIZE_DEBOUNCE_MS)
+  resizeTimer = setTimeout(refitToCanvas, RESIZE_DEBOUNCE_MS)
 })
+resizeObserver.observe(canvas)
 
 const controls = new Controls(controlsForm, current, (rawNext) => {
   // Substitute the last-known-finite c values for any non-finite
