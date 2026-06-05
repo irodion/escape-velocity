@@ -136,6 +136,26 @@ function issue(req: ClientRequest, ctx: CanvasRenderingContext2D): void {
   flush()
 }
 
+/**
+ * Discard any in-flight *or queued* render so it neither paints nor wastes
+ * worker time. Bumping the epoch past everything outstanding makes the next
+ * worker response fail the `epoch === latestEpoch` check in `onmessage`, so
+ * an in-flight render is dropped on arrival; clearing the pending slot stops
+ * a queued render from ever dispatching (it could otherwise run to
+ * completion on the worker, delaying the frame that will actually paint).
+ * The canvas keeps whatever it currently shows.
+ *
+ * The input controller calls this while a wheel-zoom Preview is active
+ * (ADR-0012): a render committed by a premature Settle must not paint
+ * mid-scrub and clear the Preview transform out from under the gesture. The
+ * next real `issue()` (the final Settle, or a pan's commit) bumps the epoch
+ * again and paints normally, so this only suppresses the stale frame.
+ */
+export function discardInFlight(): void {
+  latestEpoch += 1
+  pending = null
+}
+
 function paint(ctx: CanvasRenderingContext2D, response: RenderResponse): void {
   // Size the canvas backing store to the frame being painted, here at
   // paint time rather than at dispatch. The buffer dimensions can change
@@ -152,6 +172,15 @@ function paint(ctx: CanvasRenderingContext2D, response: RenderResponse): void {
   }
   if (canvas.height !== response.height) {
     canvas.height = response.height
+  }
+  // Clear any wheel-zoom Preview transform before painting (ADR-0012).
+  // Every real frame is correct at identity transform — Settle, recolorize,
+  // resize, boot alike — so clearing it unconditionally here, in the same
+  // tick as `putImageData`, makes the Preview→true-frame swap atomic (no
+  // snap-back) without any callback back to the input layer. The guard
+  // avoids a needless style write on the common identity-already case.
+  if (canvas.style.transform !== '') {
+    canvas.style.transform = ''
   }
   const image = new ImageData(response.rgba, response.width, response.height)
   ctx.putImageData(image, 0, 0)

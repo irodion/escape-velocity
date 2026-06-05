@@ -1,26 +1,38 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Viewport } from '../wasm/fractal_wasm.js'
-import { InputController } from './input.js'
+import { InputController, WHEEL_SETTLE_MS } from './input.js'
 
 // Plain JS double for Viewport. The InputController calls
 // `pan_by_pixels` / `zoom_around` (which produce new viewports) and
-// reads `width()` / `height()` (the logical grid it maps CSS deltas
-// onto), so a structural double covers the surface. The pan/zoom
-// methods are `vi.fn`s returning a sentinel viewport so we can assert
-// which call produced the `onChange` argument; `width`/`height` report
-// the logical 800×600 grid (the production display size).
+// reads `zoom()` (for the Preview's realized ratio) and `width()` /
+// `height()` (the logical grid it maps CSS deltas onto), so a structural
+// double covers the surface. The pan/zoom methods are `vi.fn`s returning
+// a sentinel viewport so we can assert which call produced the `onChange`
+// argument; `width`/`height` report the logical 800×600 grid (the
+// production display size); `zoom` defaults to 1.
 function makeViewportDouble(): {
   pan_by_pixels: ReturnType<typeof vi.fn>
   zoom_around: ReturnType<typeof vi.fn>
+  zoom: ReturnType<typeof vi.fn>
   width: ReturnType<typeof vi.fn>
   height: ReturnType<typeof vi.fn>
 } {
   return {
     pan_by_pixels: vi.fn(),
     zoom_around: vi.fn(),
+    zoom: vi.fn(() => 1),
     width: vi.fn(() => 800),
     height: vi.fn(() => 600),
   }
+}
+
+// A zoom_around result that carries its own `zoom()` (the Preview reads
+// it to compute the realized ratio) and is itself a full double so a
+// follow-up notch in the same scrub can zoom from it.
+function makeZoomResult(zoom: number): ReturnType<typeof makeViewportDouble> {
+  const vp = makeViewportDouble()
+  vp.zoom.mockReturnValue(zoom)
+  return vp
 }
 
 function setRect(
@@ -72,6 +84,10 @@ describe('InputController', () => {
   let ctxStub: ReturnType<typeof makeCtxStub>
 
   beforeEach(() => {
+    // Wheel zoom defers its recompute to a debounced Settle, so the wheel
+    // tests drive the clock with fake timers. Pan tests use no timers and
+    // are unaffected.
+    vi.useFakeTimers()
     canvas = document.createElement('canvas')
     canvas.id = 'fractal'
     // Internal resolution; rect (CSS size) is set per-test via setRect.
@@ -94,6 +110,7 @@ describe('InputController', () => {
   afterEach(() => {
     document.body.removeChild(canvas)
     vi.restoreAllMocks()
+    vi.useRealTimers()
   })
 
   it('emits exactly one onChange on mouseup, none during mousemove', () => {
@@ -210,8 +227,8 @@ describe('InputController', () => {
     expect(canvas.classList.contains('dragging')).toBe(false)
   })
 
-  it('wheel emits one onChange with zoom_around at the cursor and the expected factor', () => {
-    const zoomed = { sentinel: 'zoomed' } as unknown as Viewport
+  it('previews instantly on a wheel notch and defers a single onChange to the Settle', () => {
+    const zoomed = makeZoomResult(0.8)
     viewport.zoom_around.mockReturnValue(zoomed)
     new InputController(canvas, viewport as unknown as Viewport, onChange)
 
@@ -224,15 +241,233 @@ describe('InputController', () => {
         cancelable: true,
       }),
     )
-    // factor = 1.25 ^ (-100 / 100) = 1 / 1.25 = 0.8
+    // factor = 1.25 ^ (-100 / 100) = 1 / 1.25 = 0.8. zoom_around runs
+    // immediately to advance the authoritative viewport...
     expect(viewport.zoom_around).toHaveBeenCalledTimes(1)
     expect(viewport.zoom_around).toHaveBeenCalledWith(200, 150, 1.25 ** -1)
+    // ...the Preview transform is applied instantly (cursor-anchored
+    // scale) — exact matrix is covered in zoom-preview.test.ts...
+    expect(canvas.style.transform).not.toBe('')
+    expect(canvas.style.transform).toContain('scale(0.8)')
+    // ...but no recompute fires until the wheel goes quiet.
+    expect(onChange).not.toHaveBeenCalled()
+
+    vi.advanceTimersByTime(WHEEL_SETTLE_MS)
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledWith(zoomed)
   })
 
+  it('coalesces a multi-notch scrub into one onChange at the Settle', () => {
+    const afterFirst = makeZoomResult(0.8)
+    const afterSecond = makeZoomResult(0.64)
+    viewport.zoom_around.mockReturnValue(afterFirst)
+    afterFirst.zoom_around.mockReturnValue(afterSecond)
+    new InputController(canvas, viewport as unknown as Viewport, onChange)
+
+    const notch = (): void => {
+      canvas.dispatchEvent(
+        new WheelEvent('wheel', {
+          deltaY: 100,
+          clientX: 200,
+          clientY: 150,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+    }
+    notch()
+    notch() // second notch zooms from the first notch's viewport
+    expect(viewport.zoom_around).toHaveBeenCalledTimes(1)
+    expect(afterFirst.zoom_around).toHaveBeenCalledTimes(1)
+    expect(onChange).not.toHaveBeenCalled()
+
+    vi.advanceTimersByTime(WHEEL_SETTLE_MS)
+    // Exactly one recompute, for the final accumulated viewport.
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith(afterSecond)
+  })
+
+  it('anchors every notch to the untransformed layout box, not the live transformed rect', () => {
+    // Regression: getBoundingClientRect reflects the live CSS transform, so
+    // after the first notch scales the canvas a re-read returns a
+    // scaled/translated box. The controller must keep using the box it
+    // captured at scrub start, or the cursor anchor drifts off the pointer.
+    const afterFirst = makeZoomResult(1.25)
+    const afterSecond = makeZoomResult(1.5625)
+    viewport.zoom_around.mockReturnValue(afterFirst)
+    afterFirst.zoom_around.mockReturnValue(afterSecond)
+
+    const layout = {
+      left: 0,
+      top: 0,
+      right: 800,
+      bottom: 600,
+      width: 800,
+      height: 600,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect
+    // What getBoundingClientRect would report once the canvas is scaled up
+    // and translated by the Preview — left/width shifted and enlarged.
+    const transformed = { ...layout, left: -100, width: 1000, right: 900 } as DOMRect
+    const rectSpy = vi.spyOn(canvas, 'getBoundingClientRect')
+    rectSpy.mockReturnValue(transformed)
+    rectSpy.mockReturnValueOnce(layout) // only the scrub-start read sees the true box
+    new InputController(canvas, viewport as unknown as Viewport, onChange)
+
+    const notch = (): void => {
+      canvas.dispatchEvent(
+        new WheelEvent('wheel', {
+          deltaY: -100,
+          clientX: 200,
+          clientY: 150,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+    }
+    notch()
+    notch()
+    // factor = 1.25 ^ (100/100) = 1.25 (zoom in). Both notches map the
+    // cursor through the layout box: pixelX = 200·800/800 = 200. The
+    // transformed box would have given (200−(−100))·800/1000 = 240.
+    expect(viewport.zoom_around).toHaveBeenCalledWith(200, 150, 1.25)
+    expect(afterFirst.zoom_around).toHaveBeenCalledWith(200, 150, 1.25)
+  })
+
+  it('re-bases the Preview to the committed viewport once a paint clears the transform', () => {
+    const committed = makeZoomResult(0.8)
+    const next = makeZoomResult(0.64)
+    viewport.zoom_around.mockReturnValue(committed)
+    committed.zoom_around.mockReturnValue(next)
+    new InputController(canvas, viewport as unknown as Viewport, onChange)
+
+    canvas.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: 100,
+        clientX: 200,
+        clientY: 150,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    vi.advanceTimersByTime(WHEEL_SETTLE_MS) // Settle commits `committed`
+    // Simulate render-client's paint clearing the Preview transform: the
+    // buffer now matches `committed`.
+    canvas.style.transform = ''
+
+    canvas.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: 100,
+        clientX: 200,
+        clientY: 150,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    // The new scrub zooms from the committed viewport, not the original.
+    expect(committed.zoom_around).toHaveBeenCalledTimes(1)
+    expect(viewport.zoom_around).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(WHEEL_SETTLE_MS)
+    expect(onChange).toHaveBeenLastCalledWith(next)
+  })
+
+  it('a pan starting mid-zoom carries the zoom into the pan without an extra render', () => {
+    const zoomed = makeZoomResult(0.8)
+    viewport.zoom_around.mockReturnValue(zoomed)
+    const panned = { sentinel: 'panned' } as unknown as Viewport
+    zoomed.pan_by_pixels.mockReturnValue(panned)
+    const onInvalidate = vi.fn()
+    new InputController(canvas, viewport as unknown as Viewport, onChange, onInvalidate)
+
+    // Zoom scrub: Settle pending, currentViewport advanced to `zoomed`.
+    canvas.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: 100,
+        clientX: 200,
+        clientY: 150,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    expect(onChange).not.toHaveBeenCalled()
+
+    // Pan starts before the Settle fires: no render is issued here (firing the
+    // zoom's Settle would paint an intermediate frame mid-drag); any in-flight
+    // render is discarded so it can't clobber the pan snapshot.
+    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
+    expect(onChange).not.toHaveBeenCalled()
+    expect(onInvalidate).toHaveBeenCalledTimes(1)
+    // The cancelled Settle can't fire later either.
+    vi.advanceTimersByTime(WHEEL_SETTLE_MS)
+    expect(onChange).not.toHaveBeenCalled()
+
+    // Mouseup issues the single render: the zoomed viewport, panned. The pan
+    // operates on the accumulated zoom via the start viewport.
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 130, clientY: 70, bubbles: true }))
+    expect(zoomed.pan_by_pixels).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith(panned)
+  })
+
+  it('discards in-flight renders on notches while a Preview is active, but not the first', () => {
+    // A paint landing mid-scrub clears the Preview transform and snaps the
+    // image to an older viewport (e.g. a premature Settle's render returning
+    // after the scrub resumes). The controller signals the render pipeline
+    // to drop any in-flight render whenever a Preview transform is already
+    // applied. The first notch (transform still cleared) leaves the base
+    // frame alone.
+    const onInvalidate = vi.fn()
+    const z1 = makeZoomResult(0.8)
+    const z2 = makeZoomResult(0.64)
+    viewport.zoom_around.mockReturnValue(z1)
+    z1.zoom_around.mockReturnValue(z2)
+    new InputController(canvas, viewport as unknown as Viewport, onChange, onInvalidate)
+
+    const notch = (): void => {
+      canvas.dispatchEvent(
+        new WheelEvent('wheel', {
+          deltaY: -100,
+          clientX: 200,
+          clientY: 150,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+    }
+    notch() // transform was '' → base frame protected
+    expect(onInvalidate).not.toHaveBeenCalled()
+    notch() // Preview now active → discard any in-flight render
+    expect(onInvalidate).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears the zoom Preview transform when a pan starts (pan reads an untransformed box)', () => {
+    const z1 = makeZoomResult(1.25)
+    viewport.zoom_around.mockReturnValue(z1)
+    viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
+    new InputController(canvas, viewport as unknown as Viewport, onChange)
+
+    // Active zoom Preview (transform applied), Settle still pending.
+    canvas.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: -100,
+        clientX: 200,
+        clientY: 150,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    expect(canvas.style.transform).not.toBe('')
+
+    // A pan starting before the fresh frame paints must clear the transform,
+    // or the pan delta on mouseup would be scaled by the live transform.
+    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
+    expect(canvas.style.transform).toBe('')
+  })
+
   it('wheel respects canvas-CSS-vs-internal scaling', () => {
-    viewport.zoom_around.mockReturnValue({} as unknown as Viewport)
+    viewport.zoom_around.mockReturnValue(makeZoomResult(1))
     // Canvas is 800x600 internally but displayed at half size.
     setRect(canvas, { left: 0, top: 0, width: 400, height: 300 })
     new InputController(canvas, viewport as unknown as Viewport, onChange)
@@ -251,7 +486,7 @@ describe('InputController', () => {
   })
 
   it('wheel normalizes line-mode deltas (Firefox-on-Linux style)', () => {
-    viewport.zoom_around.mockReturnValue({} as unknown as Viewport)
+    viewport.zoom_around.mockReturnValue(makeZoomResult(1))
     new InputController(canvas, viewport as unknown as Viewport, onChange)
 
     // Firefox-on-Linux historical wheel: deltaMode = 1 (line),
@@ -272,7 +507,7 @@ describe('InputController', () => {
   })
 
   it('wheel normalizes page-mode deltas', () => {
-    viewport.zoom_around.mockReturnValue({} as unknown as Viewport)
+    viewport.zoom_around.mockReturnValue(makeZoomResult(1))
     new InputController(canvas, viewport as unknown as Viewport, onChange)
 
     canvas.dispatchEvent(
@@ -343,8 +578,8 @@ describe('InputController', () => {
 
   it('setViewport redirects subsequent wheel events to the new viewport without firing onChange', () => {
     const next = makeViewportDouble()
-    next.zoom_around.mockReturnValue({} as unknown as Viewport)
-    viewport.zoom_around.mockReturnValue({} as unknown as Viewport)
+    next.zoom_around.mockReturnValue(makeZoomResult(0.8))
+    viewport.zoom_around.mockReturnValue(makeZoomResult(0.8))
     const controller = new InputController(canvas, viewport as unknown as Viewport, onChange)
 
     controller.setViewport(next as unknown as Viewport)
@@ -363,13 +598,42 @@ describe('InputController', () => {
         cancelable: true,
       }),
     )
+    // The scrub zooms from the redirected viewport; the recompute lands
+    // at the Settle.
     expect(next.zoom_around).toHaveBeenCalledTimes(1)
     expect(viewport.zoom_around).not.toHaveBeenCalled()
+    expect(onChange).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(WHEEL_SETTLE_MS)
     expect(onChange).toHaveBeenCalledTimes(1)
   })
 
+  it('setViewport clears an active Preview transform so the next scrub measures an untransformed box', () => {
+    const z1 = makeZoomResult(0.8)
+    viewport.zoom_around.mockReturnValue(z1)
+    const controller = new InputController(canvas, viewport as unknown as Viewport, onChange)
+
+    // Active zoom Preview transform on the canvas.
+    canvas.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: -100,
+        clientX: 200,
+        clientY: 150,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    expect(canvas.style.transform).not.toBe('')
+
+    // An external viewport change (resize / mode switch) arriving while the
+    // Preview is still on screen must tear down the transform too — leaving
+    // it would make the next wheel event capture a transformed rect.
+    const next = makeViewportDouble()
+    controller.setViewport(next as unknown as Viewport)
+    expect(canvas.style.transform).toBe('')
+  })
+
   it('wheel calls preventDefault', () => {
-    viewport.zoom_around.mockReturnValue({} as unknown as Viewport)
+    viewport.zoom_around.mockReturnValue(makeZoomResult(1))
     new InputController(canvas, viewport as unknown as Viewport, onChange)
 
     const event = new WheelEvent('wheel', {

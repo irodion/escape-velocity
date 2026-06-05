@@ -52,12 +52,26 @@
         font-family: var(--font-mono);
         -webkit-font-smoothing: antialiased;
       }
-      canvas#fractal {
-        cursor: crosshair;
+      /* The stage owns the window area the fractal fills. It clips the
+         canvas (so a zoom-in Preview that scales past the edges never
+         spawns scrollbars or bleeds over the drawer) and shows pure black
+         where a zoom-out Preview shrinks the canvas inside it — the
+         outside-the-set colour, so the revealed border reads as fractal.
+         See ADR-0012. */
+      .stage {
         flex: 1 1 auto;
         min-height: 0;
+        overflow: hidden;
+        background: #000;
+      }
+      canvas#fractal {
+        cursor: crosshair;
         width: 100%;
+        height: 100%;
         display: block;
+        /* Anchor the wheel-zoom Preview transform at the top-left so the
+           `zoom-preview` affine (p ↦ scale·p + t) holds exactly. */
+        transform-origin: 0 0;
       }
       canvas#fractal.dragging { cursor: all-scroll; }
 
@@ -466,7 +480,9 @@
         </span>
       </label>
     </form>
-    <canvas id="fractal" width="800" height="600"></canvas>
+    <div class="stage">
+      <canvas id="fractal" width="800" height="600"></canvas>
+    </div>
     <div class="vignette"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

@@ -45,3 +45,18 @@ with **no distortion** — square pixels are preserved, so a larger or
 differently-shaped window reveals *more or less of the complex plane* rather
 than stretching the fractal. Contrast with CSS-stretching a fixed buffer, which
 warps the image (non-square pixels).
+
+### Preview
+The lower-fidelity image shown *immediately* during an interaction (pan, zoom,
+resize) before the true frame exists — a reuse of the last rendered frame,
+shifted, scaled, or stretched to approximate the new framing. It keeps the
+gesture responsive and is **never** the final image: it carries no fresh
+iteration data, only the previous frame's pixels rearranged.
+_Avoid_: placeholder, stand-in, stretch.
+
+### Settle
+The end of an interaction — input has stopped — at which the true frame is
+computed for the final Viewport and replaces the Preview. The boundary between
+"responding to the gesture" (Preview) and "showing the truth" (Settle) is the
+moment every recompute is deferred to.
+_Avoid_: commit, finalise, end-of-gesture.

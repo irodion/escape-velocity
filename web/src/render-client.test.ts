@@ -56,6 +56,7 @@ interface RenderClient {
     cIm: number,
   ) => void
   recolorize: (ctx: CanvasRenderingContext2D, palette: number, mode: number) => void
+  discardInFlight: () => void
 }
 
 const VIEWPORT = { centerRe: -0.5, centerIm: 0, zoom: 1, width: 2, height: 2 }
@@ -152,6 +153,30 @@ describe('render-client', () => {
     expect(image.data).toHaveLength(16)
   })
 
+  it('clears a Preview transform before painting the frame (atomic swap, ADR-0012)', async () => {
+    const { client, worker } = await loadClient()
+    const ctx = makeCtx()
+    // A wheel-zoom Preview transform is on the canvas when the fresh frame
+    // arrives (the input layer set it; this layer owns clearing it).
+    ctx.canvas.style.transform = 'translate(40px, 30px) scale(0.8)'
+    expect(ctx.canvas.style.transform).not.toBe('') // sanity: jsdom stored it
+
+    let transformAtPaint: string | null = null
+    ;(ctx.putImageData as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      transformAtPaint = ctx.canvas.style.transform
+    })
+    deliver(worker, readyMsg())
+    doRender(client, ctx)
+    deliver(worker, response(1))
+
+    expect(ctx.putImageData).toHaveBeenCalledTimes(1)
+    // The transform was already identity by the time putImageData ran —
+    // the clear and the paint happen in the same tick, so the swap from
+    // Preview to true frame is atomic (no snap-back).
+    expect(transformAtPaint).toBe('')
+    expect(ctx.canvas.style.transform).toBe('')
+  })
+
   it('drops a stale response (epoch behind the latest issued)', async () => {
     const { client, worker } = await loadClient()
     const ctx = makeCtx()
@@ -162,6 +187,35 @@ describe('render-client', () => {
 
     deliver(worker, response(1)) // response for the superseded epoch 1
 
+    expect(ctx.putImageData).not.toHaveBeenCalled()
+  })
+
+  it('discardInFlight drops the in-flight render so its response does not paint', async () => {
+    const { client, worker } = await loadClient()
+    const ctx = makeCtx()
+    deliver(worker, readyMsg())
+
+    doRender(client, ctx) // epoch 1, posted, in flight
+    client.discardInFlight() // bump the epoch past it (e.g. a resumed scrub)
+    deliver(worker, response(1)) // the now-stale response must be dropped
+
+    expect(ctx.putImageData).not.toHaveBeenCalled()
+  })
+
+  it('discardInFlight also drops queued work so it never dispatches', async () => {
+    const { client, worker } = await loadClient()
+    const ctx = makeCtx()
+    deliver(worker, readyMsg())
+
+    doRender(client, ctx) // epoch 1, posted, in flight
+    doRender(client, ctx) // epoch 2, queued in the pending slot
+    client.discardInFlight() // bump the epoch AND clear the pending slot
+
+    deliver(worker, response(1)) // A returns, frees the worker → flush
+
+    // The queued epoch-2 render must never dispatch (no wasted compute),
+    // and the stale epoch-1 response must not paint.
+    expect(postedEpochs(worker)).toEqual([1])
     expect(ctx.putImageData).not.toHaveBeenCalled()
   })
 
