@@ -136,6 +136,22 @@ function issue(req: ClientRequest, ctx: CanvasRenderingContext2D): void {
   flush()
 }
 
+/**
+ * Discard any in-flight (or queued) render so its response will not paint.
+ * Bumping the epoch past everything outstanding makes the next worker
+ * response fail the `epoch === latestEpoch` check in `onmessage`, so it is
+ * dropped and the canvas keeps whatever it currently shows.
+ *
+ * The input controller calls this while a wheel-zoom Preview is active
+ * (ADR-0012): a render committed by a premature Settle must not paint
+ * mid-scrub and clear the Preview transform out from under the gesture. The
+ * next real `issue()` (the final Settle, or a pan's commit) bumps the epoch
+ * again and paints normally, so this only suppresses the stale frame.
+ */
+export function discardInFlight(): void {
+  latestEpoch += 1
+}
+
 function paint(ctx: CanvasRenderingContext2D, response: RenderResponse): void {
   // Size the canvas backing store to the frame being painted, here at
   // paint time rather than at dispatch. The buffer dimensions can change

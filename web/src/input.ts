@@ -109,6 +109,11 @@ export class InputController {
     // the deferred Settle can't fire later and clobber the pan's viewport
     // (ADR-0012 boundary rule). The committed viewport is already exact.
     this.commitPendingZoom()
+    // Drop any active Preview transform before snapshotting/measuring: a
+    // live transform skews `getBoundingClientRect`, which would scale the
+    // pan delta computed on mouseup (not just the preview). Pan operates on
+    // an untransformed canvas.
+    this.clearZoomPreview()
     this.dragState = {
       startClientX: event.clientX,
       startClientY: event.clientY,
@@ -173,6 +178,18 @@ export class InputController {
 
   private readonly handleWheel = (event: WheelEvent): void => {
     event.preventDefault()
+    // A Preview transform is already applied (a scrub is visually active)
+    // exactly when the canvas transform is non-empty. In that state a paint
+    // would clear the transform mid-gesture and snap the image to an older
+    // viewport — most visibly when a premature Settle's render returns after
+    // the scrub resumes. Discard any in-flight render so it can't paint
+    // stale pixels under us; the final Settle issues the authoritative one
+    // (ADR-0012). On the first notch of a scrub the transform is still
+    // cleared, so the base frame is left to paint normally.
+    const previewActive = this.canvas.style.transform !== ''
+    if (previewActive) {
+      this.onInvalidate()
+    }
     // Begin a fresh Preview when no scrub is active, or when a paint has
     // cleared the transform (the buffer now matches `currentViewport`, so
     // the Preview re-bases to identity). Mid-scrub, continue the existing
@@ -184,7 +201,7 @@ export class InputController {
     // return the already-scaled box and the anchor would creep away (the
     // "shifted zoom centre" bug).
     let preview = this.zoomPreview
-    if (preview === null || this.canvas.style.transform === '') {
+    if (preview === null || !previewActive) {
       this.scrubRect = this.canvas.getBoundingClientRect()
       preview = beginZoomPreview(this.currentViewport)
     }
@@ -230,10 +247,30 @@ export class InputController {
     this.settleZoom()
   }
 
+  /**
+   * Drop any active wheel Preview and clear its CSS transform. The
+   * committed viewport is unchanged (it was advanced per notch); this only
+   * tears down the visual Preview so a starting pan reads an untransformed
+   * canvas. The eventual in-flight Settle render is superseded by the pan's
+   * own `onChange` via the render epoch.
+   */
+  private clearZoomPreview(): void {
+    this.zoomPreview = null
+    this.scrubRect = null
+    if (this.canvas.style.transform !== '') {
+      this.canvas.style.transform = ''
+    }
+  }
+
   constructor(
     private readonly canvas: HTMLCanvasElement,
     initialViewport: Viewport,
     private readonly onChange: (viewport: Viewport) => void,
+    // Called while a wheel Preview is active to discard any in-flight
+    // render so it can't paint stale pixels mid-scrub (ADR-0012). Injected
+    // (rather than importing the render client) to keep this controller
+    // presentation-free. Defaults to a no-op for tests that don't wire it.
+    private readonly onInvalidate: () => void = () => {},
   ) {
     this.currentViewport = initialViewport
     canvas.addEventListener('mousedown', this.handleMouseDown)

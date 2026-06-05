@@ -56,6 +56,7 @@ interface RenderClient {
     cIm: number,
   ) => void
   recolorize: (ctx: CanvasRenderingContext2D, palette: number, mode: number) => void
+  discardInFlight: () => void
 }
 
 const VIEWPORT = { centerRe: -0.5, centerIm: 0, zoom: 1, width: 2, height: 2 }
@@ -185,6 +186,18 @@ describe('render-client', () => {
     doRender(client, ctx) // epoch 2, queued — latestEpoch is now 2
 
     deliver(worker, response(1)) // response for the superseded epoch 1
+
+    expect(ctx.putImageData).not.toHaveBeenCalled()
+  })
+
+  it('discardInFlight drops the in-flight render so its response does not paint', async () => {
+    const { client, worker } = await loadClient()
+    const ctx = makeCtx()
+    deliver(worker, readyMsg())
+
+    doRender(client, ctx) // epoch 1, posted, in flight
+    client.discardInFlight() // bump the epoch past it (e.g. a resumed scrub)
+    deliver(worker, response(1)) // the now-stale response must be dropped
 
     expect(ctx.putImageData).not.toHaveBeenCalled()
   })

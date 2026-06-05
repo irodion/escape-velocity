@@ -20,7 +20,7 @@ import { InputController } from './input.js'
 import { createPwaLifecycle } from './pwa-lifecycle.js'
 import { mountPwaUi } from './pwa-ui.js'
 import { computeBufferDims } from './render-buffer.js'
-import { recolorize, render } from './render-client.js'
+import { discardInFlight, recolorize, render } from './render-client.js'
 
 // PWA install + update lifecycle (Slice 8B). The controller (a deep, tested
 // state machine) is fed the real platform adapters here: the SW registrar is
@@ -233,12 +233,20 @@ const rerender = (): void => {
 applyAccent(current.palette)
 rerender()
 
-const inputController = new InputController(canvas, viewport, (next) => {
-  // Every pan/zoom invalidates the iteration buffer by definition —
-  // route through `render`, which refreshes the cache too.
-  viewport = next
-  rerender()
-})
+const inputController = new InputController(
+  canvas,
+  viewport,
+  (next) => {
+    // Every pan/zoom invalidates the iteration buffer by definition —
+    // route through `render`, which refreshes the cache too.
+    viewport = next
+    rerender()
+  },
+  // While a wheel Preview is active, drop any in-flight render so a
+  // premature Settle's frame can't paint mid-scrub and clear the Preview
+  // transform out from under the gesture (ADR-0012).
+  discardInFlight,
+)
 
 // Fit-to-window: re-fit the viewport whenever the canvas's measured box
 // changes, then recompute. A ResizeObserver on the canvas — rather than

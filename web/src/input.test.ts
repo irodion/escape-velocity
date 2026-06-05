@@ -400,6 +400,61 @@ describe('InputController', () => {
     expect(onChange).toHaveBeenCalledTimes(1)
   })
 
+  it('discards in-flight renders on notches while a Preview is active, but not the first', () => {
+    // A paint landing mid-scrub clears the Preview transform and snaps the
+    // image to an older viewport (e.g. a premature Settle's render returning
+    // after the scrub resumes). The controller signals the render pipeline
+    // to drop any in-flight render whenever a Preview transform is already
+    // applied. The first notch (transform still cleared) leaves the base
+    // frame alone.
+    const onInvalidate = vi.fn()
+    const z1 = makeZoomResult(0.8)
+    const z2 = makeZoomResult(0.64)
+    viewport.zoom_around.mockReturnValue(z1)
+    z1.zoom_around.mockReturnValue(z2)
+    new InputController(canvas, viewport as unknown as Viewport, onChange, onInvalidate)
+
+    const notch = (): void => {
+      canvas.dispatchEvent(
+        new WheelEvent('wheel', {
+          deltaY: -100,
+          clientX: 200,
+          clientY: 150,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+    }
+    notch() // transform was '' → base frame protected
+    expect(onInvalidate).not.toHaveBeenCalled()
+    notch() // Preview now active → discard any in-flight render
+    expect(onInvalidate).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears the zoom Preview transform when a pan starts (pan reads an untransformed box)', () => {
+    const z1 = makeZoomResult(1.25)
+    viewport.zoom_around.mockReturnValue(z1)
+    viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
+    new InputController(canvas, viewport as unknown as Viewport, onChange)
+
+    // Active zoom Preview (transform applied), Settle still pending.
+    canvas.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: -100,
+        clientX: 200,
+        clientY: 150,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    expect(canvas.style.transform).not.toBe('')
+
+    // A pan starting before the fresh frame paints must clear the transform,
+    // or the pan delta on mouseup would be scaled by the live transform.
+    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
+    expect(canvas.style.transform).toBe('')
+  })
+
   it('wheel respects canvas-CSS-vs-internal scaling', () => {
     viewport.zoom_around.mockReturnValue(makeZoomResult(1))
     // Canvas is 800x600 internally but displayed at half size.
