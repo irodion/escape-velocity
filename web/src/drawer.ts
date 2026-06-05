@@ -22,6 +22,11 @@ export function mountDrawer(toggle: HTMLButtonElement, drawer: HTMLElement): voi
   const setOpen = (open: boolean): void => {
     drawer.classList.toggle('open', open)
     toggle.setAttribute('aria-expanded', String(open))
+    // Swap the glyph + label so the open-state button reads as "close"
+    // rather than blending into the panel as another ☰. The glyph is the
+    // visible affordance; the label keeps assistive tech in step.
+    toggle.textContent = open ? '✕' : '☰'
+    toggle.setAttribute('aria-label', open ? 'Close controls' : 'Open controls')
     // `inert` is the load-bearing a11y bit: a closed drawer is only
     // translated off-screen, so without it the (invisible) selects stay
     // tabbable and screen-reader-visible.

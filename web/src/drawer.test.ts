@@ -24,19 +24,23 @@ describe('mountDrawer', () => {
     document.body.innerHTML = ''
   })
 
-  it('lands closed regardless of the markup, normalising aria + inert', () => {
+  it('lands closed regardless of the markup, normalising aria + inert + glyph', () => {
     const { toggle, drawer } = setup()
     // Markup said aria-expanded="true"; mount forces the real closed state.
     expect(drawer.classList.contains('open')).toBe(false)
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(toggle.textContent).toBe('☰')
+    expect(toggle.getAttribute('aria-label')).toBe('Open controls')
     expect(drawer.inert).toBe(true)
   })
 
-  it('opens on click — slide class, aria, interactivity, and focus handoff', () => {
+  it('opens on click — slide class, aria, glyph, interactivity, and focus handoff', () => {
     const { toggle, drawer, firstSelect } = setup()
     toggle.click()
     expect(drawer.classList.contains('open')).toBe(true)
     expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(toggle.textContent).toBe('✕')
+    expect(toggle.getAttribute('aria-label')).toBe('Close controls')
     expect(drawer.inert).toBe(false)
     expect(document.activeElement).toBe(firstSelect)
   })
