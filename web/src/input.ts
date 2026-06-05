@@ -175,16 +175,18 @@ export class InputController {
     event.preventDefault()
     // Begin a fresh Preview when no scrub is active, or when a paint has
     // cleared the transform (the buffer now matches `currentViewport`, so
-    // the Preview re-bases to identity). Mid-scrub, keep accumulating the
-    // existing matrix so it stays relative to the frame still on screen.
-    const beginning = this.zoomPreview === null || this.canvas.style.transform === ''
-    // Capture the layout box only at the start of a scrub, while the
-    // transform is still cleared so the rect is untransformed. Reusing it
-    // for every notch keeps the cursor anchor pinned to the pointer; a
-    // mid-scrub `getBoundingClientRect` would return the already-scaled
-    // box and the anchor would creep away (the "shifted zoom centre" bug).
-    if (beginning) {
+    // the Preview re-bases to identity). Mid-scrub, continue the existing
+    // matrix so it stays relative to the frame still on screen. The same
+    // condition gates capturing the layout box: take it once at the start
+    // of a scrub, while the transform is still cleared so the rect is
+    // untransformed, then reuse it for every notch — this pins the cursor
+    // anchor to the pointer. A mid-scrub `getBoundingClientRect` would
+    // return the already-scaled box and the anchor would creep away (the
+    // "shifted zoom centre" bug).
+    let preview = this.zoomPreview
+    if (preview === null || this.canvas.style.transform === '') {
       this.scrubRect = this.canvas.getBoundingClientRect()
+      preview = beginZoomPreview(this.currentViewport)
     }
     const rect = this.scrubRect
     if (rect === null || rect.width <= 0 || rect.height <= 0) return
@@ -199,18 +201,7 @@ export class InputController {
     const pixelY = (cssY * this.currentViewport.height()) / rect.height
     const factor = 1.25 ** (-normalizeWheelDelta(event) / 100)
 
-    if (beginning) {
-      this.zoomPreview = beginZoomPreview(this.currentViewport)
-    }
-    // `beginning` guarantees zoomPreview is non-null here.
-    this.zoomPreview = applyZoomNotch(
-      this.zoomPreview as ZoomPreview,
-      pixelX,
-      pixelY,
-      cssX,
-      cssY,
-      factor,
-    )
+    this.zoomPreview = applyZoomNotch(preview, pixelX, pixelY, cssX, cssY, factor)
     this.currentViewport = this.zoomPreview.viewport
     this.canvas.style.transform = zoomPreviewTransform(this.zoomPreview)
 
