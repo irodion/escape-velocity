@@ -10,6 +10,7 @@ import {
 import { InputController } from './input.js'
 import { createPwaLifecycle } from './pwa-lifecycle.js'
 import { mountPwaUi } from './pwa-ui.js'
+import { computeBufferDims } from './render-buffer.js'
 import { recolorize, render } from './render-client.js'
 
 // PWA install + update lifecycle (Slice 8B). The controller (a deep, tested
@@ -39,13 +40,21 @@ mountPwaUi(pwa, document.body)
 // page lands on coloured smooth output (Viridis + Cycled) rather than
 // the grey baseline. Slice 5C inherits the same Slice 1 zoom — the
 // per-mode default views below are consulted only on a mode toggle.
-// The display (logical) size of the viewport in CSS pixels. The render
-// buffer is this size times the render-scale multiplier (below); the
-// viewport itself — and therefore the framing — always uses the display
-// size, so changing render scale never alters what region is shown.
-const DISPLAY_WIDTH = 800
-const DISPLAY_HEIGHT = 600
+// Fit-to-window (Slice 2): the viewport's logical dimensions track the
+// canvas's CSS box — the window area it fills — instead of a fixed
+// 800×600. A bigger window therefore reveals more of the plane (ADR-0011
+// keys pixel-scale to a reference width, so more logical pixels = more
+// plane, square pixels preserved). The render buffer is the logical size
+// × render scale, bounded by MAX_RENDER_PIXELS so a huge window cannot
+// hand the single-worker CPU renderer unbounded work.
 const INITIAL_RENDER_SCALE = 1
+// ~2.5M px ≈ the heaviest pre-fit-to-window preset (1600×1200). Beyond
+// this the buffer is shrunk uniformly and CSS upscales it to fill.
+const MAX_RENDER_PIXELS = 2_500_000
+// A window resize fires continuously; coalesce to one recompute ~150ms
+// after it settles. During the drag the full-bleed canvas CSS-stretches
+// the last buffer as a cheap (briefly soft) preview.
+const RESIZE_DEBOUNCE_MS = 150
 const INITIAL_MAX_ITER = 256
 const INITIAL_PALETTE: PaletteName = 'viridis'
 const INITIAL_NORMALISATION: NormalisationName = 'cycled'
@@ -86,7 +95,24 @@ if (!(controlsForm instanceof HTMLFormElement)) {
 // handle now that pixel work has moved off-thread.
 await init()
 
-let viewport = new Viewport(CENTER_RE, CENTER_IM, ZOOM, DISPLAY_WIDTH, DISPLAY_HEIGHT)
+// The viewport's logical dimensions: the canvas's CSS box, rounded and
+// floored to ≥ 1 so a pre-layout or `display:none` canvas can't feed a
+// zero dimension to the WASM seam. Re-read after every layout change
+// (boot + window resize) so the fractal always fills the live window.
+// This is the *only* source of the logical size, so it relies on the
+// canvas being laid out to fill its intended area — see the full-bleed
+// flex rules for `#fractal` in index.html. A CSS refactor that changes
+// how the canvas is sized must keep that contract.
+const measureLogicalSize = (): { width: number; height: number } => {
+  const rect = canvas.getBoundingClientRect()
+  return {
+    width: Math.max(1, Math.round(rect.width)),
+    height: Math.max(1, Math.round(rect.height)),
+  }
+}
+
+const boot = measureLogicalSize()
+let viewport = new Viewport(CENTER_RE, CENTER_IM, ZOOM, boot.width, boot.height)
 let current: Settings = {
   maxIter: INITIAL_MAX_ITER,
   renderScale: INITIAL_RENDER_SCALE,
@@ -130,38 +156,36 @@ const kindEnum = (name: FractalMode): FractalKind => {
   }
 }
 
-// Size the canvas backing store (the render buffer) to the display
-// size times the current render-scale multiplier. The CSS display size
-// is fixed at 800×600 (index.html), so a scale >1 supersamples and <1
-// subsamples; the browser scales the buffer to the display box. Must be
-// kept in lockstep with the dimensions `rerender` sends the worker, so
-// `putImageData` receives a buffer sized to the canvas.
-const syncCanvasToRenderScale = (): void => {
-  canvas.width = Math.round(viewport.width() * current.renderScale)
-  canvas.height = Math.round(viewport.height() * current.renderScale)
-}
-
 const rerender = (): void => {
   // Flatten the `Viewport` instance into primitives: the wasm-bindgen
   // class cannot survive `postMessage` to the worker, so the client
   // ships the accessor values and the worker rebuilds a Viewport
   // against its own WASM instance.
   //
-  // Render scale is applied here, at the render seam: the buffer is the
-  // display size × scale, and `zoom` is multiplied by the same scale so
-  // the larger/smaller buffer covers the *same* framing at higher/lower
-  // sample density (ADR-0011 keys pixel-scale to a fixed reference
-  // width, so dimensions × zoom must move together to hold the window).
-  // The stored `viewport` keeps the true zoom and display dimensions —
-  // this scaling is a transient property of the render request only.
-  const scale = current.renderScale
+  // Render scale + the pixel budget are applied here, at the render
+  // seam. `computeBufferDims` turns the logical (display) size into the
+  // buffer the worker computes, and returns the *effective* scale once
+  // the budget bites. `zoom` is multiplied by that same effective scale
+  // so the buffer — whatever its final size — covers the SAME framing at
+  // higher/lower sample density (ADR-0011 keys pixel-scale to a fixed
+  // reference width, so dimensions × zoom must move together to hold the
+  // window). The stored `viewport` keeps the true zoom and logical
+  // dimensions — this scaling is a transient property of the request,
+  // and the canvas backing store is sized to match when the frame paints
+  // (see `paint` in render-client).
+  const { width, height, scale } = computeBufferDims(
+    viewport.width(),
+    viewport.height(),
+    current.renderScale,
+    MAX_RENDER_PIXELS,
+  )
   render(
     {
       centerRe: viewport.center_re(),
       centerIm: viewport.center_im(),
       zoom: viewport.zoom() * scale,
-      width: Math.round(viewport.width() * scale),
-      height: Math.round(viewport.height() * scale),
+      width,
+      height,
     },
     ctx,
     current.maxIter,
@@ -173,7 +197,6 @@ const rerender = (): void => {
   )
 }
 
-syncCanvasToRenderScale()
 rerender()
 
 const inputController = new InputController(canvas, viewport, (next) => {
@@ -182,6 +205,39 @@ const inputController = new InputController(canvas, viewport, (next) => {
   viewport = next
   rerender()
 })
+
+// Fit-to-window: re-fit the viewport whenever the canvas's measured box
+// changes, then recompute. A ResizeObserver on the canvas — rather than
+// a `window.resize` listener — ties the fit to the *actual* box, so it
+// also catches changes that fire no window resize: a sibling entering
+// flex flow (the PWA install button appearing below the canvas), a
+// device rotation, or any reflow. Debounced so a continuous window drag
+// triggers a single recompute once it settles; in between, the
+// full-bleed canvas CSS-stretches the last buffer as a live preview.
+// `with_resolution` preserves center and zoom, so only the framing
+// extent grows/shrinks with the box, never the set's proportions.
+let resizeTimer: ReturnType<typeof setTimeout> | undefined
+const refitToCanvas = (): void => {
+  resizeTimer = undefined
+  const { width, height } = measureLogicalSize()
+  if (width === viewport.width() && height === viewport.height()) {
+    return
+  }
+  viewport = viewport.with_resolution(width, height)
+  inputController.setViewport(viewport)
+  rerender()
+}
+// ResizeObserver delivers an initial callback on observe(); the no-op
+// guard above absorbs it, since the boot viewport already matches the
+// measured box. Resizing the backing store at paint time changes only
+// the canvas's intrinsic size, not its CSS box, so this never loops.
+const resizeObserver = new ResizeObserver(() => {
+  if (resizeTimer !== undefined) {
+    clearTimeout(resizeTimer)
+  }
+  resizeTimer = setTimeout(refitToCanvas, RESIZE_DEBOUNCE_MS)
+})
+resizeObserver.observe(canvas)
 
 const controls = new Controls(controlsForm, current, (rawNext) => {
   // Substitute the last-known-finite c values for any non-finite
@@ -222,12 +278,12 @@ const controls = new Controls(controlsForm, current, (rawNext) => {
   // Branch 1: fractal-family change. Reset the viewport to the
   // canonical "starting frame" for the new family so the user lands
   // on the whole structure instead of an arbitrary deep dive that
-  // happened to be loaded for the previous family. The viewport always
-  // uses the fixed display size; render scale is applied later, at the
-  // render seam, so it is not part of the viewport here.
+  // happened to be loaded for the previous family. The viewport keeps
+  // the current logical (window) dimensions; render scale is applied
+  // later, at the render seam, so it is not part of the viewport here.
   if (next.mode !== current.mode) {
     const view = next.mode === 'mandelbrot' ? MANDELBROT_DEFAULT_VIEW : JULIA_DEFAULT_VIEW
-    viewport = new Viewport(view.re, view.im, view.zoom, DISPLAY_WIDTH, DISPLAY_HEIGHT)
+    viewport = new Viewport(view.re, view.im, view.zoom, viewport.width(), viewport.height())
     inputController.setViewport(viewport)
     current = next
     rerender()
@@ -236,14 +292,12 @@ const controls = new Controls(controlsForm, current, (rawNext) => {
 
   // Branch 2: render-scale change. A pure quality knob: the viewport
   // (framing) is untouched, so neither the stored viewport nor the
-  // input controller's reference changes. Only the canvas backing-store
-  // size advances — `rerender` re-derives the buffer dimensions and the
-  // scale-compensated zoom from `current.renderScale`. The drag preview
-  // in InputController reads the live `canvas.width`, so it tracks the
-  // new buffer automatically.
+  // input controller's reference changes. `rerender` re-derives the
+  // buffer dimensions and the scale-compensated zoom from
+  // `current.renderScale`, and the canvas backing store is resized when
+  // the new frame paints (see `paint` in render-client).
   if (next.renderScale !== current.renderScale) {
     current = next
-    syncCanvasToRenderScale()
     rerender()
     return
   }
