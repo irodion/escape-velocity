@@ -54,6 +54,10 @@ describe('isolation-survival guard', () => {
     expect(pwaWorkbox.globPatterns?.some((p) => p.includes('wasm'))).toBe(true)
   })
 
+  it('precaches the self-hosted fonts (globs include woff2) so offline keeps the console typography', () => {
+    expect(pwaWorkbox.globPatterns?.some((p) => p.includes('woff2'))).toBe(true)
+  })
+
   it('keeps the precache size cap above the built .wasm so it is never silently dropped', () => {
     // Read the real artifact (built by `wasm:build` before vitest runs). If a
     // future binary grows past the cap, Workbox would drop it with only a

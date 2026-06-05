@@ -29,7 +29,9 @@ describe('mountDrawer', () => {
     // Markup said aria-expanded="true"; mount forces the real closed state.
     expect(drawer.classList.contains('open')).toBe(false)
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
-    expect(toggle.textContent).toBe('☰')
+    // Closed shows the crosshair glyph — distinguished from the ✕ by its
+    // <circle>; the ✕ is paths only.
+    expect(toggle.querySelector('svg circle')).not.toBeNull()
     expect(toggle.getAttribute('aria-label')).toBe('Open controls')
     expect(drawer.inert).toBe(true)
   })
@@ -39,7 +41,9 @@ describe('mountDrawer', () => {
     toggle.click()
     expect(drawer.classList.contains('open')).toBe(true)
     expect(toggle.getAttribute('aria-expanded')).toBe('true')
-    expect(toggle.textContent).toBe('✕')
+    // Open swaps to the ✕ glyph: an SVG with no <circle>.
+    expect(toggle.querySelector('svg')).not.toBeNull()
+    expect(toggle.querySelector('svg circle')).toBeNull()
     expect(toggle.getAttribute('aria-label')).toBe('Close controls')
     expect(drawer.inert).toBe(false)
     expect(document.activeElement).toBe(firstSelect)

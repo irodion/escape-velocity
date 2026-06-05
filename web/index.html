@@ -2,22 +2,56 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
     <title>Escape Velocity</title>
     <style>
-      /* Fit-to-window (Slice 2): the page is a flex column whose canvas
-         fills the window. The canvas's CSS box is the viewport's logical
-         size; main.ts measures it (and re-measures on resize) to size the
-         render buffer. The render-scale multiplier then super/sub-samples
-         that buffer without changing the framing or the display size.
+      /* ─────────────────────────── design tokens ───────────────────────────
+         The "Instrument Console" skin (Slice 4 redesign). The UI's whole
+         component system is this handful of CSS custom properties plus native
+         form controls — no framework, no widget library (ADR-0003). `--accent`
+         is rewritten from main.ts to track the active palette, so the console
+         reads as an instrument tuned to whatever it's rendering. Fonts are
+         self-hosted via @fontsource (imported in main.ts) so the offline PWA
+         never reaches for a CDN. */
+      :root {
+        --ink:        #e8ecf1;   /* primary readout text   */
+        --ink-dim:    #8b93a3;   /* labels, secondary      */
+        --ink-faint:  #5b6373;   /* hairlines, disabled    */
+        --panel:      rgba(13, 16, 22, 0.62);     /* translucent slab */
+        --panel-edge: rgba(255, 255, 255, 0.1);
+        --hair:       rgba(255, 255, 255, 0.08);
+        --accent:     #5fd0c0;   /* keyed to palette at runtime (main.ts) */
+        --accent-dim: color-mix(in oklab, var(--accent) 28%, transparent);
 
-         Controls drawer (Slice 4): the controls panel is fixed-positioned
-         and so removed from the flex flow — the canvas owns the whole
-         window, and opening the drawer overlays it without changing its
-         CSS box (so the fit-to-window ResizeObserver never fires). The
-         only in-flow sibling below the canvas is the PWA install button. */
+        --font-mono:  "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+        --font-tech:  "Martian Mono Variable", var(--font-mono);
+
+        --r: 3px;   /* the only rounding — near-square, "instrument" not "card" */
+        --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+      }
+
+      *, *::before, *::after { box-sizing: border-box; }
+
+      /* Fit-to-window (Slice 2): the page is a flex column whose canvas fills
+         the window. main.ts measures the canvas's CSS box to size the render
+         buffer (re-measured on resize via ResizeObserver).
+
+         Controls drawer (Slice 4): the controls panel is fixed-positioned and
+         so removed from the flex flow — the canvas owns the whole window, and
+         opening the drawer overlays it without changing its CSS box (so the
+         fit-to-window ResizeObserver never fires). The only in-flow sibling
+         below the canvas is the PWA install button. */
       html, body { margin: 0; height: 100%; }
-      body { display: flex; flex-direction: column; min-height: 100vh; }
+      body {
+        display: flex;
+        flex-direction: column;
+        min-height: 100dvh;
+        background: #05070b;
+        color: var(--ink);
+        font-family: var(--font-mono);
+        -webkit-font-smoothing: antialiased;
+      }
       canvas#fractal {
         cursor: crosshair;
         flex: 1 1 auto;
@@ -27,154 +61,413 @@
       }
       canvas#fractal.dragging { cursor: all-scroll; }
 
-      /* The ☰ toggle floats above everything, always visible, in the
-         top-left corner. It stacks above the drawer so it doubles as the
-         close affordance once the panel slides over it. */
-      #controls-toggle {
+      /* A faint vignette so the translucent panel edge always has something to
+         sit against, whatever the fractal happens to show. Pure decoration —
+         pointer-events: none keeps it out of the way of canvas pan/zoom. */
+      .vignette {
         position: fixed;
-        top: 0.75rem;
-        left: 0.75rem;
-        z-index: 20;
-        width: 2.5rem;
-        height: 2.5rem;
-        padding: 0;
-        font-size: 1.25rem;
-        line-height: 1;
-        color: #f0f0f0;
-        background: #1a1a22;
-        border: none;
-        border-radius: 6px;
-        cursor: pointer;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+        inset: 0;
+        z-index: 5;
+        pointer-events: none;
+        background: radial-gradient(
+          120% 120% at 30% 40%,
+          transparent 55%,
+          rgba(0, 0, 0, 0.45) 100%
+        );
       }
 
-      /* The drawer slides in from the left over the canvas. Closed by
-         default (translated fully off-screen + `inert`, set by drawer.ts);
-         `.open` slides it into view. `width: min(20rem, 85vw)` keeps it
-         from spanning a narrow phone screen, and the column layout +
-         `overflow-y: auto` stack the controls with no horizontal overflow
-         and scroll if they outrun a short viewport. */
+      /* ─────────────────────────── the toggle ───────────────────────────
+         A *drawn* crosshair (SVG injected by drawer.ts) that echoes the
+         canvas's crosshair cursor: the affordance points at what the panel
+         controls. It stacks above the drawer so it doubles as the close
+         affordance once the panel slides over it, morphing to an ✕ on open. */
+      #controls-toggle {
+        position: fixed;
+        top: max(0.9rem, env(safe-area-inset-top));
+        left: max(0.9rem, env(safe-area-inset-left));
+        z-index: 30;
+        display: grid;
+        place-items: center;
+        width: 2.85rem;
+        height: 2.85rem;
+        padding: 0;
+        color: var(--ink);
+        background: var(--panel);
+        -webkit-backdrop-filter: blur(14px) saturate(1.2);
+        backdrop-filter: blur(14px) saturate(1.2);
+        border: 1px solid var(--panel-edge);
+        border-radius: var(--r);
+        cursor: pointer;
+        transition: color 0.2s var(--ease), border-color 0.2s var(--ease),
+          transform 0.2s var(--ease);
+      }
+      #controls-toggle:hover { color: var(--accent); border-color: var(--accent-dim); }
+      #controls-toggle:active { transform: scale(0.94); }
+      #controls-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+      #controls-toggle svg { width: 1.25rem; height: 1.25rem; display: block; }
+
+      /* ─────────────────────────── the drawer ───────────────────────────
+         Slides in from the left over the canvas. Closed by default (translated
+         off-screen + `inert`, set by drawer.ts); `.open` slides it in.
+         Translucent + backdrop-blur so the fractal bleeds through (atmosphere,
+         and a visual "this controls that"). `width: min(21rem, 86vw)` keeps it
+         off a narrow phone's full width; the column layout + `overflow-y: auto`
+         stack the controls and scroll on a short viewport. Touch-tuned with
+         safe-area insets and `100dvh` for mobile browser chrome. */
       form#controls {
         position: fixed;
         top: 0;
         left: 0;
-        z-index: 10;
+        z-index: 20;
         box-sizing: border-box;
         display: flex;
         flex-direction: column;
-        gap: 0.75rem;
-        width: min(20rem, 85vw);
-        height: 100%;
+        width: min(21rem, 86vw);
+        height: 100dvh;
         margin: 0;
-        /* Top padding clears the floating ☰ button. */
-        padding: 3.75rem 1rem 1rem;
+        /* Top padding clears the floating crosshair toggle. */
+        padding:
+          calc(env(safe-area-inset-top) + 4.4rem)
+          1.35rem
+          calc(env(safe-area-inset-bottom) + 1.35rem)
+          max(1.35rem, env(safe-area-inset-left));
         overflow-y: auto;
-        color: #f0f0f0;
-        background: #1a1a22;
-        box-shadow: 2px 0 12px rgba(0, 0, 0, 0.4);
-        transform: translateX(-100%);
-        transition: transform 0.2s ease;
+        overscroll-behavior: contain;
+        color: var(--ink);
+        background: var(--panel);
+        -webkit-backdrop-filter: blur(22px) saturate(1.25);
+        backdrop-filter: blur(22px) saturate(1.25);
+        border-right: 1px solid var(--panel-edge);
+        /* the instrument texture: barely-there horizontal scanlines */
+        background-image: repeating-linear-gradient(
+          to bottom,
+          rgba(255, 255, 255, 0.018) 0,
+          rgba(255, 255, 255, 0.018) 1px,
+          transparent 1px,
+          transparent 3px
+        );
+        transform: translateX(-101%);
+        transition: transform 0.26s var(--ease);
       }
       form#controls.open { transform: translateX(0); }
-      form#controls label { display: block; margin: 0; }
-      /* Respect a reduced-motion preference: snap instead of slide. */
-      @media (prefers-reduced-motion: reduce) {
-        form#controls { transition: none; }
+
+      /* ── wordmark header ── */
+      .console-head {
+        display: flex;
+        align-items: baseline;
+        gap: 0.55rem;
+        margin-bottom: 1.6rem;
       }
-      /* Visualise the Mandelbrot-mode state of the `c` inputs: dim the
-         input itself, and use `:has()` to dim the surrounding <label>
-         so the visitor reads the whole c.re / c.im strip as "off"
-         rather than just the field. */
-      input[type="number"]:disabled { opacity: 0.5; }
-      form#controls label:has(input:disabled) { opacity: 0.6; }
-      /* PWA UI (Slice 8B): the Install button sits in normal flow under the
-         canvas; the update / offline-ready toast floats bottom-right. Both
-         are created and toggled by the pwa-ui presenter via the `hidden`
-         attribute, so they take no space until the lifecycle calls for them. */
-      #pwa-install { margin-top: 0.5rem; }
+      .console-head .mark {
+        font-family: var(--font-tech);
+        font-weight: 600;
+        font-size: 0.72rem;
+        letter-spacing: 0.34em;
+        text-transform: uppercase;
+        color: var(--ink);
+      }
+      .console-head .sub {
+        margin-left: auto;
+        font-size: 0.62rem;
+        letter-spacing: 0.1em;
+        color: var(--ink-dim);
+      }
+      .console-head .sub b { color: var(--accent); font-weight: 500; }
+
+      /* ── a control row ──
+         A tiny uppercase label stacked over a borderless native control, with
+         a hairline beneath: the form reads as a stack of instrument readouts
+         rather than a stack of boxes. */
+      form#controls label.field {
+        position: relative;
+        display: block;
+        margin: 0;
+        padding: 0.7rem 0 0.65rem;
+        border-bottom: 1px solid var(--hair);
+      }
+      form#controls label.field:first-of-type { border-top: 1px solid var(--hair); }
+
+      .field__label {
+        display: block;
+        font-family: var(--font-tech);
+        font-weight: 500;
+        font-size: 0.595rem;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: var(--ink-dim);
+        margin: 0 0 0.15rem;
+        transition: color 0.15s var(--ease);
+      }
+      .field:focus-within .field__label { color: var(--accent); }
+
+      /* The wrapper carries the custom caret — a <select> can't host ::after.
+         Block so the native control's `width: 100%` resolves against it. */
+      .field__control { position: relative; display: block; }
+      .field__control::after {
+        content: "";
+        position: absolute;
+        right: 0.1rem;
+        top: 50%;
+        width: 0.62rem;
+        height: 0.62rem;
+        translate: 0 -45%;
+        pointer-events: none;
+        background: var(--ink-dim);
+        transition: background 0.15s var(--ease);
+        /* a thin chevron, drawn as a clip-path so it inherits colour */
+        clip-path: polygon(8% 28%, 50% 70%, 92% 28%, 80% 18%, 50% 52%, 20% 18%);
+      }
+      .field:hover .field__control::after { background: var(--accent); }
+      .field--c .field__control::after { content: none; }
+
+      /* The native control, stripped to a transparent readout. */
+      select, .field--c input {
+        appearance: none;
+        -webkit-appearance: none;
+        width: 100%;
+        min-height: 2.6rem;       /* comfortable touch target */
+        margin: 0;
+        padding: 0 1.1rem 0 0;
+        font-family: var(--font-mono);
+        font-weight: 500;
+        font-size: 1.02rem;
+        letter-spacing: 0.01em;
+        color: var(--ink);
+        background: transparent;
+        border: none;
+        border-radius: 0;
+        cursor: pointer;
+      }
+      select:focus-visible, .field--c input:focus-visible { outline: none; color: var(--accent); }
+      /* Keep the native popup dark even where it can't be restyled. */
+      select option { background: #0d1016; color: var(--ink); }
+
+      /* ── c.re / c.im as a single coordinate readout ── */
+      .field--c .c-row {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        font-size: 1.02rem;
+      }
+      .field--c .c-tok { color: var(--ink-dim); font-weight: 400; }
+      .field--c input {
+        min-height: 2.2rem;
+        width: auto;
+        flex: 1 1 0;
+        padding: 0;
+        text-align: left;
+        font-variant-numeric: tabular-nums;
+        cursor: text;
+      }
+      /* Spinners off — this is a readout, not a stepper. */
+      .field--c input::-webkit-outer-spin-button,
+      .field--c input::-webkit-inner-spin-button { appearance: none; margin: 0; }
+      .field--c input[type="number"] { -moz-appearance: textfield; }
+      /* Mandelbrot-mode visual state: dim the disabled c inputs, and use
+         `:has()` to dim the whole coordinate strip so the visitor reads it as
+         "off" rather than just the fields. */
+      input[type="number"]:disabled { cursor: default; }
+      form#controls label.field--c:has(input:disabled) { opacity: 0.4; }
+
+      /* ── progressive enhancement: fully styled native popup where supported ──
+         Chrome/Edge 135+ (~70% of users as of 2026); everywhere else the rules
+         above already give a clean closed control + a dark native popup, so
+         this is pure enhancement with the native element as the fallback. */
+      @supports (appearance: base-select) {
+        select, ::picker(select) { appearance: base-select; }
+        select { padding-right: 1.1rem; border: none; }
+        select::picker-icon { display: none; }   /* we draw our own caret */
+        ::picker(select) {
+          margin-top: 0.4rem;
+          padding: 0.3rem;
+          background: rgba(13, 16, 22, 0.92);
+          -webkit-backdrop-filter: blur(22px);
+          backdrop-filter: blur(22px);
+          border: 1px solid var(--panel-edge);
+          border-radius: var(--r);
+          box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+          --anchor-gap: 0;
+        }
+        select option {
+          padding: 0.5rem 0.7rem;
+          font-family: var(--font-mono);
+          font-size: 0.95rem;
+          color: var(--ink-dim);
+          border-radius: 2px;
+        }
+        option:hover, option:focus { background: var(--accent-dim); color: var(--ink); }
+        option:checked { color: var(--accent); }
+        option::checkmark { content: "›"; margin-right: 0.4rem; color: var(--accent); }
+      }
+
+      /* ── one orchestrated load moment: staggered reveal of the rows on open ── */
+      form#controls.open .console-head,
+      form#controls.open .field {
+        animation: ev-rise 0.42s var(--ease) backwards;
+      }
+      form#controls.open .console-head { animation-delay: 0.02s; }
+      form#controls.open .field:nth-of-type(1) { animation-delay: 0.06s; }
+      form#controls.open .field:nth-of-type(2) { animation-delay: 0.1s; }
+      form#controls.open .field:nth-of-type(3) { animation-delay: 0.14s; }
+      form#controls.open .field:nth-of-type(4) { animation-delay: 0.18s; }
+      form#controls.open .field:nth-of-type(5) { animation-delay: 0.22s; }
+      form#controls.open .field:nth-of-type(6) { animation-delay: 0.26s; }
+      @keyframes ev-rise {
+        from { opacity: 0; transform: translateY(7px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+
+      /* ── PWA UI (Slice 8B), re-skinned to the console ──
+         The Install button sits in normal flow under the canvas; the update /
+         offline-ready toast floats bottom-right. Both are created and toggled
+         by the pwa-ui presenter via the `hidden` attribute, so they take no
+         space until the lifecycle calls for them. */
+      #pwa-install {
+        align-self: flex-start;
+        margin: 0.6rem;
+        padding: 0.55rem 1rem;
+        font-family: var(--font-tech);
+        font-size: 0.62rem;
+        font-weight: 500;
+        letter-spacing: 0.2em;
+        text-transform: uppercase;
+        color: var(--ink);
+        background: var(--panel);
+        -webkit-backdrop-filter: blur(14px);
+        backdrop-filter: blur(14px);
+        border: 1px solid var(--panel-edge);
+        border-radius: var(--r);
+        cursor: pointer;
+      }
+      #pwa-install:hover { color: var(--accent); border-color: var(--accent-dim); }
       #pwa-install[hidden], .pwa-toast[hidden] { display: none; }
       .pwa-toast {
         position: fixed;
-        bottom: 1rem;
-        right: 1rem;
+        bottom: max(1rem, env(safe-area-inset-bottom));
+        right: max(1rem, env(safe-area-inset-right));
+        z-index: 40;
         display: flex;
-        gap: 0.5rem;
+        gap: 0.6rem;
         align-items: center;
-        padding: 0.6rem 0.9rem;
-        border-radius: 6px;
-        background: #1a1a22;
-        color: #f0f0f0;
-        font-size: 0.9rem;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+        padding: 0.7rem 0.9rem;
+        font-size: 0.82rem;
+        color: var(--ink);
+        background: var(--panel);
+        -webkit-backdrop-filter: blur(18px) saturate(1.2);
+        backdrop-filter: blur(18px) saturate(1.2);
+        border: 1px solid var(--panel-edge);
+        border-radius: var(--r);
+        box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
+      }
+      .pwa-toast button {
+        padding: 0.35rem 0.7rem;
+        font-family: var(--font-tech);
+        font-size: 0.58rem;
+        font-weight: 500;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--ink);
+        background: transparent;
+        border: 1px solid var(--panel-edge);
+        border-radius: 2px;
+        cursor: pointer;
+      }
+      .pwa-toast button:hover { color: var(--accent); border-color: var(--accent-dim); }
+
+      /* Respect a reduced-motion preference: snap instead of slide, and skip
+         the staggered reveal. Last in the cascade so it overrides the slide /
+         reveal rules above it. */
+      @media (prefers-reduced-motion: reduce) {
+        form#controls, #controls-toggle { transition: none; }
+        form#controls.open .console-head, form#controls.open .field { animation: none; }
       }
     </style>
   </head>
   <body>
+    <!-- Empty on purpose: drawer.ts injects the crosshair / ✕ SVG glyph and
+         keeps aria-label + aria-expanded in step with the open state. -->
     <button
       id="controls-toggle"
       type="button"
       aria-label="Open controls"
       aria-controls="controls"
       aria-expanded="false"
-    >
-      ☰
-    </button>
+    ></button>
     <form id="controls">
-      <label>
-        Iterations:
-        <select name="max-iter">
-          <option value="64">64</option>
-          <option value="128">128</option>
-          <option value="256" selected>256</option>
-          <option value="512">512</option>
-          <option value="1024">1024</option>
-          <option value="2048">2048</option>
-          <option value="4096">4096</option>
-          <option value="8192">8192</option>
-        </select>
+      <div class="console-head">
+        <span class="mark">Escape&nbsp;Velocity</span>
+        <span class="sub">z<b>²</b>+c</span>
+      </div>
+      <label class="field">
+        <span class="field__label">Iterations</span>
+        <span class="field__control">
+          <select name="max-iter">
+            <option value="64">64</option>
+            <option value="128">128</option>
+            <option value="256" selected>256</option>
+            <option value="512">512</option>
+            <option value="1024">1024</option>
+            <option value="2048">2048</option>
+            <option value="4096">4096</option>
+            <option value="8192">8192</option>
+          </select>
+        </span>
       </label>
-      <label>
-        Resolution:
-        <select name="render-scale">
-          <option value="0.5">0.5× (faster)</option>
-          <option value="1" selected>1×</option>
-          <option value="2">2× (sharper)</option>
-        </select>
+      <label class="field">
+        <span class="field__label">Resolution</span>
+        <span class="field__control">
+          <select name="render-scale">
+            <option value="0.5">0.5× · faster</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2× · sharper</option>
+          </select>
+        </span>
       </label>
-      <label>
-        Palette:
-        <select name="palette">
-          <option value="grayscale">Grayscale</option>
-          <option value="viridis" selected>Viridis</option>
-          <option value="magma">Magma</option>
-          <option value="inferno">Inferno</option>
-          <option value="twilight">Twilight</option>
-        </select>
+      <label class="field">
+        <span class="field__label">Palette</span>
+        <span class="field__control">
+          <select name="palette">
+            <option value="grayscale">Grayscale</option>
+            <option value="viridis" selected>Viridis</option>
+            <option value="magma">Magma</option>
+            <option value="inferno">Inferno</option>
+            <option value="twilight">Twilight</option>
+          </select>
+        </span>
       </label>
-      <label>
-        Coloring:
-        <select name="normalisation">
-          <option value="cycled" selected>Cycled</option>
-          <option value="histogram">Match palette to image</option>
-        </select>
+      <label class="field">
+        <span class="field__label">Coloring</span>
+        <span class="field__control">
+          <select name="normalisation">
+            <option value="cycled" selected>Cycled</option>
+            <option value="histogram">Match palette to image</option>
+          </select>
+        </span>
       </label>
-      <label>
-        Fractal:
-        <select name="mode">
-          <option value="mandelbrot" selected>Mandelbrot</option>
-          <option value="julia">Julia</option>
-        </select>
+      <label class="field">
+        <span class="field__label">Fractal</span>
+        <span class="field__control">
+          <select name="mode">
+            <option value="mandelbrot" selected>Mandelbrot</option>
+            <option value="julia">Julia</option>
+          </select>
+        </span>
       </label>
-      <label>
-        c.re:
-        <input type="number" name="c-re" step="0.0001" value="-0.7" disabled />
-      </label>
-      <label>
-        c.im:
-        <input type="number" name="c-im" step="0.0001" value="0.27015" disabled />
+      <label class="field field--c">
+        <span class="field__label">Constant&nbsp;·&nbsp;c</span>
+        <span class="c-row">
+          <span class="c-tok">c =</span>
+          <input type="number" name="c-re" step="0.0001" value="-0.7" disabled
+            aria-label="c real part" />
+          <span class="c-tok">+</span>
+          <input type="number" name="c-im" step="0.0001" value="0.27015" disabled
+            aria-label="c imaginary part" />
+          <span class="c-tok">i</span>
+        </span>
       </label>
     </form>
     <canvas id="fractal" width="800" height="600"></canvas>
+    <div class="vignette"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

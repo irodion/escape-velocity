@@ -1,3 +1,11 @@
+// Self-hosted UI fonts (Slice 4 redesign). Imported here so Vite fingerprints
+// the woff2 as build assets and Workbox precaches them (pwa-config globs now
+// include woff2) — the offline PWA must never reach for a font CDN. Latin
+// subsets only (the UI is English); the variable Martian Mono ships every
+// subset behind unicode-range, so only the latin face is actually fetched.
+import '@fontsource/ibm-plex-mono/latin-400.css'
+import '@fontsource/ibm-plex-mono/latin-500.css'
+import '@fontsource-variable/martian-mono/wght.css'
 import { registerSW } from 'virtual:pwa-register'
 import init, { FractalKind, NormalizationMode, Palette, Viewport } from '../wasm/fractal_wasm.js'
 import {
@@ -133,6 +141,21 @@ let current: Settings = {
   cIm: INITIAL_C_IM,
 }
 
+// Tune the console's accent to the active palette so the controls read as an
+// instrument keyed to what it's rendering (the `--accent` CSS custom property
+// drives the toggle, focus rings, carets, and selected options in
+// index.html). A representative mid-to-high colour from each colourmap.
+const PALETTE_ACCENT: Record<PaletteName, string> = {
+  grayscale: '#c9c9d1',
+  viridis: '#5fd0c0',
+  magma: '#fe6a8c',
+  inferno: '#ff7a3c',
+  twilight: '#b78cff',
+}
+const applyAccent = (palette: PaletteName): void => {
+  document.documentElement.style.setProperty('--accent', PALETTE_ACCENT[palette])
+}
+
 const paletteEnum = (name: PaletteName): Palette => {
   switch (name) {
     case 'grayscale':
@@ -207,6 +230,7 @@ const rerender = (): void => {
   )
 }
 
+applyAccent(current.palette)
 rerender()
 
 const inputController = new InputController(canvas, viewport, (next) => {
@@ -278,6 +302,10 @@ const controls = new Controls(controlsForm, current, (rawNext) => {
   // back-write keeps form and image strictly aligned. Setting
   // `valueAsNumber` does not dispatch a `change`, so this is a
   // one-way sync that never re-enters the dispatcher.
+  // Keep the accent in step with the palette on every commit — cheap, and
+  // independent of which render branch below the change ends up taking.
+  applyAccent(rawNext.palette)
+
   const cRe = Number.isFinite(rawNext.cRe) ? rawNext.cRe : current.cRe
   const cIm = Number.isFinite(rawNext.cIm) ? rawNext.cIm : current.cIm
   if (cRe !== rawNext.cRe || cIm !== rawNext.cIm) {
