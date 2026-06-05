@@ -19,7 +19,14 @@
  * close, focus handoff — to warrant the focused test in `drawer.test.ts`.
  */
 export function mountDrawer(toggle: HTMLButtonElement, drawer: HTMLElement): void {
+  // The single in-memory source of truth for open/closed. `setOpen` is the
+  // only writer, so this can't drift from the DOM it drives — and the
+  // handlers below read this boolean rather than matching the `.open` class
+  // string back out of the element.
+  let isOpen = false
+
   const setOpen = (open: boolean): void => {
+    isOpen = open
     drawer.classList.toggle('open', open)
     toggle.setAttribute('aria-expanded', String(open))
     // Swap the glyph + label so the open-state button reads as "close"
@@ -33,29 +40,33 @@ export function mountDrawer(toggle: HTMLButtonElement, drawer: HTMLElement): voi
     drawer.inert = !open
   }
 
+  // Move focus to follow the panel: into the first control on open so
+  // keyboard users land in the drawer, back to the toggle on close so focus
+  // is never stranded on an inert element.
+  const handoffFocus = (): void => {
+    if (isOpen) {
+      drawer.querySelector<HTMLElement>('select, input, button')?.focus()
+    } else {
+      toggle.focus()
+    }
+  }
+
   // Land in the closed state regardless of the markup's initial attributes,
   // so the DOM and the ARIA state can never disagree at boot.
   setOpen(false)
 
   toggle.addEventListener('click', () => {
-    const willOpen = !drawer.classList.contains('open')
-    setOpen(willOpen)
-    // Hand focus into the panel on open so keyboard users reach the
-    // controls immediately; return it to the toggle on close so focus is
-    // never stranded on an inert element.
-    if (willOpen) {
-      const firstControl = drawer.querySelector<HTMLElement>('select, input, button')
-      firstControl?.focus()
-    } else {
-      toggle.focus()
-    }
+    setOpen(!isOpen)
+    handoffFocus()
   })
 
   // Escape closes from anywhere — the conventional dismiss for an overlay.
+  // Bound on `document` because focus sits inside the drawer (or on the
+  // toggle) while it's open, so a narrower scope would miss the key.
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && drawer.classList.contains('open')) {
+    if (event.key === 'Escape' && isOpen) {
       setOpen(false)
-      toggle.focus()
+      handoffFocus()
     }
   })
 }
