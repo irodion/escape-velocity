@@ -99,6 +99,10 @@ await init()
 // floored to ≥ 1 so a pre-layout or `display:none` canvas can't feed a
 // zero dimension to the WASM seam. Re-read after every layout change
 // (boot + window resize) so the fractal always fills the live window.
+// This is the *only* source of the logical size, so it relies on the
+// canvas being laid out to fill its intended area — see the full-bleed
+// flex rules for `#fractal` in index.html. A CSS refactor that changes
+// how the canvas is sized must keep that contract.
 const measureLogicalSize = (): { width: number; height: number } => {
   const rect = canvas.getBoundingClientRect()
   return {
