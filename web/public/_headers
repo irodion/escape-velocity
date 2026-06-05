@@ -1,0 +1,20 @@
+# Cloudflare Pages headers (ADR-0008). Copied verbatim from public/ into the
+# build root, where Cloudflare serves it. These headers make the deployed site
+# cross-origin isolated, which is what backs `SharedArrayBuffer` and therefore
+# the Slice 7 WASM thread pool (ADR-0007).
+#
+# This file is load-bearing for the Slice 8 service worker: Workbox precaches
+# the *full network response* (headers included) at install time, so as long as
+# every network response carries COOP/COEP, the SW-served cached index.html and
+# .wasm stay cross-origin isolated offline. Drop these headers and the SW would
+# serve a document without isolation → no SharedArrayBuffer → the render worker
+# throws at boot → multicore silently off. The pwa-config guard test fails if
+# COOP/COEP ever go missing here.
+#
+# Every asset is same-origin (self-hosted since Slice 0, watch-list #1), so
+# COEP: require-corp has no cross-origin subresource to reject; CORP is added
+# belt-and-braces.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+  Cross-Origin-Resource-Policy: same-origin

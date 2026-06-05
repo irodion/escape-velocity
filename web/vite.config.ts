@@ -1,4 +1,6 @@
 import { defineConfig, type Plugin } from 'vite'
+import { VitePWA } from 'vite-plugin-pwa'
+import { pwaManifest, pwaWorkbox } from './src/pwa-config'
 
 // Patch wasm-bindgen-rayon's generated `workerHelpers` snippet for two
 // Vite-specific problems. Runs in BOTH dev and build (fix #1 is a dev-only
@@ -85,7 +87,28 @@ export default defineConfig({
   // (worker.ts → initThreadPool), so the patch must apply to the worker build
   // and to dev (where the top-level plugins transform worker modules); the
   // main build carries a copy of the snippet too, so apply it there as well.
-  plugins: [patchRayonWorkerHelper()],
+  // PWA (Slice 8A). `generateSW` (Workbox) precaches the build for offline
+  // use; the manifest makes the app installable. `registerType: 'prompt'`
+  // means a freshly built SW *waits* rather than auto-reloading, so a deploy
+  // never yanks assets out from under an in-progress render — the user-facing
+  // update prompt + install button are Slice 8B's job. `injectRegister: false`
+  // because the SW is registered explicitly from `main.ts` via the
+  // `virtual:pwa-register` module (so 8B can route that registration through
+  // the pwa-lifecycle controller). `devOptions.enabled: false` keeps the SW
+  // out of `pnpm dev` entirely — ADR-0009's whole reason for deferring PWA to
+  // last: an active dev loop must not fight a caching service worker. The
+  // cross-origin-isolation headers the SW must preserve are served in dev/
+  // preview below and emitted for production in `public/_headers`.
+  plugins: [
+    patchRayonWorkerHelper(),
+    VitePWA({
+      registerType: 'prompt',
+      injectRegister: false,
+      devOptions: { enabled: false },
+      manifest: pwaManifest,
+      workbox: pwaWorkbox,
+    }),
+  ],
   server: {
     headers: crossOriginIsolationHeaders,
   },
