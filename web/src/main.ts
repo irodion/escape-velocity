@@ -1,3 +1,4 @@
+import { registerSW } from 'virtual:pwa-register'
 import init, { FractalKind, NormalizationMode, Palette, Viewport } from '../wasm/fractal_wasm.js'
 import {
   Controls,
@@ -8,6 +9,15 @@ import {
 } from './controls.js'
 import { InputController } from './input.js'
 import { recolorize, render } from './render-client.js'
+
+// Slice 8A: register the production service worker so the app precaches for
+// offline use. With `registerType: 'prompt'` a newly built SW waits instead
+// of auto-reloading; surfacing the "new version — reload" prompt and the
+// install button is Slice 8B (the pwa-lifecycle controller). Here we only
+// need the precache to activate, so a bare registration is enough. This is a
+// no-op in dev: `devOptions.enabled` is false, so `registerSW` is a stub and
+// no service worker is installed while iterating (ADR-0009).
+registerSW({ immediate: true })
 
 // Slice 1 hardcoded initial render constants (PRD #2); Slice 3 promotes
 // `maxIter` and canvas dimensions to form-driven `let`s but preserves
