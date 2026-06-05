@@ -54,11 +54,13 @@ export const pwaManifest: Partial<ManifestOptions> = {
 }
 
 export const pwaWorkbox: WorkboxOptions = {
-  // `wasm` is the load-bearing addition: vite-plugin-pwa's default
-  // `globPatterns` does NOT include it, so without this the `.wasm` is left
-  // out of the precache and offline rendering fails. The render worker and
-  // `wasm-bindgen-rayon` helper-worker chunks are `.js`, already covered.
-  globPatterns: ['**/*.{js,css,html,wasm,svg,png,ico,webmanifest}'],
+  // `wasm` and `woff2` are the load-bearing additions: vite-plugin-pwa's
+  // default `globPatterns` includes neither. Without `wasm` the `.wasm` is
+  // left out of the precache and offline rendering fails; without `woff2` the
+  // self-hosted UI fonts (Slice 4 redesign) aren't precached, so an offline
+  // launch silently falls back to the system monospace stack. The render
+  // worker and `wasm-bindgen-rayon` helper-worker chunks are `.js`, covered.
+  globPatterns: ['**/*.{js,css,html,wasm,woff2,svg,png,ico,webmanifest}'],
   maximumFileSizeToCacheInBytes: MAX_FILE_SIZE_BYTES,
   // Single-page app: any navigation offline falls back to the precached
   // index.html — which retains COOP/COEP because Workbox captured the full

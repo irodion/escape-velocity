@@ -2,8 +2,8 @@
  * Collapsible control-panel drawer (Slice 4).
  *
  * The controls live in a panel that slides in over the full-bleed canvas.
- * A persistently visible ☰ button toggles it; the drawer is closed by
- * default. Because the drawer is fixed-positioned (out of the flex flow —
+ * A persistently visible crosshair button toggles it; the drawer is closed
+ * by default. Because the drawer is fixed-positioned (out of the flex flow —
  * see index.html), opening it overlays the controls *without* changing the
  * canvas's CSS box, so the fit-to-window ResizeObserver in `main.ts` never
  * fires and the render buffer is untouched (Slice 2 / ADR-0011).
@@ -18,6 +18,23 @@
  * Pure view glue (like `pwa-ui`), but with enough branching — Escape to
  * close, focus handoff — to warrant the focused test in `drawer.test.ts`.
  */
+
+// The toggle's glyph is *drawn*, not an emoji: a crosshair that echoes the
+// canvas's `crosshair` cursor (the affordance points at what it controls),
+// morphing to an ✕ once the panel slides over it. SVG strings rather than
+// font glyphs so the mark renders identically on every platform and inherits
+// the button's `currentColor`. `aria-hidden` because the button's
+// `aria-label` (set in `setOpen`) already names the action for assistive tech.
+const CROSSHAIR_GLYPH =
+  '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">' +
+  '<circle cx="12" cy="12" r="6.2" stroke="currentColor" stroke-width="1.3"/>' +
+  '<path d="M12 1.5V6.5M12 17.5V22.5M1.5 12H6.5M17.5 12H22.5" ' +
+  'stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>'
+const CLOSE_GLYPH =
+  '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">' +
+  '<path d="M5.5 5.5L18.5 18.5M18.5 5.5L5.5 18.5" ' +
+  'stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>'
+
 export function mountDrawer(toggle: HTMLButtonElement, drawer: HTMLElement): void {
   // The single in-memory source of truth for open/closed. `setOpen` is the
   // only writer, so this can't drift from the DOM it drives — and the
@@ -30,9 +47,9 @@ export function mountDrawer(toggle: HTMLButtonElement, drawer: HTMLElement): voi
     drawer.classList.toggle('open', open)
     toggle.setAttribute('aria-expanded', String(open))
     // Swap the glyph + label so the open-state button reads as "close"
-    // rather than blending into the panel as another ☰. The glyph is the
-    // visible affordance; the label keeps assistive tech in step.
-    toggle.textContent = open ? '✕' : '☰'
+    // rather than blending into the panel as another crosshair. The glyph
+    // is the visible affordance; the label keeps assistive tech in step.
+    toggle.innerHTML = open ? CLOSE_GLYPH : CROSSHAIR_GLYPH
     toggle.setAttribute('aria-label', open ? 'Close controls' : 'Open controls')
     // `inert` is the load-bearing a11y bit: a closed drawer is only
     // translated off-screen, so without it the (invisible) selects stay
