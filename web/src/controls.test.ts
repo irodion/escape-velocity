@@ -9,8 +9,7 @@ import {
 
 const INITIAL: Settings = {
   maxIter: 256,
-  width: 800,
-  height: 600,
+  renderScale: 1,
   palette: 'viridis',
   normalisation: 'cycled',
   mode: 'mandelbrot',
@@ -20,8 +19,8 @@ const INITIAL: Settings = {
 
 // Build the same form layout the production index.html ships. Slices
 // 3 and 4 pin the option lists in their PRDs (max-iter: 64..8192
-// doubling; resolution: four 4:3 presets; palette: five matplotlib-
-// derived names; normalisation: cycled or histogram). Slice 5C adds
+// doubling; render-scale: 0.5×/1×/2× quality multipliers; palette: five
+// matplotlib-derived names; normalisation: cycled or histogram). Slice 5C adds
 // the `mode <select>` and the two `c.re` / `c.im` number inputs; the
 // numeric inputs ship `disabled` because the default mode is
 // Mandelbrot (which ignores `c`). The defaults selected here match
@@ -46,11 +45,10 @@ function buildForm(): HTMLFormElement {
     </label>
     <label>
       Resolution:
-      <select name="resolution">
-        <option value="400x300">400 × 300</option>
-        <option value="800x600" selected>800 × 600</option>
-        <option value="1200x900">1200 × 900</option>
-        <option value="1600x1200">1600 × 1200</option>
+      <select name="render-scale">
+        <option value="0.5">0.5× (faster)</option>
+        <option value="1" selected>1×</option>
+        <option value="2">2× (sharper)</option>
       </select>
     </label>
     <label>
@@ -129,10 +127,10 @@ describe('Controls', () => {
     }).toThrow(/initial\.maxIter=999/)
   })
 
-  it('throws when initial resolution does not match any <option>', () => {
+  it('throws when initial render scale does not match any <option>', () => {
     expect(() => {
-      new Controls(form, { ...INITIAL, width: 1000, height: 1000 }, onChange)
-    }).toThrow(/initial resolution "1000x1000"/)
+      new Controls(form, { ...INITIAL, renderScale: 3 }, onChange)
+    }).toThrow(/initial render scale "3"/)
   })
 
   it('throws when initial.palette does not match any <option>', () => {
@@ -172,7 +170,7 @@ describe('Controls', () => {
   it('populates all seven controls from `initial` and fires nothing during construction', () => {
     new Controls(form, INITIAL, onChange)
     expect(selectByName(form, 'max-iter').value).toBe('256')
-    expect(selectByName(form, 'resolution').value).toBe('800x600')
+    expect(selectByName(form, 'render-scale').value).toBe('1')
     expect(selectByName(form, 'palette').value).toBe('viridis')
     expect(selectByName(form, 'normalisation').value).toBe('cycled')
     expect(selectByName(form, 'mode').value).toBe('mandelbrot')
@@ -202,13 +200,13 @@ describe('Controls', () => {
     expect(onChange).toHaveBeenCalledWith({ ...INITIAL, maxIter: 4096 })
   })
 
-  it('fires onChange once with the parsed width/height when resolution changes', () => {
+  it('fires onChange once with the parsed multiplier when render-scale changes', () => {
     new Controls(form, INITIAL, onChange)
-    const resolutionSelect = selectByName(form, 'resolution')
-    resolutionSelect.value = '1600x1200'
-    resolutionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const renderScaleSelect = selectByName(form, 'render-scale')
+    renderScaleSelect.value = '2'
+    renderScaleSelect.dispatchEvent(new Event('change', { bubbles: true }))
     expect(onChange).toHaveBeenCalledTimes(1)
-    expect(onChange).toHaveBeenCalledWith({ ...INITIAL, width: 1600, height: 1200 })
+    expect(onChange).toHaveBeenCalledWith({ ...INITIAL, renderScale: 2 })
   })
 
   it('fires onChange once with the new palette when palette changes', () => {
@@ -314,7 +312,7 @@ describe('Controls', () => {
     // emit `change`) triggers a render. Same contract for the four
     // <select>s, where `input` would fire on dropdown scrub.
     new Controls(form, INITIAL, onChange)
-    for (const name of ['max-iter', 'resolution', 'palette', 'normalisation', 'mode']) {
+    for (const name of ['max-iter', 'render-scale', 'palette', 'normalisation', 'mode']) {
       const sel = selectByName(form, name)
       sel.value = sel.options[sel.options.length - 1]?.value ?? sel.value
       sel.dispatchEvent(new Event('input', { bubbles: true }))

@@ -31,6 +31,14 @@ knob, not a layout knob). The "fit-to-window" feature couples them: the display
 surface becomes the available window area, and the render buffer is sized to
 match it (modulo a quality factor).
 
+### Render scale
+The "quality factor" relating the render buffer to the display surface: buffer =
+display size × render scale. A pure **quality knob** (sharpness vs. speed), not a
+framing knob — `0.5×` subsamples for speed, `2×` supersamples for crispness, and
+the framing (the visible region) is identical at every scale. Implemented by
+scaling the render request's dimensions *and* its zoom together, so the
+larger/smaller buffer covers the same window at a different sample density.
+
 ### Fit-to-window
 Sizing the render buffer to the available browser window so the image fills it
 with **no distortion** — square pixels are preserved, so a larger or

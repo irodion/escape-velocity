@@ -16,10 +16,22 @@ import type { Viewport } from '../wasm/fractal_wasm.js'
  * canvas buffer at the current drag offset — no recompute, just a
  * shift of an already-rendered image. The canvas DOM element itself
  * never moves. On mouseup, one `pan_by_pixels` call produces the
- * final viewport and one `onChange` call hands it off. CSS pixels
- * (from `clientX`/`clientY`) are scaled to canvas-internal pixels
- * using `canvas.width / boundingRect.width` so a future
- * devicePixelRatio change does not need to retrofit the math.
+ * final viewport and one `onChange` call hands it off.
+ *
+ * ## Two pixel spaces
+ *
+ * The render buffer can be larger or smaller than the viewport's
+ * logical (display) grid — the render-scale multiplier supersamples or
+ * subsamples it (Slice 3). So CSS deltas map into two different spaces:
+ *
+ *  - The **drag preview** shifts the buffer-sized snapshot, so it scales
+ *    CSS → buffer pixels using `canvas.width / boundingRect.width`.
+ *  - **pan/zoom** operate on the viewport, whose dimensions are the
+ *    logical grid, so they scale CSS → logical pixels using
+ *    `viewport.width() / boundingRect.width`.
+ *
+ * When render scale is 1 (buffer == logical) the two ratios coincide,
+ * which is the only case the original code had to handle.
  *
  * Earlier revisions used `canvas.style.transform = translate(...)`
  * for drag feedback. That approach was visually broken on mouseup:
@@ -111,8 +123,11 @@ export class InputController {
     if (rect.width <= 0 || rect.height <= 0) return
     const dxCss = event.clientX - startClientX
     const dyCss = event.clientY - startClientY
-    const dxInternal = (dxCss * this.canvas.width) / rect.width
-    const dyInternal = (dyCss * this.canvas.height) / rect.height
+    // Pan operates on the viewport's logical grid, not the render
+    // buffer — scale CSS deltas by the viewport dimensions so a pan
+    // moves the same complex-plane distance regardless of render scale.
+    const dxInternal = (dxCss * startViewport.width()) / rect.width
+    const dyInternal = (dyCss * startViewport.height()) / rect.height
 
     const next = startViewport.pan_by_pixels(dxInternal, dyInternal)
     this.currentViewport = next
@@ -125,8 +140,11 @@ export class InputController {
     if (rect.width <= 0 || rect.height <= 0) return
     const cssX = event.clientX - rect.left
     const cssY = event.clientY - rect.top
-    const pixelX = (cssX * this.canvas.width) / rect.width
-    const pixelY = (cssY * this.canvas.height) / rect.height
+    // zoom_around takes a point on the viewport's logical grid — scale
+    // by the viewport dimensions, not the render buffer, so the cursor-
+    // invariant point is correct at any render scale.
+    const pixelX = (cssX * this.currentViewport.width()) / rect.width
+    const pixelY = (cssY * this.currentViewport.height()) / rect.height
     const factor = 1.25 ** (-normalizeWheelDelta(event) / 100)
 
     const next = this.currentViewport.zoom_around(pixelX, pixelY, factor)
