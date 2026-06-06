@@ -150,7 +150,14 @@ const PALETTE_ACCENT: Record<PaletteName, string> = {
   viridis: '#5fd0c0',
   magma: '#fe6a8c',
   inferno: '#ff7a3c',
+  plasma: '#fb9f3a',
+  turbo: '#2ad4c1',
+  cubehelix: '#c2a3bd',
   twilight: '#b78cff',
+  'earth-and-sky': '#ffaa00',
+  rainbow: '#ff6ec7',
+  'kahol-lavan': '#3a78d8',
+  ocean: '#41c7e8',
 }
 const applyAccent = (palette: PaletteName): void => {
   document.documentElement.style.setProperty('--accent', PALETTE_ACCENT[palette])
@@ -166,8 +173,22 @@ const paletteEnum = (name: PaletteName): Palette => {
       return Palette.Magma
     case 'inferno':
       return Palette.Inferno
+    case 'plasma':
+      return Palette.Plasma
+    case 'turbo':
+      return Palette.Turbo
+    case 'cubehelix':
+      return Palette.Cubehelix
     case 'twilight':
       return Palette.Twilight
+    case 'earth-and-sky':
+      return Palette.EarthAndSky
+    case 'rainbow':
+      return Palette.Rainbow
+    case 'kahol-lavan':
+      return Palette.KaholLavan
+    case 'ocean':
+      return Palette.Ocean
   }
 }
 

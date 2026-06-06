@@ -61,6 +61,13 @@ pub enum Palette {
     Magma = 2,
     Inferno = 3,
     Twilight = 4,
+    Plasma = 5,
+    Turbo = 6,
+    Cubehelix = 7,
+    EarthAndSky = 8,
+    Rainbow = 9,
+    Ocean = 10,
+    KaholLavan = 11,
 }
 
 #[wasm_bindgen]
@@ -94,6 +101,13 @@ impl From<Palette> for CorePalette {
             Palette::Magma => CorePalette::Magma,
             Palette::Inferno => CorePalette::Inferno,
             Palette::Twilight => CorePalette::Twilight,
+            Palette::Plasma => CorePalette::Plasma,
+            Palette::Turbo => CorePalette::Turbo,
+            Palette::Cubehelix => CorePalette::Cubehelix,
+            Palette::EarthAndSky => CorePalette::EarthAndSky,
+            Palette::Rainbow => CorePalette::Rainbow,
+            Palette::Ocean => CorePalette::Ocean,
+            Palette::KaholLavan => CorePalette::KaholLavan,
         }
     }
 }

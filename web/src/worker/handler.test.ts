@@ -26,7 +26,20 @@ vi.mock('../../wasm/fractal_wasm.js', () => {
         public readonly height: number,
       ) {}
     },
-    Palette: { Grayscale: 0, Viridis: 1, Magma: 2, Inferno: 3, Twilight: 4 },
+    Palette: {
+      Grayscale: 0,
+      Viridis: 1,
+      Magma: 2,
+      Inferno: 3,
+      Twilight: 4,
+      Plasma: 5,
+      Turbo: 6,
+      Cubehelix: 7,
+      EarthAndSky: 8,
+      Rainbow: 9,
+      Ocean: 10,
+      KaholLavan: 11,
+    },
     NormalizationMode: { Cycled: 0, Histogram: 1 },
     FractalKind: { Mandelbrot: 0, Julia: 1 },
   }

@@ -58,7 +58,14 @@ function buildForm(): HTMLFormElement {
         <option value="viridis" selected>Viridis</option>
         <option value="magma">Magma</option>
         <option value="inferno">Inferno</option>
+        <option value="plasma">Plasma</option>
+        <option value="turbo">Turbo</option>
+        <option value="cubehelix">Cubehelix</option>
         <option value="twilight">Twilight</option>
+        <option value="earth-and-sky">Earth &amp; Sky</option>
+        <option value="rainbow">Rainbow</option>
+        <option value="kahol-lavan">Kahol&ndash;Lavan</option>
+        <option value="ocean">Ocean</option>
       </select>
     </label>
     <label>

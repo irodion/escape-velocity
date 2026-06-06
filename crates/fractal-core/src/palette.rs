@@ -20,14 +20,32 @@
 //!
 //! ## Provenance
 //!
-//! [`Palette::Viridis`], [`Palette::Magma`], [`Palette::Inferno`], and
-//! [`Palette::Twilight`] are sampled from matplotlib's published
-//! colormaps (the upstream `_cm_listed.py` module — BSD/PSF-licensed,
-//! GPL-3.0-compatible). Each palette stores six to nine `(t, [R,G,B])`
-//! stops chosen at roughly uniform positions across the 256-entry
-//! source table; [`Palette::sample`] linearly interpolates between
-//! adjacent stops. Eight stops is plenty to capture each palette's
-//! flavour at the resolution the eye can resolve on a typical canvas.
+//! [`Palette::Viridis`], [`Palette::Magma`], [`Palette::Inferno`],
+//! [`Palette::Plasma`], and [`Palette::Twilight`] are sampled from
+//! matplotlib's published colormaps (the upstream `_cm_listed.py`
+//! module — BSD/PSF-licensed, GPL-3.0-compatible). [`Palette::Turbo`]
+//! is sampled from Google's Turbo colormap (Apache-2.0). Each palette
+//! stores six to nine `(t, [R,G,B])` stops chosen at roughly uniform
+//! positions across the 256-entry source table; [`Palette::sample`]
+//! linearly interpolates between adjacent stops. Eight stops is plenty
+//! to capture each palette's flavour at the resolution the eye can
+//! resolve on a typical canvas.
+//!
+//! [`Palette::Cubehelix`] is sampled from Dave Green's cubehelix
+//! scheme (brightness rises monotonically while the hue spirals, so it
+//! degrades gracefully to greyscale). [`Palette::EarthAndSky`] is the
+//! classic "Ultra Fractal" gradient (blue → white → orange → black)
+//! made famous by the Wikipedia Mandelbrot imagery, and
+//! [`Palette::Rainbow`] (a full HSV hue wheel) and [`Palette::Ocean`]
+//! (black → deep blue → cyan → white) are hand-rolled in the fractal-
+//! art tradition. Earth-and-sky and rainbow are cyclic (endpoint
+//! colours match), so they wrap cleanly under
+//! [`NormalizationMode::Cycled`].
+//!
+//! [`Palette::KaholLavan`] ("blue–white" in Hebrew, the Israeli flag
+//! colours) is a hand-rolled cyclic ramp white → flag-blue → white; its
+//! matching endpoints make the `Cycled` bands alternate like the flag's
+//! stripes.
 //!
 //! [`Palette::Grayscale`] is a hand-rolled two-stop ramp, included as
 //! a reference baseline.
@@ -41,6 +59,13 @@ pub enum Palette {
     Magma,
     Inferno,
     Twilight,
+    Plasma,
+    Turbo,
+    Cubehelix,
+    EarthAndSky,
+    Rainbow,
+    Ocean,
+    KaholLavan,
 }
 
 /// Identifies how `nu` values are mapped into `[0, 1]` before palette
@@ -106,6 +131,93 @@ const TWILIGHT_STOPS: &[Stop] = &[
     (1.000, [226, 217, 222]),
 ];
 
+const PLASMA_STOPS: &[Stop] = &[
+    (0.000, [13, 8, 135]),
+    (0.143, [84, 2, 163]),
+    (0.286, [139, 10, 165]),
+    (0.429, [185, 50, 137]),
+    (0.571, [219, 92, 104]),
+    (0.714, [244, 136, 73]),
+    (0.857, [254, 188, 43]),
+    (1.000, [240, 249, 33]),
+];
+
+// Google's Turbo — a vivid rainbow tuned to avoid the perceptual
+// false-edges of the legacy "jet" map. Not perceptually uniform, but
+// its wide hue swing exposes fine filament structure better than the
+// sequential maps, especially under histogram normalisation.
+const TURBO_STOPS: &[Stop] = &[
+    (0.000, [48, 18, 59]),
+    (0.143, [62, 91, 197]),
+    (0.286, [39, 150, 235]),
+    (0.429, [24, 199, 173]),
+    (0.571, [122, 224, 79]),
+    (0.714, [211, 202, 57]),
+    (0.857, [250, 138, 50]),
+    (1.000, [122, 4, 3]),
+];
+
+// Dave Green's cubehelix — brightness climbs monotonically from black
+// to white while the hue spirals through purple/green/tan, so it reads
+// correctly even in greyscale. Sequential, like viridis & friends.
+const CUBEHELIX_STOPS: &[Stop] = &[
+    (0.000, [0, 0, 0]),
+    (0.125, [21, 12, 38]),
+    (0.250, [21, 39, 78]),
+    (0.375, [16, 78, 84]),
+    (0.500, [40, 114, 67]),
+    (0.625, [110, 130, 49]),
+    (0.750, [183, 138, 89]),
+    (0.875, [206, 172, 184]),
+    (1.000, [255, 255, 255]),
+];
+
+// "Earth and Sky" — the classic Ultra Fractal default (the gradient on
+// Wikipedia's Mandelbrot article): deep blue → bright blue → white →
+// orange → near-black, wrapping back to deep blue. The closing stop at
+// t = 1.0 matches t = 0.0 so the cycle is seamless.
+const EARTH_AND_SKY_STOPS: &[Stop] = &[
+    (0.0000, [0, 7, 100]),
+    (0.1600, [32, 107, 203]),
+    (0.4200, [237, 255, 255]),
+    (0.6425, [255, 170, 0]),
+    (0.8575, [0, 2, 0]),
+    (1.0000, [0, 7, 100]),
+];
+
+// Full-saturation HSV hue wheel — the traditional fractal "rainbow".
+// Endpoints match (red → red) so it cycles seamlessly.
+const RAINBOW_STOPS: &[Stop] = &[
+    (0.0000, [255, 0, 0]),
+    (0.1667, [255, 255, 0]),
+    (0.3333, [0, 255, 0]),
+    (0.5000, [0, 255, 255]),
+    (0.6667, [0, 0, 255]),
+    (0.8333, [255, 0, 255]),
+    (1.0000, [255, 0, 0]),
+];
+
+// Hand-rolled "ocean" ramp: black → deep blue → azure → cyan → white.
+const OCEAN_STOPS: &[Stop] = &[
+    (0.000, [0, 0, 0]),
+    (0.250, [0, 27, 64]),
+    (0.500, [0, 76, 153]),
+    (0.750, [0, 160, 200]),
+    (0.900, [120, 220, 230]),
+    (1.000, [224, 255, 255]),
+];
+
+// "Kahol–Lavan" (כחול–לבן, "blue–white") — the Israeli flag colours.
+// White → flag-blue (#0038B8) → white; the matching endpoints make the
+// cycle seamless, so `Cycled` bands alternate like the flag's stripes.
+const KAHOL_LAVAN_STOPS: &[Stop] = &[
+    (0.00, [255, 255, 255]),
+    (0.25, [120, 170, 235]),
+    (0.50, [0, 56, 184]),
+    (0.75, [120, 170, 235]),
+    (1.00, [255, 255, 255]),
+];
+
 impl Palette {
     fn stops(self) -> &'static [Stop] {
         match self {
@@ -114,6 +226,13 @@ impl Palette {
             Palette::Magma => MAGMA_STOPS,
             Palette::Inferno => INFERNO_STOPS,
             Palette::Twilight => TWILIGHT_STOPS,
+            Palette::Plasma => PLASMA_STOPS,
+            Palette::Turbo => TURBO_STOPS,
+            Palette::Cubehelix => CUBEHELIX_STOPS,
+            Palette::EarthAndSky => EARTH_AND_SKY_STOPS,
+            Palette::Rainbow => RAINBOW_STOPS,
+            Palette::Ocean => OCEAN_STOPS,
+            Palette::KaholLavan => KAHOL_LAVAN_STOPS,
         }
     }
 
@@ -122,10 +241,13 @@ impl Palette {
     /// `colorize` divides `nu` by this and takes the fractional part,
     /// so a smaller period means tighter colour bands. Twilight is
     /// cyclic and tolerates a longer period without losing structure;
-    /// the other palettes look good at 64.
+    /// the other palettes look good at 64. Earth-and-sky and rainbow
+    /// are likewise cyclic, so they share the longer period.
     pub fn period(self) -> f32 {
         match self {
-            Palette::Twilight => 96.0,
+            Palette::Twilight | Palette::EarthAndSky | Palette::Rainbow | Palette::KaholLavan => {
+                96.0
+            }
             _ => 64.0,
         }
     }
@@ -172,6 +294,13 @@ mod tests {
         Palette::Magma,
         Palette::Inferno,
         Palette::Twilight,
+        Palette::Plasma,
+        Palette::Turbo,
+        Palette::Cubehelix,
+        Palette::EarthAndSky,
+        Palette::Rainbow,
+        Palette::Ocean,
+        Palette::KaholLavan,
     ];
 
     #[test]
@@ -217,6 +346,22 @@ mod tests {
             .collect();
         for w in samples.windows(2) {
             assert!(w[0] <= w[1], "green channel dropped: {} → {}", w[0], w[1]);
+        }
+    }
+
+    #[test]
+    fn cyclic_palettes_have_matching_endpoints() {
+        // The cyclic palettes are used under `Cycled` normalisation,
+        // where `t` wraps 1.0 → 0.0 every period. If their first and
+        // last stop colours disagree, that wrap shows a hard seam — so
+        // the endpoint match is a load-bearing contract, not cosmetics.
+        for &p in &[
+            Palette::Twilight,
+            Palette::EarthAndSky,
+            Palette::Rainbow,
+            Palette::KaholLavan,
+        ] {
+            assert_eq!(p.sample(0.0), p.sample(1.0), "{p:?} endpoints differ");
         }
     }
 
