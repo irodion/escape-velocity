@@ -270,6 +270,27 @@ describe('handleMessage', () => {
     expect((wasm.compute.mock.calls[1] as unknown[])[5]).toBe(Field.DistanceEstimate)
   })
 
+  it('a Julia render in the Distance Estimate Field forwards both kind and field, then recolorizes off the cache', () => {
+    // The (#62) combination: Distance Estimate selected while in Julia
+    // mode. The render must forward FractalKind.Julia (arg 2) AND
+    // Field.DistanceEstimate (arg 5) together, and a following palette
+    // change must still hit the recolorize fast path (no recompute) —
+    // the Field is fixed across a recolorize.
+    const render = handleMessage(
+      createWorkerState(),
+      renderRequest({ fractalKind: FractalKind.Julia, field: Field.DistanceEstimate }),
+      wasmInit,
+    )
+    const call = wasm.compute.mock.calls[0] as unknown[]
+    expect(call[2]).toBe(FractalKind.Julia)
+    expect(call[5]).toBe(Field.DistanceEstimate)
+
+    handleMessage(render.state, recolorizeRequest({ mode: NormalizationMode.Clamped }), wasmInit)
+    expect(wasm.compute).toHaveBeenCalledTimes(1) // recolorize reused the cache
+    expect(wasm.colorize).toHaveBeenCalledTimes(2)
+    expect((wasm.colorize.mock.calls[1] as unknown[])[3]).toBe(NormalizationMode.Clamped)
+  })
+
   it('two renders in Julia mode with different (cRe, cIm) trigger two distinct computes', () => {
     // Changing the Julia parameter is a compute-class change, not a
     // recolorize-class change — the iteration buffer is a different

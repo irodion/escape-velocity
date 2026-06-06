@@ -203,6 +203,22 @@ mod tests {
     }
 
     #[test]
+    fn julia_distance_is_smooth_in_z0() {
+        // Continuity in z_0 for the Julia seed pair: two exterior z_0
+        // values a tiny step apart yield distances differing by far less
+        // than one unit — the same anti-aliasing smoothness the Mandelbrot
+        // witness checks, now exercised through the dz_0=1, dc=0 seeds.
+        let a = julia_distance(Complex64::new(1.5, 0.5), JULIA_C_RABBIT);
+        let b = julia_distance(Complex64::new(1.5001, 0.5), JULIA_C_RABBIT);
+        assert!(a.is_finite() && b.is_finite());
+        assert!(
+            (a - b).abs() < 0.01,
+            "Julia neighbouring distance jumped: |{a} − {b}| = {}",
+            (a - b).abs(),
+        );
+    }
+
+    #[test]
     fn seed_pairs_produce_distinct_results_on_the_same_point() {
         // The two seed pairs encode genuinely different derivatives: at the
         // same plane point, the Mandelbrot estimate (dz_0=0, dc=1) and the
