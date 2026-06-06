@@ -233,6 +233,7 @@
       }
       .field:hover .field__control::after { background: var(--accent); }
       .field--c .field__control::after { content: none; }
+      .field__control--range::after { content: none; }   /* slider, no caret */
 
       /* The native control, stripped to a transparent readout. */
       select, .field--c input {
@@ -282,6 +283,84 @@
          "off" rather than just the fields. */
       input[type="number"]:disabled { cursor: default; }
       form#controls label.field--c:has(input:disabled) { opacity: 0.4; }
+
+      /* ── Iterations as a log slider ──
+         The value spans seven doublings (64–8192), so a linear stepper is
+         wrong — controls.ts feeds the range a plain 0..N-1 *index* into a
+         geometric stop table (MAX_ITER_STOPS), so equal travel = equal ratio
+         and the control reads logarithmically without any maths in the CSS.
+         The current stop shows in the label's right-aligned readout, updated
+         live on drag (the recompute still fires only on commit; see ADR-0012
+         and controls.ts). The native control is stripped to a hairline track
+         + accent thumb to match the instrument skin. */
+      .field--range .field__label {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+      }
+      .field__readout {
+        font-family: var(--font-mono);
+        font-weight: 500;
+        font-size: 0.92rem;
+        letter-spacing: 0.01em;
+        text-transform: none;     /* a number, not a label */
+        font-variant-numeric: tabular-nums;
+        color: var(--ink);
+        transition: color 0.15s var(--ease);
+      }
+      .field--range:focus-within .field__readout { color: var(--accent); }
+      .field__control--range { display: flex; align-items: center; min-height: 2.6rem; }
+      .field--range input[type="range"] {
+        appearance: none;
+        -webkit-appearance: none;
+        width: 100%;
+        margin: 0;
+        background: transparent;   /* the track is drawn on the sub-element */
+        cursor: pointer;
+      }
+      /* Track — a thin hairline the thumb rides along. WebKit and Firefox need
+         separate pseudo-elements (a shared rule would be dropped wholesale by
+         either engine on the unknown selector). */
+      .field--range input[type="range"]::-webkit-slider-runnable-track {
+        height: 2px;
+        border-radius: 2px;
+        background: var(--ink-faint);
+      }
+      .field--range input[type="range"]::-moz-range-track {
+        height: 2px;
+        border-radius: 2px;
+        background: var(--ink-faint);
+      }
+      /* Thumb — accent dot. WebKit needs the negative margin to centre it on
+         the 2px track (Firefox centres its thumb automatically). */
+      .field--range input[type="range"]::-webkit-slider-thumb {
+        appearance: none;
+        -webkit-appearance: none;
+        width: 0.85rem;
+        height: 0.85rem;
+        margin-top: calc((2px - 0.85rem) / 2);
+        border: none;
+        border-radius: 50%;
+        background: var(--accent);
+        transition: box-shadow 0.15s var(--ease), transform 0.15s var(--ease);
+      }
+      .field--range input[type="range"]::-moz-range-thumb {
+        width: 0.85rem;
+        height: 0.85rem;
+        border: none;
+        border-radius: 50%;
+        background: var(--accent);
+        transition: box-shadow 0.15s var(--ease), transform 0.15s var(--ease);
+      }
+      .field--range input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.12); }
+      .field--range input[type="range"]:hover::-moz-range-thumb { transform: scale(1.12); }
+      .field--range input[type="range"]:focus-visible { outline: none; }
+      .field--range input[type="range"]:focus-visible::-webkit-slider-thumb {
+        box-shadow: 0 0 0 4px var(--accent-dim);
+      }
+      .field--range input[type="range"]:focus-visible::-moz-range-thumb {
+        box-shadow: 0 0 0 4px var(--accent-dim);
+      }
 
       /* ── progressive enhancement: fully styled native popup where supported ──
          Chrome/Edge 135+ (~70% of users as of 2026); everywhere else the rules
@@ -412,19 +491,16 @@
         <span class="mark">Escape&nbsp;Velocity</span>
         <span class="sub">z<b>²</b>+c</span>
       </div>
-      <label class="field">
-        <span class="field__label">Iterations</span>
-        <span class="field__control">
-          <select name="max-iter">
-            <option value="64">64</option>
-            <option value="128">128</option>
-            <option value="256" selected>256</option>
-            <option value="512">512</option>
-            <option value="1024">1024</option>
-            <option value="2048">2048</option>
-            <option value="4096">4096</option>
-            <option value="8192">8192</option>
-          </select>
+      <label class="field field--range">
+        <span class="field__label">
+          Iterations
+          <!-- Live readout of the slider's current stop. controls.ts drives
+               the slider's min/max/value and this text from MAX_ITER_STOPS;
+               the markup just supplies the elements. -->
+          <output class="field__readout" data-for="max-iter">256</output>
+        </span>
+        <span class="field__control field__control--range">
+          <input type="range" name="max-iter" aria-label="Iterations" />
         </span>
       </label>
       <label class="field">
