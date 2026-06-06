@@ -54,6 +54,14 @@ export type PaletteName =
   | 'cosmic'
 export type NormalisationName = 'cycled' | 'histogram' | 'linear' | 'sqrt' | 'logarithmic'
 export type FractalMode = 'mandelbrot' | 'julia'
+/**
+ * The Field axis (ADR-0013): the per-pixel scalar `compute` emits. Only
+ * `escape-time` is selectable in this slice; `distance-estimate` is
+ * reserved in the union and ships as a disabled `<option>` until its
+ * kernel lands (#61). `main.ts` maps these tag strings to the
+ * wasm-bindgen `Field` discriminants at the WASM seam.
+ */
+export type FieldName = 'escape-time' | 'distance-estimate'
 
 export interface Settings {
   readonly maxIter: number
@@ -65,6 +73,8 @@ export interface Settings {
   readonly renderScale: number
   readonly palette: PaletteName
   readonly normalisation: NormalisationName
+  /** The Field axis (ADR-0013) — what scalar each pixel carries. */
+  readonly field: FieldName
   readonly mode: FractalMode
   readonly cRe: number
   readonly cIm: number
@@ -79,6 +89,7 @@ export class Controls {
     const renderScaleSelect = form.elements.namedItem('render-scale')
     const paletteSelect = form.elements.namedItem('palette')
     const normalisationSelect = form.elements.namedItem('normalisation')
+    const fieldSelect = form.elements.namedItem('field')
     const modeSelect = form.elements.namedItem('mode')
     const cReInput = form.elements.namedItem('c-re')
     const cImInput = form.elements.namedItem('c-im')
@@ -93,6 +104,9 @@ export class Controls {
     }
     if (!(normalisationSelect instanceof HTMLSelectElement)) {
       throw new Error('Controls: form is missing a <select name="normalisation">')
+    }
+    if (!(fieldSelect instanceof HTMLSelectElement)) {
+      throw new Error('Controls: form is missing a <select name="field">')
     }
     if (!(modeSelect instanceof HTMLSelectElement)) {
       throw new Error('Controls: form is missing a <select name="mode">')
@@ -129,6 +143,10 @@ export class Controls {
       throw new Error(
         `Controls: initial.normalisation="${initial.normalisation}" has no matching <option>`,
       )
+    }
+    fieldSelect.value = initial.field
+    if (fieldSelect.value === '') {
+      throw new Error(`Controls: initial.field="${initial.field}" has no matching <option>`)
     }
     modeSelect.value = initial.mode
     if (modeSelect.value === '') {
@@ -170,6 +188,7 @@ export class Controls {
         renderScale,
         palette: paletteSelect.value as PaletteName,
         normalisation: normalisationSelect.value as NormalisationName,
+        field: fieldSelect.value as FieldName,
         mode: modeSelect.value as FractalMode,
         // valueAsNumber returns NaN for mid-edit states ("", "-",
         // "1.5e"). The dispatcher in main.ts substitutes a finite
@@ -190,6 +209,7 @@ export class Controls {
     renderScaleSelect.addEventListener('change', emit)
     paletteSelect.addEventListener('change', emit)
     normalisationSelect.addEventListener('change', emit)
+    fieldSelect.addEventListener('change', emit)
     modeSelect.addEventListener('change', () => {
       // Re-derive the enabled state from the select's live value
       // rather than a closed-over flag — the select itself is the

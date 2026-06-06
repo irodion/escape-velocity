@@ -17,6 +17,7 @@ use rayon::prelude::*;
 
 use crate::complex::Complex64;
 use crate::escape_time::escape_time;
+use crate::field::Field;
 use crate::fractal_kind::FractalKind;
 use crate::palette::{NormalizationMode, Palette};
 use crate::viewport::Viewport;
@@ -25,12 +26,41 @@ use crate::viewport::Viewport;
 /// loop so the constant doesn't get rebuilt at every pixel.
 const ORIGIN: Complex64 = Complex64::new(0.0, 0.0);
 
-/// Run the smooth escape-time iteration for every pixel in `viewport`,
-/// dispatching on `kind`.
+/// Run `compute` for every pixel in `viewport`, dispatching first on the
+/// [`Field`] (what scalar each pixel carries) and then on `kind` (which
+/// fractal family).
 ///
 /// Returns a row-major buffer of length `viewport.width *
-/// viewport.height` whose entry `[py * width + px]` is the smooth
-/// continuous count for the pixel under `kind`'s `(z_0, c)` rule:
+/// viewport.height` whose entry `[py * width + px]` is the chosen Field's
+/// scalar for that pixel; inside-set pixels are encoded as [`f32::NAN`]
+/// regardless of Field (ADR-0013's shared sentinel).
+///
+/// - [`Field::EscapeTime`] emits the smooth continuous escape-time count
+///   `nu` — the existing, unchanged hot path (see
+///   [`compute_escape_time`]).
+/// - [`Field::DistanceEstimate`] emits the distance estimate `d`. Its
+///   kernel lands in Slice 2 (#61); until then this arm is unreachable —
+///   the UI never offers Distance Estimate — so it is left a `todo!()`.
+///
+/// The Field match is hoisted out of the per-pixel work, exactly like the
+/// `kind` match below it, so a frame carries one rule end-to-end.
+pub fn compute(viewport: &Viewport, max_iter: u32, kind: FractalKind, field: Field) -> Vec<f32> {
+    match field {
+        Field::EscapeTime => compute_escape_time(viewport, max_iter, kind),
+        // The Distance Estimate Field needs a separate `escape_distance`
+        // kernel that tracks the orbit derivative `z'`; it cannot be
+        // recovered from `nu`. That work is Slice 2 (#61). The axis is
+        // wired end-to-end now (WASM enum, worker cache invalidation, UI
+        // select) so the plumbing ships and is tested against Escape Time;
+        // Distance Estimate stays unselectable in the UI until #61, which
+        // is what makes this arm unreachable in production.
+        Field::DistanceEstimate => todo!("Distance Estimate Field — Slice 2 (#61)"),
+    }
+}
+
+/// The smooth escape-time computation: a row-major buffer whose entry
+/// `[py * width + px]` is the smooth continuous count for the pixel under
+/// `kind`'s `(z_0, c)` rule:
 ///
 /// - [`FractalKind::Mandelbrot`]: `z_0 = 0`, `c = pixel` — the
 ///   classic Mandelbrot rendering.
@@ -52,7 +82,7 @@ const ORIGIN: Complex64 = Complex64::new(0.0, 0.0);
 /// wasm32. Natively this uses rayon's OS-thread pool; in the browser the
 /// worker first stands up a `wasm-bindgen-rayon` thread pool (Slice 7C)
 /// that backs the same `par_iter`.
-pub fn compute(viewport: &Viewport, max_iter: u32, kind: FractalKind) -> Vec<f32> {
+fn compute_escape_time(viewport: &Viewport, max_iter: u32, kind: FractalKind) -> Vec<f32> {
     let width = viewport.width;
     let height = viewport.height;
     // Dispatch on `kind` once, outside the parallel map, so the hot
@@ -318,14 +348,14 @@ mod tests {
     #[test]
     fn compute_output_length_matches_viewport_pixels() {
         let vp = seahorse_viewport();
-        let buf = compute(&vp, MAX_ITER, FractalKind::Mandelbrot);
+        let buf = compute(&vp, MAX_ITER, FractalKind::Mandelbrot, Field::EscapeTime);
         assert_eq!(buf.len(), (vp.width as usize) * (vp.height as usize));
     }
 
     #[test]
     fn compute_values_are_nan_or_below_max_iter() {
         let vp = seahorse_viewport();
-        let buf = compute(&vp, MAX_ITER, FractalKind::Mandelbrot);
+        let buf = compute(&vp, MAX_ITER, FractalKind::Mandelbrot, Field::EscapeTime);
         for &nu in &buf {
             assert!(
                 nu.is_nan() || nu <= (MAX_ITER as f32),
@@ -341,7 +371,7 @@ mod tests {
         // "inside the set returns NaN" contract on a viewport where
         // that claim is mathematically true.
         let vp = origin_viewport();
-        let buf = compute(&vp, MAX_ITER, FractalKind::Mandelbrot);
+        let buf = compute(&vp, MAX_ITER, FractalKind::Mandelbrot, Field::EscapeTime);
         assert!(buf[center_idx(&vp)].is_nan());
     }
 
@@ -351,8 +381,13 @@ mod tests {
     fn julia_compute_output_length_matches_mandelbrot() {
         // Both kinds visit every pixel once and push one f32 per pixel.
         let vp = origin_viewport();
-        let m = compute(&vp, MAX_ITER, FractalKind::Mandelbrot);
-        let j = compute(&vp, MAX_ITER, FractalKind::Julia { c: JULIA_C });
+        let m = compute(&vp, MAX_ITER, FractalKind::Mandelbrot, Field::EscapeTime);
+        let j = compute(
+            &vp,
+            MAX_ITER,
+            FractalKind::Julia { c: JULIA_C },
+            Field::EscapeTime,
+        );
         assert_eq!(m.len(), j.len());
         assert_eq!(j.len(), (vp.width as usize) * (vp.height as usize));
     }
@@ -363,7 +398,12 @@ mod tests {
         // `z_0 = 0`, which is inside the `c = (-0.7, 0.27015)` Julia
         // set — so the centre pixel must come back as NaN.
         let vp = origin_viewport();
-        let buf = compute(&vp, MAX_ITER, FractalKind::Julia { c: JULIA_C });
+        let buf = compute(
+            &vp,
+            MAX_ITER,
+            FractalKind::Julia { c: JULIA_C },
+            Field::EscapeTime,
+        );
         assert!(buf[center_idx(&vp)].is_nan());
     }
 
@@ -375,7 +415,12 @@ mod tests {
         // one finite (non-NaN) entry. Without this, an "all inside the
         // set" bug in the Julia path could hide behind the NaN sentinel.
         let vp = origin_viewport();
-        let buf = compute(&vp, MAX_ITER, FractalKind::Julia { c: JULIA_C });
+        let buf = compute(
+            &vp,
+            MAX_ITER,
+            FractalKind::Julia { c: JULIA_C },
+            Field::EscapeTime,
+        );
         assert!(
             buf.iter().any(|nu| nu.is_finite()),
             "Julia buffer has no escapers — dispatch broken?",
@@ -390,8 +435,13 @@ mod tests {
         // (the origin viewport's centre maps to z_0=0 either way) —
         // this assertion is the one that breaks.
         let vp = origin_viewport();
-        let m = compute(&vp, MAX_ITER, FractalKind::Mandelbrot);
-        let j = compute(&vp, MAX_ITER, FractalKind::Julia { c: JULIA_C });
+        let m = compute(&vp, MAX_ITER, FractalKind::Mandelbrot, Field::EscapeTime);
+        let j = compute(
+            &vp,
+            MAX_ITER,
+            FractalKind::Julia { c: JULIA_C },
+            Field::EscapeTime,
+        );
         assert_ne!(
             m, j,
             "Mandelbrot and Julia compute produced identical buffers"
@@ -461,7 +511,7 @@ mod tests {
         // mirror the image.
         let vp = mapping_viewport();
         for kind in [FractalKind::Mandelbrot, FractalKind::Julia { c: JULIA_C }] {
-            let parallel = compute(&vp, MAX_ITER, kind);
+            let parallel = compute(&vp, MAX_ITER, kind, Field::EscapeTime);
             let serial = compute_serial(&vp, MAX_ITER, kind);
             assert_buffers_bit_identical(&parallel, &serial, &format!("{kind:?}"));
         }
@@ -474,10 +524,53 @@ mod tests {
         // never leak into the output.
         let vp = mapping_viewport();
         for kind in [FractalKind::Mandelbrot, FractalKind::Julia { c: JULIA_C }] {
-            let first = compute(&vp, MAX_ITER, kind);
-            let second = compute(&vp, MAX_ITER, kind);
+            let first = compute(&vp, MAX_ITER, kind, Field::EscapeTime);
+            let second = compute(&vp, MAX_ITER, kind, Field::EscapeTime);
             assert_buffers_bit_identical(&first, &second, &format!("{kind:?}"));
         }
+    }
+
+    // --- Field axis (ADR-0013) -----------------------------------------
+
+    #[test]
+    fn escape_time_field_matches_the_pre_field_escape_time_path() {
+        // The Field axis must not perturb the existing Escape Time render:
+        // `compute(.., Field::EscapeTime)` has to reproduce the serial
+        // escape-time reference bit-for-bit, for both families. This is the
+        // load-bearing "nothing changes until you opt in" guarantee.
+        let vp = mapping_viewport();
+        for kind in [FractalKind::Mandelbrot, FractalKind::Julia { c: JULIA_C }] {
+            let via_field = compute(&vp, MAX_ITER, kind, Field::EscapeTime);
+            let reference = compute_serial(&vp, MAX_ITER, kind);
+            assert_buffers_bit_identical(&via_field, &reference, &format!("{kind:?}"));
+        }
+    }
+
+    #[test]
+    fn default_field_is_escape_time() {
+        // `Field::default()` is the historical behaviour, so an explicit
+        // EscapeTime and the defaulted Field produce the same buffer.
+        let vp = mapping_viewport();
+        let explicit = compute(&vp, MAX_ITER, FractalKind::Mandelbrot, Field::EscapeTime);
+        let defaulted = compute(&vp, MAX_ITER, FractalKind::Mandelbrot, Field::default());
+        assert_buffers_bit_identical(&explicit, &defaulted, "default == EscapeTime");
+    }
+
+    #[test]
+    #[should_panic(expected = "Slice 2")]
+    fn distance_estimate_field_is_not_yet_implemented() {
+        // Slice 1 wires the Field axis but not the Distance Estimate maths
+        // (#61). The arm is a `todo!()`; the UI never offers it, so this is
+        // unreachable in production. Pin it as deliberately-stubbed so the
+        // day #61 lands, removing the `todo!()` flips this test red and
+        // forces it to be updated alongside the new kernel.
+        let vp = origin_viewport();
+        let _ = compute(
+            &vp,
+            MAX_ITER,
+            FractalKind::Mandelbrot,
+            Field::DistanceEstimate,
+        );
     }
 
     // --- colorize() shape ----------------------------------------------

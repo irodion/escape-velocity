@@ -7,9 +7,16 @@ import '@fontsource/ibm-plex-mono/latin-400.css'
 import '@fontsource/ibm-plex-mono/latin-500.css'
 import '@fontsource-variable/martian-mono/wght.css'
 import { registerSW } from 'virtual:pwa-register'
-import init, { FractalKind, NormalizationMode, Palette, Viewport } from '../wasm/fractal_wasm.js'
+import init, {
+  Field,
+  FractalKind,
+  NormalizationMode,
+  Palette,
+  Viewport,
+} from '../wasm/fractal_wasm.js'
 import {
   Controls,
+  type FieldName,
   type FractalMode,
   type NormalisationName,
   type PaletteName,
@@ -67,6 +74,7 @@ const RESIZE_DEBOUNCE_MS = 150
 const INITIAL_MAX_ITER = 256
 const INITIAL_PALETTE: PaletteName = 'viridis'
 const INITIAL_NORMALISATION: NormalisationName = 'cycled'
+const INITIAL_FIELD: FieldName = 'escape-time'
 const INITIAL_MODE: FractalMode = 'mandelbrot'
 const INITIAL_C_RE = -0.7
 const INITIAL_C_IM = 0.27015
@@ -136,6 +144,7 @@ let current: Settings = {
   renderScale: INITIAL_RENDER_SCALE,
   palette: INITIAL_PALETTE,
   normalisation: INITIAL_NORMALISATION,
+  field: INITIAL_FIELD,
   mode: INITIAL_MODE,
   cRe: INITIAL_C_RE,
   cIm: INITIAL_C_IM,
@@ -225,6 +234,15 @@ const kindEnum = (name: FractalMode): FractalKind => {
   }
 }
 
+const fieldEnum = (name: FieldName): Field => {
+  switch (name) {
+    case 'escape-time':
+      return Field.EscapeTime
+    case 'distance-estimate':
+      return Field.DistanceEstimate
+  }
+}
+
 const rerender = (): void => {
   // Flatten the `Viewport` instance into primitives: the wasm-bindgen
   // class cannot survive `postMessage` to the worker, so the client
@@ -263,6 +281,7 @@ const rerender = (): void => {
     kindEnum(current.mode),
     current.cRe,
     current.cIm,
+    fieldEnum(current.field),
   )
 }
 
@@ -392,6 +411,20 @@ const controls = new Controls(controlsForm, current, (rawNext) => {
   const cChangedInJulia =
     next.mode === 'julia' && (next.cRe !== current.cRe || next.cIm !== current.cIm)
   if (next.maxIter !== current.maxIter || cChangedInJulia) {
+    current = next
+    rerender()
+    return
+  }
+
+  // Branch 3c: Field change — compute-class (ADR-0013). The Field is the
+  // per-pixel scalar `compute` emits, so switching it invalidates the
+  // iteration buffer exactly as `maxIter` / `c` do. It must route through
+  // `render` (a full recompute), never `recolorize`, because the cached
+  // buffer holds a different Field's values. (Distance Estimate is not yet
+  // selectable, so today this only fires Escape Time → Escape Time no-ops
+  // away above; the branch is here so the axis is wired the moment #61
+  // makes a second Field reachable.)
+  if (next.field !== current.field) {
     current = next
     rerender()
     return

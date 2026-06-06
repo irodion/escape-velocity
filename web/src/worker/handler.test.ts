@@ -10,7 +10,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('../../wasm/fractal_wasm.js', () => {
   return {
     compute: vi.fn(
-      (_viewport: unknown, _maxIter: number, _kind: number, _cRe: number, _cIm: number) => 0x1000,
+      (
+        _viewport: unknown,
+        _maxIter: number,
+        _kind: number,
+        _cRe: number,
+        _cIm: number,
+        _field: number,
+      ) => 0x1000,
     ),
     compute_len: vi.fn(() => 4),
     colorize: vi.fn(
@@ -45,11 +52,13 @@ vi.mock('../../wasm/fractal_wasm.js', () => {
     },
     NormalizationMode: { Cycled: 0, Histogram: 1, Linear: 2, SquareRoot: 3, Logarithmic: 4 },
     FractalKind: { Mandelbrot: 0, Julia: 1 },
+    Field: { EscapeTime: 0, DistanceEstimate: 1 },
   }
 })
 
 import * as wasmModule from '../../wasm/fractal_wasm.js'
 import {
+  Field,
   FractalKind,
   type InitOutput,
   NormalizationMode,
@@ -117,6 +126,7 @@ function renderRequest(overrides: Partial<RenderRequest> = {}): RenderRequest {
     fractalKind: FractalKind.Mandelbrot,
     cRe: C_RE_DEFAULT,
     cIm: C_IM_DEFAULT,
+    field: Field.EscapeTime,
     ...overrides,
   }
 }
@@ -160,7 +170,14 @@ describe('handleMessage', () => {
   it('reconstructs the Viewport and forwards (kind, cRe, cIm) into the compute call positionally', () => {
     handleMessage(createWorkerState(), renderRequest({ fractalKind: FractalKind.Julia }), wasmInit)
     expect(wasm.compute).toHaveBeenCalledTimes(1)
-    const args = wasm.compute.mock.calls[0] as [MockViewport, number, number, number, number]
+    const args = wasm.compute.mock.calls[0] as [
+      MockViewport,
+      number,
+      number,
+      number,
+      number,
+      number,
+    ]
     // arg 0 is the freshly reconstructed Viewport — assert the flat
     // primitives landed in the constructor in the right order so a
     // regression in `new Viewport(centerRe, centerIm, zoom, width,
@@ -176,6 +193,9 @@ describe('handleMessage', () => {
     expect(args[2]).toBe(FractalKind.Julia)
     expect(args[3]).toBe(C_RE_DEFAULT)
     expect(args[4]).toBe(C_IM_DEFAULT)
+    // The Field rides last, appended after the Julia (cRe, cIm) payload —
+    // the wire-stable position from ADR-0013 / the WASM binding.
+    expect(args[5]).toBe(Field.EscapeTime)
   })
 
   it('a recolorize after a render reuses the cached (ptr, len) and skips compute', () => {
@@ -225,6 +245,22 @@ describe('handleMessage', () => {
     expect(wasm.compute).toHaveBeenCalledTimes(2)
     expect((wasm.compute.mock.calls[0] as unknown[])[2]).toBe(FractalKind.Mandelbrot)
     expect((wasm.compute.mock.calls[1] as unknown[])[2]).toBe(FractalKind.Julia)
+  })
+
+  it('two renders with different `field` trigger two distinct computes', () => {
+    // The Field (ADR-0013) is a compute-class input, not a recolorize-
+    // class one: the iteration buffer holds a different scalar per Field,
+    // so a Field change must recompute. Each render computes regardless,
+    // and the differing `field` argument (arg 5) rides through to WASM.
+    const first = handleMessage(
+      createWorkerState(),
+      renderRequest({ field: Field.EscapeTime }),
+      wasmInit,
+    )
+    handleMessage(first.state, renderRequest({ field: Field.DistanceEstimate }), wasmInit)
+    expect(wasm.compute).toHaveBeenCalledTimes(2)
+    expect((wasm.compute.mock.calls[0] as unknown[])[5]).toBe(Field.EscapeTime)
+    expect((wasm.compute.mock.calls[1] as unknown[])[5]).toBe(Field.DistanceEstimate)
   })
 
   it('two renders in Julia mode with different (cRe, cIm) trigger two distinct computes', () => {

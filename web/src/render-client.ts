@@ -1,4 +1,5 @@
 import type {
+  Field,
   FractalKind,
   NormalizationMode,
   Palette,
@@ -202,6 +203,7 @@ export function render(
   kind: FractalKind,
   cRe: number,
   cIm: number,
+  field: Field,
 ): void {
   issue(
     {
@@ -218,6 +220,7 @@ export function render(
       fractalKind: kind,
       cRe,
       cIm,
+      field,
     },
     ctx,
   )

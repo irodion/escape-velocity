@@ -11,6 +11,8 @@
 //!   [`Viewport::zoom_around`].
 //! - [`FractalKind`] — selects which family (`Mandelbrot` or
 //!   `Julia { c }`) `compute` dispatches.
+//! - [`Field`] — selects *what scalar* `compute` emits per pixel
+//!   (`EscapeTime` or `DistanceEstimate`); see ADR-0013.
 //! - [`escape_time`] — smooth (continuous) single-point iteration of
 //!   `z_{n+1} = z_n² + c` for an arbitrary `(z_0, c)`; returns
 //!   `f32::NAN` for inside-set points.
@@ -20,6 +22,7 @@
 
 mod complex;
 mod escape_time;
+mod field;
 mod fractal_kind;
 mod palette;
 mod pipeline;
@@ -27,6 +30,7 @@ mod viewport;
 
 pub use complex::Complex64;
 pub use escape_time::escape_time;
+pub use field::Field;
 pub use fractal_kind::FractalKind;
 pub use palette::{NormalizationMode, Palette};
 pub use pipeline::{colorize, compute};

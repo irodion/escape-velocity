@@ -25,7 +25,7 @@
 use std::cell::RefCell;
 
 use fractal_core::{
-    Complex64, FractalKind as CoreFractalKind, NormalizationMode as CoreMode,
+    Complex64, Field as CoreField, FractalKind as CoreFractalKind, NormalizationMode as CoreMode,
     Palette as CorePalette, Viewport as CoreViewport,
 };
 use wasm_bindgen::prelude::*;
@@ -99,6 +99,21 @@ pub enum FractalKind {
     Julia = 1,
 }
 
+/// JS-visible **Field** discriminant (ADR-0013) — the per-pixel scalar
+/// `compute` emits. Mirrors `fractal_core::Field`. Numeric values are
+/// explicit and **appended** so the JS↔WASM wire format stays stable as
+/// new Fields arrive, exactly like the palette/mode enums above.
+///
+/// Only [`Field::EscapeTime`] is wired through the core in this slice;
+/// [`Field::DistanceEstimate`] is reserved here (the UI never selects it)
+/// and gains its kernel in Slice 2 (#61).
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug)]
+pub enum Field {
+    EscapeTime = 0,
+    DistanceEstimate = 1,
+}
+
 impl From<Palette> for CorePalette {
     fn from(p: Palette) -> Self {
         match p {
@@ -129,6 +144,15 @@ impl From<NormalizationMode> for CoreMode {
             NormalizationMode::Linear => CoreMode::Linear,
             NormalizationMode::SquareRoot => CoreMode::SquareRoot,
             NormalizationMode::Logarithmic => CoreMode::Logarithmic,
+        }
+    }
+}
+
+impl From<Field> for CoreField {
+    fn from(f: Field) -> Self {
+        match f {
+            Field::EscapeTime => CoreField::EscapeTime,
+            Field::DistanceEstimate => CoreField::DistanceEstimate,
         }
     }
 }
@@ -283,6 +307,11 @@ impl Viewport {
 /// latent JS bugs where a stale `NaN` in a hidden Julia input would
 /// surface only at the next mode toggle.
 ///
+/// `field` selects which per-pixel scalar to emit (ADR-0013). It is the
+/// last parameter so the existing positional call shape is preserved
+/// (append, never insert) — the same wire-stability rule the enum
+/// discriminants follow. Only [`Field::EscapeTime`] is computed today.
+///
 /// The returned `(ptr, len)` pair is the only handle JS keeps to the
 /// iteration buffer; it is valid until the next `compute` rewrites the
 /// underlying `Vec`. The render layer's module-level cache (see
@@ -296,6 +325,7 @@ pub fn compute(
     kind: FractalKind,
     c_re: f64,
     c_im: f64,
+    field: Field,
 ) -> Result<*const f32, JsError> {
     if !c_re.is_finite() {
         return Err(JsError::new("compute: c_re must be finite"));
@@ -309,7 +339,7 @@ pub fn compute(
             c: Complex64::new(c_re, c_im),
         },
     };
-    let buf = fractal_core::compute(&viewport.inner, max_iter, core_kind);
+    let buf = fractal_core::compute(&viewport.inner, max_iter, core_kind, field.into());
     Ok(ITER_BUFFER.with(|cell| {
         let mut iters = cell.borrow_mut();
         *iters = buf;
