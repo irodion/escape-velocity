@@ -29,11 +29,10 @@ const INITIAL: Settings = {
 // the `selected` attributes on the HTML so the construction-time
 // `value` assignment is a no-op against a clean form.
 //
-// Slice 1 (#60) adds the Field `<select>` (escape-time / distance-
-// estimate). Production ships `distance-estimate` `disabled` (its kernel
-// is #61); this test form leaves it enabled so the change-wiring test can
-// commit a Field selection through the form — the disabling is a separate
-// UI concern, not part of the Controls emit contract under test here.
+// Slice 1 (#60) added the Field `<select>` (escape-time / distance-
+// estimate); Slice 2 (#61) enables Distance Estimate and adds the
+// `clamped` Normalisation option. The form mirrors production so the
+// (Field × Normalisation) validity enforcement is exercised here.
 function buildForm(): HTMLFormElement {
   const form = document.createElement('form')
   form.id = 'controls'
@@ -94,6 +93,7 @@ function buildForm(): HTMLFormElement {
         <option value="linear">Linear</option>
         <option value="sqrt">Square root</option>
         <option value="logarithmic">Logarithmic</option>
+        <option value="clamped">Clamped (filaments)</option>
       </select>
     </label>
     <label>
@@ -261,13 +261,82 @@ describe('Controls', () => {
     expect(onChange).toHaveBeenCalledWith({ ...INITIAL, normalisation: 'histogram' })
   })
 
-  it('fires onChange once with the new field when field changes', () => {
+  it('fires onChange once with the new field, substituting the default mode when the current one is invalid', () => {
+    // INITIAL is escape-time + cycled. Switching to distance-estimate
+    // invalidates cycled (Cycled is Escape-Time only), so the snapshot
+    // must carry the Field's default mode (clamped) — a single coherent
+    // (field, normalisation) commit, not two events.
     new Controls(form, INITIAL, onChange)
     const fieldSelect = selectByName(form, 'field')
     fieldSelect.value = 'distance-estimate'
     fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
     expect(onChange).toHaveBeenCalledTimes(1)
-    expect(onChange).toHaveBeenCalledWith({ ...INITIAL, field: 'distance-estimate' })
+    expect(onChange).toHaveBeenCalledWith({
+      ...INITIAL,
+      field: 'distance-estimate',
+      normalisation: 'clamped',
+    })
+  })
+
+  it('hides Cycled and exposes Clamped when the Field is Distance Estimate', () => {
+    new Controls(form, INITIAL, onChange)
+    const fieldSelect = selectByName(form, 'field')
+    const normalisation = selectByName(form, 'normalisation')
+    const optionFor = (value: string) =>
+      Array.from(normalisation.options).find((o) => o.value === value)
+
+    // Escape Time (initial): Cycled offered, Clamped hidden.
+    expect(optionFor('cycled')?.hidden).toBe(false)
+    expect(optionFor('clamped')?.hidden).toBe(true)
+
+    fieldSelect.value = 'distance-estimate'
+    fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+
+    // Distance Estimate: Cycled hidden, Clamped offered, mode now clamped.
+    expect(optionFor('cycled')?.hidden).toBe(true)
+    expect(optionFor('clamped')?.hidden).toBe(false)
+    expect(normalisation.value).toBe('clamped')
+  })
+
+  it('restores Cycled and substitutes it back when the Field returns to Escape Time', () => {
+    // Start in Distance Estimate + Clamped; switching back to Escape Time
+    // invalidates Clamped, so it substitutes the Escape-Time default
+    // (cycled) and re-offers Cycled.
+    new Controls(
+      form,
+      { ...INITIAL, field: 'distance-estimate', normalisation: 'clamped' },
+      onChange,
+    )
+    const fieldSelect = selectByName(form, 'field')
+    const normalisation = selectByName(form, 'normalisation')
+
+    fieldSelect.value = 'escape-time'
+    fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+
+    expect(normalisation.value).toBe('cycled')
+    expect(onChange).toHaveBeenCalledWith({
+      ...INITIAL,
+      field: 'escape-time',
+      normalisation: 'cycled',
+    })
+  })
+
+  it('keeps a universal mode across a Field switch (no needless substitution)', () => {
+    // Histogram is valid for either Field, so switching Field must NOT
+    // rewrite it — only invalid pairs are substituted.
+    new Controls(form, { ...INITIAL, normalisation: 'histogram' }, onChange)
+    const fieldSelect = selectByName(form, 'field')
+    const normalisation = selectByName(form, 'normalisation')
+
+    fieldSelect.value = 'distance-estimate'
+    fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+
+    expect(normalisation.value).toBe('histogram')
+    expect(onChange).toHaveBeenCalledWith({
+      ...INITIAL,
+      normalisation: 'histogram',
+      field: 'distance-estimate',
+    })
   })
 
   it('fires onChange once with the new mode when mode changes', () => {

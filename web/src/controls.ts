@@ -1,3 +1,5 @@
+import { defaultModeForField, isModeValidForField } from './field-modes.js'
+
 /**
  * Wires the controls form's `<select>`s and `<input type="number">`s
  * to a single `onChange` callback that emits the current settings
@@ -35,6 +37,13 @@
  * `Number.isNaN(valueAsNumber)` rather than an option-list lookup.
  * Mid-edit empty / dash-only states produce `NaN` snapshots — the
  * dispatcher in `main.ts` filters those.
+ *
+ * The Field control additionally enforces the (Field × Normalisation
+ * mode) validity rule from ADR-0013 (the pure policy lives in
+ * `field-modes.ts`): on a Field change the invalid Normalisation options
+ * are hidden, and if the current mode becomes invalid it is replaced with
+ * the Field's default before the snapshot is emitted. Same shape as the
+ * mode → c-inputs coupling already in this class.
  */
 export type PaletteName =
   | 'grayscale'
@@ -52,7 +61,13 @@ export type PaletteName =
   | 'solar'
   | 'spectral'
   | 'cosmic'
-export type NormalisationName = 'cycled' | 'histogram' | 'linear' | 'sqrt' | 'logarithmic'
+export type NormalisationName =
+  | 'cycled'
+  | 'histogram'
+  | 'linear'
+  | 'sqrt'
+  | 'logarithmic'
+  | 'clamped'
 export type FractalMode = 'mandelbrot' | 'julia'
 /**
  * The Field axis (ADR-0013): the per-pixel scalar `compute` emits. Only
@@ -176,6 +191,27 @@ export class Controls {
     // dimness via the CSS rule in index.html.
     this.setCInputsEnabled(initial.mode === 'julia')
 
+    // Enforce the (Field × Normalisation mode) validity rule (ADR-0013):
+    // hide the modes that don't apply to the active Field, and if the
+    // current mode is invalid for it, substitute the Field's default. The
+    // pure policy lives in `field-modes.ts`; this is its DOM enforcement.
+    // Run at construction (so the initial option list matches the initial
+    // Field) and on every Field change, before the snapshot is emitted.
+    const applyFieldValidity = (): void => {
+      const field = fieldSelect.value as FieldName
+      for (const option of Array.from(normalisationSelect.options)) {
+        const valid = isModeValidForField(field, option.value as NormalisationName)
+        // `hidden` keeps it out of the dropdown; `disabled` stops keyboard
+        // selection from reaching it — belt and braces.
+        option.hidden = !valid
+        option.disabled = !valid
+      }
+      if (!isModeValidForField(field, normalisationSelect.value as NormalisationName)) {
+        normalisationSelect.value = defaultModeForField(field)
+      }
+    }
+    applyFieldValidity()
+
     // The select's value is constrained to its option set at runtime
     // — the browser only sets it to a listed <option value> on
     // user interaction. Combined with the construction-time guard
@@ -209,7 +245,13 @@ export class Controls {
     renderScaleSelect.addEventListener('change', emit)
     paletteSelect.addEventListener('change', emit)
     normalisationSelect.addEventListener('change', emit)
-    fieldSelect.addEventListener('change', emit)
+    fieldSelect.addEventListener('change', () => {
+      // Re-derive the valid Normalisation options (and substitute the
+      // default if the current mode is now invalid) before emitting, so
+      // the snapshot carries a coherent (field, normalisation) pair.
+      applyFieldValidity()
+      emit()
+    })
     modeSelect.addEventListener('change', () => {
       // Re-derive the enabled state from the select's live value
       // rather than a closed-over flag — the select itself is the

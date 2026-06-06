@@ -95,6 +95,12 @@ pub enum NormalizationMode {
     Linear,
     SquareRoot,
     Logarithmic,
+    /// Hard distance clamp `t = min(1, d / k)` for the Distance Estimate
+    /// Field (ADR-0013): a linear ramp over the first `k` pixels of
+    /// distance, flat (white) beyond. Keeps the gradient in the thin
+    /// boundary shell so filaments read as hairlines, not a halo.
+    /// Appended last to preserve the JS↔WASM discriminant order.
+    Clamped,
 }
 
 /// One control point on a gradient: `(t, [R, G, B])` with `t ∈ [0, 1]`.

@@ -81,6 +81,7 @@ pub enum NormalizationMode {
     Linear = 2,
     SquareRoot = 3,
     Logarithmic = 4,
+    Clamped = 5,
 }
 
 /// JS-visible fractal-family discriminant. Mirrors
@@ -144,6 +145,7 @@ impl From<NormalizationMode> for CoreMode {
             NormalizationMode::Linear => CoreMode::Linear,
             NormalizationMode::SquareRoot => CoreMode::SquareRoot,
             NormalizationMode::Logarithmic => CoreMode::Logarithmic,
+            NormalizationMode::Clamped => CoreMode::Clamped,
         }
     }
 }
