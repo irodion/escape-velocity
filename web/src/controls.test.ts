@@ -66,6 +66,9 @@ function buildForm(): HTMLFormElement {
         <option value="rainbow">Rainbow</option>
         <option value="kahol-lavan">Kahol&ndash;Lavan</option>
         <option value="ocean">Ocean</option>
+        <option value="solar">Solar</option>
+        <option value="spectral">Spectral</option>
+        <option value="cosmic">Cosmic</option>
       </select>
     </label>
     <label>
@@ -73,6 +76,9 @@ function buildForm(): HTMLFormElement {
       <select name="normalisation">
         <option value="cycled" selected>Cycled</option>
         <option value="histogram">Match palette to image</option>
+        <option value="linear">Linear</option>
+        <option value="sqrt">Square root</option>
+        <option value="logarithmic">Logarithmic</option>
       </select>
     </label>
     <label>

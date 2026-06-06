@@ -100,6 +100,19 @@ pub fn colorize(nus: &[f32], palette: Palette, mode: NormalizationMode, max_iter
     match mode {
         NormalizationMode::Cycled => colorize_cycled(nus, palette, &mut out),
         NormalizationMode::Histogram => colorize_histogram(nus, palette, max_iter, &mut out),
+        NormalizationMode::Linear => colorize_global(nus, palette, |s| s, &mut out),
+        NormalizationMode::SquareRoot => colorize_global(nus, palette, f32::sqrt, &mut out),
+        NormalizationMode::Logarithmic => {
+            // ln(1 + s·(e − 1)) maps [0, 1] → [0, 1] (s = 1 gives
+            // ln(e) = 1) with no division, expanding the low end so
+            // small-`nu` escapers spread across the palette.
+            colorize_global(
+                nus,
+                palette,
+                |s| (1.0 + s * (std::f32::consts::E - 1.0)).ln(),
+                &mut out,
+            )
+        }
     }
     out
 }
@@ -115,6 +128,51 @@ fn colorize_cycled(nus: &[f32], palette: Palette, out: &mut Vec<u8>) {
             continue;
         }
         let t = (nu / period).rem_euclid(1.0);
+        let [r, g, b] = palette.sample(t);
+        out.extend_from_slice(&[r, g, b, 255]);
+    }
+}
+
+/// The "global" normalisation family: rescale each finite `nu` against
+/// the frame's own `[min, max]` into `s ∈ [0, 1]`, apply `transfer`,
+/// and sample the palette. `transfer` is the only thing that differs
+/// between Linear (identity), SquareRoot (`√s`), and Logarithmic.
+///
+/// Like the other modes, non-finite `nu` (the NaN inside-set sentinel
+/// and any ±Inf) paints opaque black. A frame with no finite escapers
+/// at all is entirely black — there is no range to normalise against.
+/// A degenerate `min == max` frame maps every pixel to `s = 0` (the
+/// palette's start) rather than dividing by zero.
+fn colorize_global(nus: &[f32], palette: Palette, transfer: fn(f32) -> f32, out: &mut Vec<u8>) {
+    // Pass 1 — frame extent over finite values only.
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    for &nu in nus {
+        if nu.is_finite() {
+            min = min.min(nu);
+            max = max.max(nu);
+        }
+    }
+
+    // `min` stays +∞ iff no finite value was seen — every pixel is
+    // inside the set (or non-finite). Symmetric with histogram's
+    // all-NaN short-circuit.
+    if !min.is_finite() {
+        for _ in nus {
+            out.extend_from_slice(&[0, 0, 0, 255]);
+        }
+        return;
+    }
+
+    let range = max - min;
+    // Pass 2 — rescale, curve, sample.
+    for &nu in nus {
+        if !nu.is_finite() {
+            out.extend_from_slice(&[0, 0, 0, 255]);
+            continue;
+        }
+        let s = if range > 0.0 { (nu - min) / range } else { 0.0 };
+        let t = transfer(s).clamp(0.0, 1.0);
         let [r, g, b] = palette.sample(t);
         out.extend_from_slice(&[r, g, b, 255]);
     }
@@ -213,10 +271,35 @@ mod tests {
         Palette::Magma,
         Palette::Inferno,
         Palette::Twilight,
+        Palette::Plasma,
+        Palette::Turbo,
+        Palette::Cubehelix,
+        Palette::EarthAndSky,
+        Palette::Rainbow,
+        Palette::Ocean,
+        Palette::KaholLavan,
+        // Cosine (procedural) palettes — exercise the non-stop path
+        // through colorize end to end.
+        Palette::Solar,
+        Palette::Spectral,
+        Palette::Cosmic,
     ];
 
-    const ALL_MODES: &[NormalizationMode] =
-        &[NormalizationMode::Cycled, NormalizationMode::Histogram];
+    const ALL_MODES: &[NormalizationMode] = &[
+        NormalizationMode::Cycled,
+        NormalizationMode::Histogram,
+        NormalizationMode::Linear,
+        NormalizationMode::SquareRoot,
+        NormalizationMode::Logarithmic,
+    ];
+
+    // The global-normalisation family, which shares one implementation
+    // (`colorize_global`) parameterised by a transfer curve.
+    const GLOBAL_MODES: &[NormalizationMode] = &[
+        NormalizationMode::Linear,
+        NormalizationMode::SquareRoot,
+        NormalizationMode::Logarithmic,
+    ];
 
     // --- compute() shape -----------------------------------------------
 
@@ -541,6 +624,70 @@ mod tests {
                 (count as usize) <= 2 * avg,
                 "bucket {i} overloaded: {count} > 2 × {avg}",
             );
+        }
+    }
+
+    #[test]
+    fn global_all_nan_input_is_all_black_no_panic() {
+        // Symmetric with the histogram all-NaN case: a frame entirely
+        // inside the set has no extent to normalise against, so every
+        // pixel is opaque black rather than a divide-by-zero panic.
+        let nus = vec![f32::NAN; 13];
+        for &p in ALL_PALETTES {
+            for &m in GLOBAL_MODES {
+                let out = colorize(&nus, p, m, MAX_ITER);
+                assert_eq!(out.len(), nus.len() * 4, "{p:?}/{m:?}");
+                for pixel in out.chunks_exact(4) {
+                    assert_eq!(pixel, &[0, 0, 0, 255], "{p:?}/{m:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn global_modes_map_frame_extent_to_palette_endpoints() {
+        // Every global transfer fixes 0 and 1, so the frame's min finite
+        // `nu` lands at `t = 0` and its max at `t = 1`. On Grayscale that
+        // is black → white, independent of the curve in between.
+        let nus = vec![f32::NAN, 5.0, 20.0, 60.0, 100.0];
+        for &m in GLOBAL_MODES {
+            let out = colorize(&nus, Palette::Grayscale, m, MAX_ITER);
+            // pixel 1 is the min (5.0); pixel 4 is the max (100.0).
+            assert_eq!(&out[4..8], &[0, 0, 0, 255], "{m:?} min not at start");
+            assert_eq!(&out[16..20], &[255, 255, 255, 255], "{m:?} max not at end");
+        }
+    }
+
+    #[test]
+    fn global_curved_modes_expand_low_end_vs_linear() {
+        // The reason the curved pair exists: √ and log pull mid-low
+        // values toward the bright end, so a mid-range escaper is at
+        // least as bright under them as under linear. Grayscale makes
+        // brightness == the red channel, and `nu = 25` of `[0, 100]`
+        // sits in the expanded region.
+        let nus = vec![0.0_f32, 25.0, 100.0];
+        let red = |m| colorize(&nus, Palette::Grayscale, m, MAX_ITER)[4];
+        let lin = red(NormalizationMode::Linear);
+        let sqrt = red(NormalizationMode::SquareRoot);
+        let log = red(NormalizationMode::Logarithmic);
+        assert!(sqrt >= lin, "sqrt {sqrt} < linear {lin}");
+        assert!(log >= lin, "log {log} < linear {lin}");
+    }
+
+    #[test]
+    fn global_degenerate_uniform_input_does_not_panic() {
+        // min == max → zero range. Must map every pixel to the palette
+        // start (s = 0) instead of dividing by zero.
+        let nus = vec![42.0_f32; 8];
+        for &p in ALL_PALETTES {
+            for &m in GLOBAL_MODES {
+                let out = colorize(&nus, p, m, MAX_ITER);
+                assert_eq!(out.len(), nus.len() * 4, "{p:?}/{m:?}");
+                let first = &out[0..4];
+                for pixel in out.chunks_exact(4) {
+                    assert_eq!(pixel, first, "{p:?}/{m:?} not uniform");
+                }
+            }
         }
     }
 }

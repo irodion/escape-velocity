@@ -49,7 +49,10 @@ export type PaletteName =
   | 'rainbow'
   | 'kahol-lavan'
   | 'ocean'
-export type NormalisationName = 'cycled' | 'histogram'
+  | 'solar'
+  | 'spectral'
+  | 'cosmic'
+export type NormalisationName = 'cycled' | 'histogram' | 'linear' | 'sqrt' | 'logarithmic'
 export type FractalMode = 'mandelbrot' | 'julia'
 
 export interface Settings {

@@ -68,6 +68,9 @@ pub enum Palette {
     Rainbow = 9,
     Ocean = 10,
     KaholLavan = 11,
+    Solar = 12,
+    Spectral = 13,
+    Cosmic = 14,
 }
 
 #[wasm_bindgen]
@@ -75,6 +78,9 @@ pub enum Palette {
 pub enum NormalizationMode {
     Cycled = 0,
     Histogram = 1,
+    Linear = 2,
+    SquareRoot = 3,
+    Logarithmic = 4,
 }
 
 /// JS-visible fractal-family discriminant. Mirrors
@@ -108,6 +114,9 @@ impl From<Palette> for CorePalette {
             Palette::Rainbow => CorePalette::Rainbow,
             Palette::Ocean => CorePalette::Ocean,
             Palette::KaholLavan => CorePalette::KaholLavan,
+            Palette::Solar => CorePalette::Solar,
+            Palette::Spectral => CorePalette::Spectral,
+            Palette::Cosmic => CorePalette::Cosmic,
         }
     }
 }
@@ -117,6 +126,9 @@ impl From<NormalizationMode> for CoreMode {
         match m {
             NormalizationMode::Cycled => CoreMode::Cycled,
             NormalizationMode::Histogram => CoreMode::Histogram,
+            NormalizationMode::Linear => CoreMode::Linear,
+            NormalizationMode::SquareRoot => CoreMode::SquareRoot,
+            NormalizationMode::Logarithmic => CoreMode::Logarithmic,
         }
     }
 }

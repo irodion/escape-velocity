@@ -39,8 +39,11 @@ vi.mock('../../wasm/fractal_wasm.js', () => {
       Rainbow: 9,
       Ocean: 10,
       KaholLavan: 11,
+      Solar: 12,
+      Spectral: 13,
+      Cosmic: 14,
     },
-    NormalizationMode: { Cycled: 0, Histogram: 1 },
+    NormalizationMode: { Cycled: 0, Histogram: 1, Linear: 2, SquareRoot: 3, Logarithmic: 4 },
     FractalKind: { Mandelbrot: 0, Julia: 1 },
   }
 })

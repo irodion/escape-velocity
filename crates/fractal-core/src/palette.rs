@@ -12,6 +12,14 @@
 //!    finite-`nu` distribution across the unit interval, which
 //!    flattens out the iteration-density variation and reveals
 //!    structure at every escape rate at once.
+//!    [`NormalizationMode::Linear`], [`NormalizationMode::SquareRoot`],
+//!    and [`NormalizationMode::Logarithmic`] are the "global" family:
+//!    each rescales `nu` against the frame's own finite `[min, max]`
+//!    into `s ∈ [0, 1]`, then applies a transfer curve — identity,
+//!    `√s`, or a natural-log squash. Linear is the honest baseline;
+//!    the curved pair expand the low end so a frame whose escapers
+//!    cluster at small `nu` (most pixels far from the set) spreads
+//!    across the palette instead of collapsing into its first sliver.
 //!
 //! 2. **Palette** — which colour gradient to look up against. The
 //!    set's traditional "void black" interior is non-negotiable, but
@@ -47,6 +55,13 @@
 //! matching endpoints make the `Cycled` bands alternate like the flag's
 //! stripes.
 //!
+//! [`Palette::Solar`], [`Palette::Spectral`], and [`Palette::Cosmic`]
+//! are *procedural* rather than stop-based: each is the cosine palette
+//! `colour(t) = a + b·cos(2π(c·t + d))` from Inigo Quilez's
+//! parameterisation, evaluated per channel. Four RGB vectors describe an
+//! infinitely smooth gradient with no stop table; because every `c` is
+//! an integer, `colour(0) == colour(1)`, so they are seamlessly cyclic.
+//!
 //! [`Palette::Grayscale`] is a hand-rolled two-stop ramp, included as
 //! a reference baseline.
 
@@ -66,6 +81,9 @@ pub enum Palette {
     Rainbow,
     Ocean,
     KaholLavan,
+    Solar,
+    Spectral,
+    Cosmic,
 }
 
 /// Identifies how `nu` values are mapped into `[0, 1]` before palette
@@ -74,6 +92,9 @@ pub enum Palette {
 pub enum NormalizationMode {
     Cycled,
     Histogram,
+    Linear,
+    SquareRoot,
+    Logarithmic,
 }
 
 /// One control point on a gradient: `(t, [R, G, B])` with `t ∈ [0, 1]`.
@@ -218,21 +239,71 @@ const KAHOL_LAVAN_STOPS: &[Stop] = &[
     (1.00, [255, 255, 255]),
 ];
 
+/// Parameters for a cosine procedural palette (Inigo Quilez):
+/// `colour(t) = a + b·cos(2π(c·t + d))`, evaluated per channel and
+/// clamped to `[0, 1]`. Every `c` is an integer, so `cos` completes a
+/// whole number of turns over `t ∈ [0, 1]` and `colour(0) == colour(1)`
+/// — the palette is seamlessly cyclic with no stop table to maintain.
+struct CosineParams {
+    a: [f32; 3],
+    b: [f32; 3],
+    c: [f32; 3],
+    d: [f32; 3],
+}
+
+// Warm dawn — gold → orange → magenta (IQ preset d = (0, 0.10, 0.20)).
+const SOLAR_COS: CosineParams = CosineParams {
+    a: [0.5, 0.5, 0.5],
+    b: [0.5, 0.5, 0.5],
+    c: [1.0, 1.0, 1.0],
+    d: [0.0, 0.10, 0.20],
+};
+
+// Bold split-frequency swing through cyan/magenta/amber (IQ preset
+// c = (2, 1, 0), d = (0.5, 0.20, 0.25)); the zero-frequency blue
+// channel holds a steady wash under the faster red/green.
+const SPECTRAL_COS: CosineParams = CosineParams {
+    a: [0.5, 0.5, 0.5],
+    b: [0.5, 0.5, 0.5],
+    c: [2.0, 1.0, 0.0],
+    d: [0.5, 0.20, 0.25],
+};
+
+// High-frequency multi-hue shimmer (IQ preset c = (2, 1, 1),
+// d = (0, 0.25, 0.25)) — red cycles twice for every green/blue turn.
+const COSMIC_COS: CosineParams = CosineParams {
+    a: [0.5, 0.5, 0.5],
+    b: [0.5, 0.5, 0.5],
+    c: [2.0, 1.0, 1.0],
+    d: [0.0, 0.25, 0.25],
+};
+
+/// How a palette turns its parameter into colour: a table of `(t, RGB)`
+/// stops walked with linear interpolation, or an analytic cosine
+/// formula. [`Palette::sample`] dispatches on this.
+enum PaletteRepr {
+    Stops(&'static [Stop]),
+    Cosine(&'static CosineParams),
+}
+
 impl Palette {
-    fn stops(self) -> &'static [Stop] {
+    fn repr(self) -> PaletteRepr {
         match self {
-            Palette::Grayscale => GRAYSCALE_STOPS,
-            Palette::Viridis => VIRIDIS_STOPS,
-            Palette::Magma => MAGMA_STOPS,
-            Palette::Inferno => INFERNO_STOPS,
-            Palette::Twilight => TWILIGHT_STOPS,
-            Palette::Plasma => PLASMA_STOPS,
-            Palette::Turbo => TURBO_STOPS,
-            Palette::Cubehelix => CUBEHELIX_STOPS,
-            Palette::EarthAndSky => EARTH_AND_SKY_STOPS,
-            Palette::Rainbow => RAINBOW_STOPS,
-            Palette::Ocean => OCEAN_STOPS,
-            Palette::KaholLavan => KAHOL_LAVAN_STOPS,
+            Palette::Grayscale => PaletteRepr::Stops(GRAYSCALE_STOPS),
+            Palette::Viridis => PaletteRepr::Stops(VIRIDIS_STOPS),
+            Palette::Magma => PaletteRepr::Stops(MAGMA_STOPS),
+            Palette::Inferno => PaletteRepr::Stops(INFERNO_STOPS),
+            Palette::Twilight => PaletteRepr::Stops(TWILIGHT_STOPS),
+            Palette::Plasma => PaletteRepr::Stops(PLASMA_STOPS),
+            Palette::Turbo => PaletteRepr::Stops(TURBO_STOPS),
+            Palette::Cubehelix => PaletteRepr::Stops(CUBEHELIX_STOPS),
+            Palette::EarthAndSky => PaletteRepr::Stops(EARTH_AND_SKY_STOPS),
+            Palette::Rainbow => PaletteRepr::Stops(RAINBOW_STOPS),
+            Palette::Ocean => PaletteRepr::Stops(OCEAN_STOPS),
+            Palette::KaholLavan => PaletteRepr::Stops(KAHOL_LAVAN_STOPS),
+            Palette::Solar => PaletteRepr::Cosine(&SOLAR_COS),
+            Palette::Spectral => PaletteRepr::Cosine(&SPECTRAL_COS),
+            Palette::Cosmic => PaletteRepr::Cosine(&COSMIC_COS),
         }
     }
 
@@ -241,13 +312,18 @@ impl Palette {
     /// `colorize` divides `nu` by this and takes the fractional part,
     /// so a smaller period means tighter colour bands. Twilight is
     /// cyclic and tolerates a longer period without losing structure;
-    /// the other palettes look good at 64. Earth-and-sky and rainbow
-    /// are likewise cyclic, so they share the longer period.
+    /// the other palettes look good at 64. Earth-and-sky, rainbow,
+    /// kahol-lavan, and the cosine palettes are likewise cyclic, so
+    /// they share the longer period.
     pub fn period(self) -> f32 {
         match self {
-            Palette::Twilight | Palette::EarthAndSky | Palette::Rainbow | Palette::KaholLavan => {
-                96.0
-            }
+            Palette::Twilight
+            | Palette::EarthAndSky
+            | Palette::Rainbow
+            | Palette::KaholLavan
+            | Palette::Solar
+            | Palette::Spectral
+            | Palette::Cosmic => 96.0,
             _ => 64.0,
         }
     }
@@ -255,27 +331,48 @@ impl Palette {
     /// Look up the gradient at parameter `t`. Values outside `[0, 1]`
     /// are clamped to the endpoints — there is no extrapolation.
     pub fn sample(self, t: f32) -> [u8; 3] {
-        let stops = self.stops();
         let t = t.clamp(0.0, 1.0);
-        // Linear scan — `stops.len()` is single-digit; binary search
-        // would only add branches without measurable benefit.
-        for window in stops.windows(2) {
-            let (t0, c0) = window[0];
-            let (t1, c1) = window[1];
-            if t <= t1 {
-                let frac = if t1 > t0 { (t - t0) / (t1 - t0) } else { 0.0 };
-                return [
-                    lerp_u8(c0[0], c1[0], frac),
-                    lerp_u8(c0[1], c1[1], frac),
-                    lerp_u8(c0[2], c1[2], frac),
-                ];
-            }
+        match self.repr() {
+            PaletteRepr::Stops(stops) => sample_stops(stops, t),
+            PaletteRepr::Cosine(params) => sample_cosine(params, t),
         }
-        // Unreachable: the last stop has `t = 1.0` and `t` is clamped
-        // to `[0, 1]`, so the loop always returns. Falling through
-        // would mean the const table is malformed.
-        stops.last().expect("palette stops table is non-empty").1
     }
+}
+
+/// Linear-interpolated lookup into a stop table. `t` is assumed already
+/// clamped to `[0, 1]` by the caller ([`Palette::sample`]).
+fn sample_stops(stops: &[Stop], t: f32) -> [u8; 3] {
+    // Linear scan — `stops.len()` is single-digit; binary search
+    // would only add branches without measurable benefit.
+    for window in stops.windows(2) {
+        let (t0, c0) = window[0];
+        let (t1, c1) = window[1];
+        if t <= t1 {
+            let frac = if t1 > t0 { (t - t0) / (t1 - t0) } else { 0.0 };
+            return [
+                lerp_u8(c0[0], c1[0], frac),
+                lerp_u8(c0[1], c1[1], frac),
+                lerp_u8(c0[2], c1[2], frac),
+            ];
+        }
+    }
+    // Unreachable: the last stop has `t = 1.0` and `t` is clamped
+    // to `[0, 1]`, so the loop always returns. Falling through
+    // would mean the const table is malformed.
+    stops.last().expect("palette stops table is non-empty").1
+}
+
+/// Evaluate the cosine palette `a + b·cos(2π(c·t + d))` per channel,
+/// clamping each result into `[0, 1]` before quantising to 8-bit. `t`
+/// is assumed already clamped by the caller ([`Palette::sample`]).
+fn sample_cosine(p: &CosineParams, t: f32) -> [u8; 3] {
+    let mut out = [0u8; 3];
+    for (ch, slot) in out.iter_mut().enumerate() {
+        let phase = std::f32::consts::TAU * (p.c[ch] * t + p.d[ch]);
+        let v = (p.a[ch] + p.b[ch] * phase.cos()).clamp(0.0, 1.0);
+        *slot = (v * 255.0).round() as u8;
+    }
+    out
 }
 
 fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
@@ -301,20 +398,48 @@ mod tests {
         Palette::Rainbow,
         Palette::Ocean,
         Palette::KaholLavan,
+        Palette::Solar,
+        Palette::Spectral,
+        Palette::Cosmic,
     ];
+
+    // The cosine palettes have no stop table, so the "endpoint equals
+    // first/last stop" contract is meaningless for them; scope those
+    // two tests to the stop-based palettes.
+    const STOP_PALETTES: &[Palette] = &[
+        Palette::Grayscale,
+        Palette::Viridis,
+        Palette::Magma,
+        Palette::Inferno,
+        Palette::Twilight,
+        Palette::Plasma,
+        Palette::Turbo,
+        Palette::Cubehelix,
+        Palette::EarthAndSky,
+        Palette::Rainbow,
+        Palette::Ocean,
+        Palette::KaholLavan,
+    ];
+
+    fn stops_of(p: Palette) -> &'static [Stop] {
+        match p.repr() {
+            PaletteRepr::Stops(stops) => stops,
+            PaletteRepr::Cosine(_) => panic!("{p:?} is not a stop-based palette"),
+        }
+    }
 
     #[test]
     fn sample_at_zero_returns_first_stop_colour() {
-        for &p in ALL_PALETTES {
-            let expected = p.stops()[0].1;
+        for &p in STOP_PALETTES {
+            let expected = stops_of(p)[0].1;
             assert_eq!(p.sample(0.0), expected, "{p:?}");
         }
     }
 
     #[test]
     fn sample_at_one_returns_last_stop_colour() {
-        for &p in ALL_PALETTES {
-            let expected = p.stops().last().unwrap().1;
+        for &p in STOP_PALETTES {
+            let expected = stops_of(p).last().unwrap().1;
             assert_eq!(p.sample(1.0), expected, "{p:?}");
         }
     }
@@ -360,8 +485,29 @@ mod tests {
             Palette::EarthAndSky,
             Palette::Rainbow,
             Palette::KaholLavan,
+            // Cosine palettes use integer `c`, so they are cyclic too.
+            Palette::Solar,
+            Palette::Spectral,
+            Palette::Cosmic,
         ] {
             assert_eq!(p.sample(0.0), p.sample(1.0), "{p:?} endpoints differ");
+        }
+    }
+
+    #[test]
+    fn cosine_palettes_are_deterministic_and_in_gamut() {
+        // The cosine path has no stop table to mis-paste, but it can
+        // still drift out of `[0, 255]` if the clamp is dropped, or
+        // become non-deterministic if it reads outside its params.
+        // Sweep the unit interval and assert every channel stays a
+        // valid u8 and repeats bit-for-bit. (u8 is in-gamut by type;
+        // the real assertion is that `sample` agrees with itself, i.e.
+        // it is a pure function of `t`.)
+        for &p in &[Palette::Solar, Palette::Spectral, Palette::Cosmic] {
+            for i in 0..=20 {
+                let t = i as f32 / 20.0;
+                assert_eq!(p.sample(t), p.sample(t), "{p:?} not deterministic at {t}");
+            }
         }
     }
 

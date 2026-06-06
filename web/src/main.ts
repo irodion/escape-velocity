@@ -158,6 +158,9 @@ const PALETTE_ACCENT: Record<PaletteName, string> = {
   rainbow: '#ff6ec7',
   'kahol-lavan': '#3a78d8',
   ocean: '#41c7e8',
+  solar: '#ff8c42',
+  spectral: '#2ec5c5',
+  cosmic: '#c77dff',
 }
 const applyAccent = (palette: PaletteName): void => {
   document.documentElement.style.setProperty('--accent', PALETTE_ACCENT[palette])
@@ -189,6 +192,12 @@ const paletteEnum = (name: PaletteName): Palette => {
       return Palette.KaholLavan
     case 'ocean':
       return Palette.Ocean
+    case 'solar':
+      return Palette.Solar
+    case 'spectral':
+      return Palette.Spectral
+    case 'cosmic':
+      return Palette.Cosmic
   }
 }
 
@@ -198,6 +207,12 @@ const modeEnum = (name: NormalisationName): NormalizationMode => {
       return NormalizationMode.Cycled
     case 'histogram':
       return NormalizationMode.Histogram
+    case 'linear':
+      return NormalizationMode.Linear
+    case 'sqrt':
+      return NormalizationMode.SquareRoot
+    case 'logarithmic':
+      return NormalizationMode.Logarithmic
   }
 }
 
