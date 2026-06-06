@@ -60,3 +60,56 @@ computed for the final Viewport and replaces the Preview. The boundary between
 "responding to the gesture" (Preview) and "showing the truth" (Settle) is the
 moment every recompute is deferred to.
 _Avoid_: commit, finalise, end-of-gesture.
+
+## Colouring
+
+Three orthogonal choices turn a Viewport into pixels: the **Field** (what scalar
+each pixel carries), the **Normalisation mode** (how that scalar is squashed into
+`[0,1]`), and the **Palette** (what colour the `[0,1]` value becomes).
+
+### Field
+The per-pixel scalar quantity `compute` emits — the axis selected *before* any
+Normalisation or Palette applies. Exactly one Field is active per render. Two
+values: **Escape Time** and **Distance Estimate**. Selecting Distance Estimate
+makes `compute` emit `d` *instead of* `nu`; it is one `f32` per pixel either way
+(the inside-set `NaN` sentinel is shared).
+_Avoid_: "field" in the algebraic sense (the complex field) — this is the
+rendered scalar field, nothing to do with field theory.
+
+### Escape Time
+The default Field: the smooth (continuous) count `nu` at which the orbit escapes
+to infinity. Inside-set pixels carry `NaN`.
+_Avoid_: iterations / iteration count (those name the *discrete* index; `nu` is
+the smoothed real value).
+
+### Distance Estimate
+The alternative Field: an estimate `d ≈ |z|·ln|z| / |z'|` of each pixel's
+distance to the set boundary, expressed in pixel units so it is
+resolution-independent. Yields razor-sharp, anti-aliased filaments. Requires
+`compute` to track the orbit derivative `z'`; inside-set pixels carry `NaN`.
+_Avoid_: "distance field" (collides with Field above); DE is fine as a code
+abbreviation but spell it out in prose.
+
+### Palette
+The colour gradient that maps a normalised scalar in `[0,1]` to an RGB colour.
+Independent of which Field produced the scalar — any Palette pairs with any
+Field.
+_Avoid_: colour scheme; "colormap" is acceptable only for the matplotlib-sourced
+palettes that ship under that name.
+
+### Normalisation mode
+How a Field's scalar is squashed into `[0,1]` before Palette lookup. Unlike the
+Palette, a Normalisation mode is **not universal across Fields**:
+- **Cycled** (fractional part of `scalar / period`) is **Escape-Time only** — it
+  assumes iteration units; a Distance Estimate has no period.
+- **Clamped** (`min(1, d/k)` — a hard linear ramp over the first `k` pixels of
+  distance, flat thereafter) targets **Distance Estimate** — it keeps the
+  gradient in the thin boundary shell so filaments read as hairlines, not a
+  halo.
+- **Histogram**, **Linear**, **SquareRoot**, **Logarithmic** apply to any Field.
+
+The valid (Field × Normalisation mode) pairs are a real constraint, not a UI
+nicety: an invalid pair (e.g. Distance Estimate + Cycled) has no sensible
+meaning and must be excluded, not silently rendered.
+_Avoid_: "colouring mode" (overlaps Field); "scaling". (The UI label reads
+"Coloring" for historical reasons — the canonical term is Normalisation mode.)
