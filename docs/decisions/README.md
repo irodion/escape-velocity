@@ -45,6 +45,7 @@ Numbering is zero-padded to four digits and never reused.
 | 0010 | [License under GPL-3.0-or-later](0010-gpl-3-license.md)                                | Accepted |
 | 0011 | [Zoom keyed to a fixed reference width, not the buffer width](0011-zoom-keyed-to-reference-width.md) | Accepted |
 | 0012 | [Instant zoom feedback via a transform Preview and a debounced Settle](0012-instant-zoom-feedback-transform-preview.md) | Accepted |
+| 0013 | [Distance Estimate as a selectable Field](0013-distance-estimate-as-a-field.md) | Accepted |
 
 ## Adding a new ADR
 
