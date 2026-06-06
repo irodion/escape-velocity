@@ -38,11 +38,16 @@ const ONE: Complex64 = Complex64::new(1.0, 0.0);
 /// this constant is resolution-independent — a filament is `~k` pixels
 /// wide at any zoom or buffer size.
 ///
-/// `2.0` is a reasonable default that draws crisp hairlines; tuning it by
-/// eye (and the hard-clamp-vs-`tanh` choice) is the dedicated follow-up
-/// #63. Keep it a single named constant so that work has one place to
-/// touch.
-const CLAMPED_DISTANCE_K: f32 = 2.0;
+/// `1.5` was chosen by eye (#63): tuned live against the Turbo palette in
+/// the seahorse valley, comparing 1–16. Above ~3 the lit band reads as a
+/// soft, thick rim rather than a hairline (and with a dark-starting
+/// palette it just darkens the boundary); ~1.0 is the practical floor —
+/// below it the one-pixel ramp loses its anti-aliasing and the finest
+/// filaments break up. 1.5 sits right at the sharp end while keeping a
+/// sliver of smoothing in reserve for deep zooms and the 0.5× render
+/// scale. The hard `min(1, d/k)` clamp was kept (ADR-0013) — it looked
+/// crisp, so the `tanh` fallback was not needed.
+const CLAMPED_DISTANCE_K: f32 = 1.5;
 
 /// Run `compute` for every pixel in `viewport`, dispatching first on the
 /// [`Field`] (what scalar each pixel carries) and then on `kind` (which
@@ -1089,8 +1094,11 @@ mod tests {
     fn clamped_saturates_at_and_beyond_k() {
         // d ≥ k → t = 1 → the palette's last colour, and it stays there
         // for any larger distance (the flat tail). On Grayscale that is
-        // white. Probe exactly k and well past it.
-        for &d in &[2.0_f32, 5.0, 100.0, 1.0e6] {
+        // white. Reference the constant so the test tracks the tuned value
+        // (#63) rather than a hard-coded width; probe at exactly k and
+        // well past it.
+        let k = CLAMPED_DISTANCE_K;
+        for &d in &[k, k * 2.0, 100.0, 1.0e6] {
             let out = colorize(
                 &[d],
                 Palette::Grayscale,
@@ -1103,6 +1111,19 @@ mod tests {
                 "d={d} did not saturate to white"
             );
         }
+        // Just inside the ramp (d = k/2) is mid-grey, NOT yet saturated —
+        // proves a ramp exists rather than a pure step at k.
+        let mid = colorize(
+            &[k * 0.5],
+            Palette::Grayscale,
+            NormalizationMode::Clamped,
+            MAX_ITER,
+        );
+        assert_ne!(
+            mid,
+            vec![255, 255, 255, 255],
+            "d=k/2 should be mid-ramp, not white"
+        );
     }
 
     #[test]
