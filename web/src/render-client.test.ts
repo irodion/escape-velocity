@@ -54,6 +54,7 @@ interface RenderClient {
     kind: number,
     cRe: number,
     cIm: number,
+    field: number,
   ) => void
   recolorize: (ctx: CanvasRenderingContext2D, palette: number, mode: number) => void
   discardInFlight: () => void
@@ -69,6 +70,7 @@ const PALETTE_MAGMA = 2
 const MODE_CYCLED = 0
 const MODE_HISTOGRAM = 1
 const KIND_MANDELBROT = 0
+const FIELD_ESCAPE_TIME = 0
 
 // A fresh module per test resets the client's module-level coalescing
 // state (latestEpoch / inFlight / pending / ready) and yields a brand
@@ -102,7 +104,17 @@ function response(epoch: number): RenderResponse {
 }
 
 function doRender(client: RenderClient, ctx: CanvasRenderingContext2D): void {
-  client.render(VIEWPORT, ctx, 256, PALETTE_VIRIDIS, MODE_CYCLED, KIND_MANDELBROT, -0.7, 0.27015)
+  client.render(
+    VIEWPORT,
+    ctx,
+    256,
+    PALETTE_VIRIDIS,
+    MODE_CYCLED,
+    KIND_MANDELBROT,
+    -0.7,
+    0.27015,
+    FIELD_ESCAPE_TIME,
+  )
 }
 
 function postedEpochs(worker: FakeWorker): number[] {
@@ -274,6 +286,7 @@ describe('render-client', () => {
       KIND_MANDELBROT,
       -0.7,
       0.27015,
+      FIELD_ESCAPE_TIME,
     ) // render B → epoch 2, queued
     client.recolorize(ctx, PALETTE_MAGMA, MODE_HISTOGRAM) // epoch 3 → folds into B
 

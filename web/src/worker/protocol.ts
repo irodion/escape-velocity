@@ -24,9 +24,9 @@
  * newer pan/zoom/parameter change (single-slot coalescing — see
  * `render-client.ts` once #30 lands).
  */
-import type { FractalKind, NormalizationMode, Palette } from '../../wasm/fractal_wasm.js'
+import type { Field, FractalKind, NormalizationMode, Palette } from '../../wasm/fractal_wasm.js'
 
-export type { FractalKind, NormalizationMode, Palette }
+export type { Field, FractalKind, NormalizationMode, Palette }
 
 export interface RenderRequest {
   readonly kind: 'render'
@@ -42,6 +42,10 @@ export interface RenderRequest {
   readonly fractalKind: FractalKind
   readonly cRe: number
   readonly cIm: number
+  // The Field (ADR-0013) is a compute-class input: it selects what scalar
+  // `compute` emits, so it rides on the render request only — a
+  // RecolorizeRequest reuses the cached buffer and never changes Field.
+  readonly field: Field
 }
 
 export interface RecolorizeRequest {

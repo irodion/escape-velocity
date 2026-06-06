@@ -81,7 +81,7 @@ export function handleMessage(
 ): { state: WorkerState; response: RenderResponse; transfer: Transferable[] } {
   if (msg.kind === 'render') {
     const viewport = new Viewport(msg.centerRe, msg.centerIm, msg.zoom, msg.width, msg.height)
-    const iterPtr = compute(viewport, msg.maxIter, msg.fractalKind, msg.cRe, msg.cIm)
+    const iterPtr = compute(viewport, msg.maxIter, msg.fractalKind, msg.cRe, msg.cIm, msg.field)
     const iterLen = compute_len()
     const nextState: WorkerState = {
       cachedIterPtr: iterPtr,

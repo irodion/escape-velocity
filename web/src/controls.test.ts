@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   Controls,
+  type FieldName,
   type FractalMode,
   type NormalisationName,
   type PaletteName,
@@ -12,6 +13,7 @@ const INITIAL: Settings = {
   renderScale: 1,
   palette: 'viridis',
   normalisation: 'cycled',
+  field: 'escape-time',
   mode: 'mandelbrot',
   cRe: -0.7,
   cIm: 0.27015,
@@ -26,6 +28,12 @@ const INITIAL: Settings = {
 // Mandelbrot (which ignores `c`). The defaults selected here match
 // the `selected` attributes on the HTML so the construction-time
 // `value` assignment is a no-op against a clean form.
+//
+// Slice 1 (#60) adds the Field `<select>` (escape-time / distance-
+// estimate). Production ships `distance-estimate` `disabled` (its kernel
+// is #61); this test form leaves it enabled so the change-wiring test can
+// commit a Field selection through the form — the disabling is a separate
+// UI concern, not part of the Controls emit contract under test here.
 function buildForm(): HTMLFormElement {
   const form = document.createElement('form')
   form.id = 'controls'
@@ -49,6 +57,13 @@ function buildForm(): HTMLFormElement {
         <option value="0.5">0.5× (faster)</option>
         <option value="1" selected>1×</option>
         <option value="2">2× (sharper)</option>
+      </select>
+    </label>
+    <label>
+      Field:
+      <select name="field">
+        <option value="escape-time" selected>Escape Time</option>
+        <option value="distance-estimate">Distance Estimate</option>
       </select>
     </label>
     <label>
@@ -163,6 +178,11 @@ describe('Controls', () => {
     expect(() => new Controls(form, bad, onChange)).toThrow(/initial\.normalisation="rainbow"/)
   })
 
+  it('throws when initial.field does not match any <option>', () => {
+    const bad = { ...INITIAL, field: 'normal-shading' as unknown as FieldName }
+    expect(() => new Controls(form, bad, onChange)).toThrow(/initial\.field="normal-shading"/)
+  })
+
   it('throws when initial.mode does not match any <option>', () => {
     const bad = { ...INITIAL, mode: 'newton' as unknown as FractalMode }
     expect(() => new Controls(form, bad, onChange)).toThrow(/initial\.mode="newton"/)
@@ -180,12 +200,13 @@ describe('Controls', () => {
     )
   })
 
-  it('populates all seven controls from `initial` and fires nothing during construction', () => {
+  it('populates all eight controls from `initial` and fires nothing during construction', () => {
     new Controls(form, INITIAL, onChange)
     expect(selectByName(form, 'max-iter').value).toBe('256')
     expect(selectByName(form, 'render-scale').value).toBe('1')
     expect(selectByName(form, 'palette').value).toBe('viridis')
     expect(selectByName(form, 'normalisation').value).toBe('cycled')
+    expect(selectByName(form, 'field').value).toBe('escape-time')
     expect(selectByName(form, 'mode').value).toBe('mandelbrot')
     expect(inputByName(form, 'c-re').valueAsNumber).toBe(-0.7)
     expect(inputByName(form, 'c-im').valueAsNumber).toBe(0.27015)
@@ -238,6 +259,15 @@ describe('Controls', () => {
     normalisationSelect.dispatchEvent(new Event('change', { bubbles: true }))
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledWith({ ...INITIAL, normalisation: 'histogram' })
+  })
+
+  it('fires onChange once with the new field when field changes', () => {
+    new Controls(form, INITIAL, onChange)
+    const fieldSelect = selectByName(form, 'field')
+    fieldSelect.value = 'distance-estimate'
+    fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith({ ...INITIAL, field: 'distance-estimate' })
   })
 
   it('fires onChange once with the new mode when mode changes', () => {
@@ -325,7 +355,7 @@ describe('Controls', () => {
     // emit `change`) triggers a render. Same contract for the four
     // <select>s, where `input` would fire on dropdown scrub.
     new Controls(form, INITIAL, onChange)
-    for (const name of ['max-iter', 'render-scale', 'palette', 'normalisation', 'mode']) {
+    for (const name of ['max-iter', 'render-scale', 'palette', 'normalisation', 'field', 'mode']) {
       const sel = selectByName(form, name)
       sel.value = sel.options[sel.options.length - 1]?.value ?? sel.value
       sel.dispatchEvent(new Event('input', { bubbles: true }))
