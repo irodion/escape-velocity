@@ -16,6 +16,7 @@
 use rayon::prelude::*;
 
 use crate::complex::Complex64;
+use crate::escape_distance::escape_distance;
 use crate::escape_time::escape_time;
 use crate::field::Field;
 use crate::fractal_kind::FractalKind;
@@ -25,6 +26,23 @@ use crate::viewport::Viewport;
 /// Per-pixel `z_0` for Mandelbrot dispatch. Lifted out of the inner
 /// loop so the constant doesn't get rebuilt at every pixel.
 const ORIGIN: Complex64 = Complex64::new(0.0, 0.0);
+
+/// `1 + 0i` — the Distance Estimate derivative seed (`dc` for Mandelbrot,
+/// `dz_0` for Julia). Hoisted for the same reason as [`ORIGIN`].
+const ONE: Complex64 = Complex64::new(1.0, 0.0);
+
+/// Width, in **pixels**, of the `Clamped` distance ramp (ADR-0013): a
+/// pixel whose buffer distance is `≥ k` paints the palette's far end, and
+/// the gradient is spread linearly over the `[0, k)` shell next to the
+/// boundary. Because the compute pipeline stores pixel-unit distance,
+/// this constant is resolution-independent — a filament is `~k` pixels
+/// wide at any zoom or buffer size.
+///
+/// `2.0` is a reasonable default that draws crisp hairlines; tuning it by
+/// eye (and the hard-clamp-vs-`tanh` choice) is the dedicated follow-up
+/// #63. Keep it a single named constant so that work has one place to
+/// touch.
+const CLAMPED_DISTANCE_K: f32 = 2.0;
 
 /// Run `compute` for every pixel in `viewport`, dispatching first on the
 /// [`Field`] (what scalar each pixel carries) and then on `kind` (which
@@ -38,23 +56,15 @@ const ORIGIN: Complex64 = Complex64::new(0.0, 0.0);
 /// - [`Field::EscapeTime`] emits the smooth continuous escape-time count
 ///   `nu` — the existing, unchanged hot path (see
 ///   [`compute_escape_time`]).
-/// - [`Field::DistanceEstimate`] emits the distance estimate `d`. Its
-///   kernel lands in Slice 2 (#61); until then this arm is unreachable —
-///   the UI never offers Distance Estimate — so it is left a `todo!()`.
+/// - [`Field::DistanceEstimate`] emits the boundary distance estimate
+///   `d`, in **pixel units** (see [`compute_distance_estimate`]).
 ///
 /// The Field match is hoisted out of the per-pixel work, exactly like the
 /// `kind` match below it, so a frame carries one rule end-to-end.
 pub fn compute(viewport: &Viewport, max_iter: u32, kind: FractalKind, field: Field) -> Vec<f32> {
     match field {
         Field::EscapeTime => compute_escape_time(viewport, max_iter, kind),
-        // The Distance Estimate Field needs a separate `escape_distance`
-        // kernel that tracks the orbit derivative `z'`; it cannot be
-        // recovered from `nu`. That work is Slice 2 (#61). The axis is
-        // wired end-to-end now (WASM enum, worker cache invalidation, UI
-        // select) so the plumbing ships and is tested against Escape Time;
-        // Distance Estimate stays unselectable in the UI until #61, which
-        // is what makes this arm unreachable in production.
-        Field::DistanceEstimate => todo!("Distance Estimate Field — Slice 2 (#61)"),
+        Field::DistanceEstimate => compute_distance_estimate(viewport, max_iter, kind),
     }
 }
 
@@ -106,6 +116,60 @@ fn compute_escape_time(viewport: &Viewport, max_iter: u32, kind: FractalKind) ->
     }
 }
 
+/// The Distance Estimate computation: a row-major buffer whose entry
+/// `[py * width + px]` is the pixel's distance to the set boundary in
+/// **pixel units** (`f32::NAN` for inside-set pixels — the shared
+/// sentinel).
+///
+/// The [`escape_distance`] kernel returns the estimate in complex-plane
+/// units; this pipeline divides by the Viewport's per-pixel scale (which
+/// is keyed to the reference width, ADR-0011) so the buffer carries
+/// pixel-distance. That is what keeps the boundary filaments a fixed
+/// width in pixels — and the `Clamped` constant `k` resolution-
+/// independent — as the user zooms: in plane terms the filaments grow
+/// under magnification, but in pixel terms they hold steady, and
+/// `colorize` never needs to know the Viewport (ADR-0013 keeps it
+/// Field-blind). Dividing a `NaN` plane-distance leaves `NaN`, so the
+/// inside-set sentinel survives the conversion untouched.
+///
+/// Family dispatch mirrors [`compute_escape_time`] and passes the
+/// per-family derivative seeds (ADR-0013): Mandelbrot differentiates
+/// w.r.t. `c` (`dz_0 = 0`, `dc = 1`), Julia w.r.t. `z_0` (`dz_0 = 1`,
+/// `dc = 0`). The kernel itself stays family-agnostic. Slice 2 (#61)
+/// ships the Mandelbrot path as the headline; the Julia arm rides the
+/// same family-agnostic kernel so selecting Distance Estimate in Julia
+/// mode renders correctly rather than panicking — Slice 3 (#62) adds its
+/// dedicated witness tests and acceptance.
+fn compute_distance_estimate(viewport: &Viewport, max_iter: u32, kind: FractalKind) -> Vec<f32> {
+    let width = viewport.width;
+    let height = viewport.height;
+    // Plane → pixel units. Hoisted out of the per-pixel closure; the
+    // scale depends only on `zoom` (ADR-0011), constant across the frame.
+    let scale = viewport.pixel_scale();
+    match kind {
+        FractalKind::Mandelbrot => (0..height)
+            .into_par_iter()
+            .flat_map_iter(|py| {
+                (0..width).map(move |px| {
+                    let c = viewport.pixel_to_complex(px, py);
+                    let d = escape_distance(ORIGIN, c, ORIGIN, ONE, max_iter);
+                    (f64::from(d) / scale) as f32
+                })
+            })
+            .collect(),
+        FractalKind::Julia { c } => (0..height)
+            .into_par_iter()
+            .flat_map_iter(|py| {
+                (0..width).map(move |px| {
+                    let z0 = viewport.pixel_to_complex(px, py);
+                    let d = escape_distance(z0, c, ONE, ORIGIN, max_iter);
+                    (f64::from(d) / scale) as f32
+                })
+            })
+            .collect(),
+    }
+}
+
 /// Convert smooth-iteration counts to RGBA8 pixels.
 ///
 /// Output buffer length is `4 * nus.len()`, in RGBA order. Alpha is
@@ -143,8 +207,39 @@ pub fn colorize(nus: &[f32], palette: Palette, mode: NormalizationMode, max_iter
                 &mut out,
             )
         }
+        NormalizationMode::Clamped => colorize_clamped(nus, palette, &mut out),
     }
     out
+}
+
+/// The `Clamped` distance ramp (ADR-0013) — the Distance Estimate Field's
+/// default normalisation. Each finite scalar `d` (a pixel-unit distance,
+/// though `colorize` stays Field-blind and never assumes so) maps through
+/// `t = min(1, d / k)`: a hard linear ramp over the first
+/// [`CLAMPED_DISTANCE_K`] units, flat at the palette's far end beyond. The
+/// gradient stays inside the thin boundary shell, so the boundary renders
+/// as hairline filaments rather than a soft halo.
+///
+/// Unlike the global family, this does **not** rescale against the
+/// frame's `[min, max]`: the clamp is absolute, against the fixed `k`.
+/// That is exactly what makes it resolution-independent — `k` is in the
+/// same pixel units the compute pipeline puts in the buffer, so a filament
+/// stays `k` pixels wide at any zoom or buffer size.
+///
+/// Non-finite scalars (the NaN inside-set sentinel and any ±Inf) paint
+/// opaque black, symmetric with every other mode. Negative scalars (not
+/// expected from a distance, but cheap to guard) clamp to the palette
+/// start.
+fn colorize_clamped(nus: &[f32], palette: Palette, out: &mut Vec<u8>) {
+    for &d in nus {
+        if !d.is_finite() {
+            out.extend_from_slice(&[0, 0, 0, 255]);
+            continue;
+        }
+        let t = (d / CLAMPED_DISTANCE_K).clamp(0.0, 1.0);
+        let [r, g, b] = palette.sample(t);
+        out.extend_from_slice(&[r, g, b, 255]);
+    }
 }
 
 fn colorize_cycled(nus: &[f32], palette: Palette, out: &mut Vec<u8>) {
@@ -321,6 +416,7 @@ mod tests {
         NormalizationMode::Linear,
         NormalizationMode::SquareRoot,
         NormalizationMode::Logarithmic,
+        NormalizationMode::Clamped,
     ];
 
     // The global-normalisation family, which shares one implementation
@@ -557,19 +653,90 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Slice 2")]
-    fn distance_estimate_field_is_not_yet_implemented() {
-        // Slice 1 wires the Field axis but not the Distance Estimate maths
-        // (#61). The arm is a `todo!()`; the UI never offers it, so this is
-        // unreachable in production. Pin it as deliberately-stubbed so the
-        // day #61 lands, removing the `todo!()` flips this test red and
-        // forces it to be updated alongside the new kernel.
+    fn distance_estimate_is_finite_outside_and_nan_inside() {
+        // The Distance Estimate Field must keep the same inside/outside
+        // partition as Escape Time: NaN inside the set, finite outside.
+        // An origin-centred viewport straddles the main cardioid, so the
+        // buffer must contain both.
         let vp = origin_viewport();
-        let _ = compute(
+        let buf = compute(
             &vp,
             MAX_ITER,
             FractalKind::Mandelbrot,
             Field::DistanceEstimate,
+        );
+        assert_eq!(buf.len(), (vp.width as usize) * (vp.height as usize));
+        assert!(buf[center_idx(&vp)].is_nan(), "set interior must be NaN");
+        assert!(
+            buf.iter().any(|d| d.is_finite()),
+            "no finite distances — exterior not rendered?",
+        );
+        // Every finite distance is non-negative (it is a distance).
+        for &d in &buf {
+            assert!(d.is_nan() || d >= 0.0, "negative distance: {d}");
+        }
+    }
+
+    #[test]
+    fn distance_estimate_inside_outside_partition_matches_escape_time() {
+        // Switching Field must never reclassify a pixel as interior vs.
+        // exterior: both kernels share the bailout, so a pixel is NaN under
+        // Distance Estimate iff it is NaN under Escape Time.
+        let vp = mapping_viewport();
+        let et = compute(&vp, MAX_ITER, FractalKind::Mandelbrot, Field::EscapeTime);
+        let de = compute(
+            &vp,
+            MAX_ITER,
+            FractalKind::Mandelbrot,
+            Field::DistanceEstimate,
+        );
+        assert_eq!(et.len(), de.len());
+        for (i, (e, d)) in et.iter().zip(de.iter()).enumerate() {
+            assert_eq!(
+                e.is_nan(),
+                d.is_nan(),
+                "pixel {i}: NaN partition differs (et={e}, de={d})",
+            );
+        }
+    }
+
+    #[test]
+    fn distance_estimate_is_resolution_independent_in_pixel_units() {
+        // The headline property: because the buffer carries *pixel*-unit
+        // distance (plane distance ÷ pixel_scale, and pixel_scale is keyed
+        // to the reference width, ADR-0011), the same plane point reads the
+        // same distance regardless of buffer dimensions at a fixed zoom.
+        //
+        // Doubling both dimensions keeps the per-pixel scale identical, and
+        // the centre offset algebra lines up exactly: for an N-wide buffer,
+        // pixel ⌊N/2⌋ sits ½·scale right of centre; doubling N keeps that
+        // half-pixel offset. So vp1's centre pixel and vp2's centre pixel
+        // sample the *same* complex point — their pixel-distances must be
+        // bit-identical, not merely close.
+        let center = Complex64::new(0.35, 0.0); // just right of the cusp → exterior
+        let vp1 = Viewport::new(center, 200.0, 100, 100);
+        let vp2 = Viewport::new(center, 200.0, 200, 200);
+        // Same plane point in both (proven by construction; assert it too).
+        assert_eq!(vp1.pixel_to_complex(50, 50), vp2.pixel_to_complex(100, 100));
+        let b1 = compute(
+            &vp1,
+            MAX_ITER,
+            FractalKind::Mandelbrot,
+            Field::DistanceEstimate,
+        );
+        let b2 = compute(
+            &vp2,
+            MAX_ITER,
+            FractalKind::Mandelbrot,
+            Field::DistanceEstimate,
+        );
+        let d1 = b1[50 * 100 + 50];
+        let d2 = b2[100 * 200 + 100];
+        assert!(d1.is_finite() && d2.is_finite(), "centre must be exterior");
+        assert_eq!(
+            d1.to_bits(),
+            d2.to_bits(),
+            "pixel-distance drifted with resolution: {d1} vs {d2}",
         );
     }
 
@@ -781,6 +948,74 @@ mod tests {
                     assert_eq!(pixel, first, "{p:?}/{m:?} not uniform");
                 }
             }
+        }
+    }
+
+    // --- Clamped mode (ADR-0013) ---------------------------------------
+
+    #[test]
+    fn clamped_maps_zero_distance_to_palette_start() {
+        // d = 0 (on the boundary) → t = 0 → the palette's first colour.
+        // On Grayscale that is black.
+        let out = colorize(
+            &[0.0],
+            Palette::Grayscale,
+            NormalizationMode::Clamped,
+            MAX_ITER,
+        );
+        assert_eq!(out, vec![0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn clamped_saturates_at_and_beyond_k() {
+        // d ≥ k → t = 1 → the palette's last colour, and it stays there
+        // for any larger distance (the flat tail). On Grayscale that is
+        // white. Probe exactly k and well past it.
+        for &d in &[2.0_f32, 5.0, 100.0, 1.0e6] {
+            let out = colorize(
+                &[d],
+                Palette::Grayscale,
+                NormalizationMode::Clamped,
+                MAX_ITER,
+            );
+            assert_eq!(
+                out,
+                vec![255, 255, 255, 255],
+                "d={d} did not saturate to white"
+            );
+        }
+    }
+
+    #[test]
+    fn clamped_is_monotonic_nondecreasing_in_distance() {
+        // Within the ramp, a larger distance is at least as bright — the
+        // gradient never reverses. Grayscale makes brightness == red.
+        let samples: Vec<f32> = (0..=20).map(|i| i as f32 * 0.1).collect(); // 0.0 .. 2.0
+        let mut prev = 0u8;
+        for &d in &samples {
+            let out = colorize(
+                &[d],
+                Palette::Grayscale,
+                NormalizationMode::Clamped,
+                MAX_ITER,
+            );
+            let red = out[0];
+            assert!(
+                red >= prev,
+                "clamped not monotonic at d={d}: {red} < {prev}"
+            );
+            prev = red;
+        }
+    }
+
+    #[test]
+    fn clamped_nan_maps_to_opaque_black_for_every_palette() {
+        // The inside-set sentinel paints opaque black under Clamped too,
+        // symmetric with every other mode (also covered by the combo
+        // sweep; spelled out here for the DE default specifically).
+        for &p in ALL_PALETTES {
+            let out = colorize(&[f32::NAN], p, NormalizationMode::Clamped, MAX_ITER);
+            assert_eq!(out, vec![0, 0, 0, 255], "{p:?}");
         }
     }
 }

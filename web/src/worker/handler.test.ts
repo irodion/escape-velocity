@@ -50,7 +50,14 @@ vi.mock('../../wasm/fractal_wasm.js', () => {
       Spectral: 13,
       Cosmic: 14,
     },
-    NormalizationMode: { Cycled: 0, Histogram: 1, Linear: 2, SquareRoot: 3, Logarithmic: 4 },
+    NormalizationMode: {
+      Cycled: 0,
+      Histogram: 1,
+      Linear: 2,
+      SquareRoot: 3,
+      Logarithmic: 4,
+      Clamped: 5,
+    },
     FractalKind: { Mandelbrot: 0, Julia: 1 },
     Field: { EscapeTime: 0, DistanceEstimate: 1 },
   }

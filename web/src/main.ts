@@ -222,6 +222,8 @@ const modeEnum = (name: NormalisationName): NormalizationMode => {
       return NormalizationMode.SquareRoot
     case 'logarithmic':
       return NormalizationMode.Logarithmic
+    case 'clamped':
+      return NormalizationMode.Clamped
   }
 }
 
