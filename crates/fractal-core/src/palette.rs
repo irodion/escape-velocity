@@ -245,10 +245,9 @@ impl Palette {
     /// are likewise cyclic, so they share the longer period.
     pub fn period(self) -> f32 {
         match self {
-            Palette::Twilight
-            | Palette::EarthAndSky
-            | Palette::Rainbow
-            | Palette::KaholLavan => 96.0,
+            Palette::Twilight | Palette::EarthAndSky | Palette::Rainbow | Palette::KaholLavan => {
+                96.0
+            }
             _ => 64.0,
         }
     }
