@@ -112,7 +112,9 @@ if (!(controlsToggle instanceof HTMLButtonElement)) {
 // Collapsible drawer (Slice 4): the controls panel is closed by default and
 // the ☰ button toggles it. Fixed-positioned (index.html), so this is purely
 // a visibility concern — it never touches the canvas box or the renderer.
-mountDrawer(controlsToggle, controlsForm)
+// The canvas is passed as the dismiss surface so a deliberate click on the
+// fractal closes an open drawer (a pan-drag or wheel-zoom leaves it open).
+mountDrawer(controlsToggle, controlsForm, canvas)
 
 // Initialise the WASM module on the main thread so the synchronous
 // `Viewport` class (used by the input controller and the dispatcher

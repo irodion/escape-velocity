@@ -16,8 +16,17 @@
  *     screen-reader user can't land on a control they can't see.
  *
  * Pure view glue (like `pwa-ui`), but with enough branching — Escape to
- * close, focus handoff — to warrant the focused test in `drawer.test.ts`.
+ * close, focus handoff, click-away to dismiss — to warrant the focused
+ * test in `drawer.test.ts`.
  */
+
+// A deliberate *click* on the fractal travels less than this many CSS pixels
+// between press and release. Past it, the gesture is a pan-drag — which must
+// leave the drawer open so the user can reframe the view while tuning a
+// control. A wheel-zoom fires no mouse press at all, so it never reaches the
+// dismiss path. ~4px tolerates the hand-jitter of a "stationary" click
+// without swallowing a real drag.
+const CLICK_SLOP_PX = 4
 
 // The toggle's glyph is *drawn*, not an emoji: a crosshair that echoes the
 // canvas's `crosshair` cursor (the affordance points at what it controls),
@@ -35,7 +44,15 @@ const CLOSE_GLYPH =
   '<path d="M5.5 5.5L18.5 18.5M18.5 5.5L5.5 18.5" ' +
   'stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>'
 
-export function mountDrawer(toggle: HTMLButtonElement, drawer: HTMLElement): void {
+export function mountDrawer(
+  toggle: HTMLButtonElement,
+  drawer: HTMLElement,
+  // The fractal surface (the canvas). A deliberate click on it dismisses an
+  // open drawer — the light-dismiss gesture users expect from an overlay.
+  // Optional so the focused `drawer.test.ts` setups (and any caller that
+  // doesn't want click-away) can omit it.
+  dismissSurface?: HTMLElement,
+): void {
   // The single in-memory source of truth for open/closed. `setOpen` is the
   // only writer, so this can't drift from the DOM it drives — and the
   // handlers below read this boolean rather than matching the `.open` class
@@ -86,4 +103,50 @@ export function mountDrawer(toggle: HTMLButtonElement, drawer: HTMLElement): voi
       handoffFocus()
     }
   })
+
+  // Click-away: a deliberate click on the fractal dismisses an open drawer.
+  // We can't use a plain `click` listener — the canvas's pan also fires
+  // `click` after a drag returns near its origin, and the browser's own
+  // click-distance tolerance isn't tunable. So we arm on `mousedown` and
+  // only dismiss if the pointer barely moved by `mouseup` (a pan travels
+  // farther; a wheel-zoom fires no mouse press), giving an explicit,
+  // testable click-vs-drag split. Mouse events (not pointer) match the
+  // canvas's existing pan wiring in `input.ts` — touch taps synthesise the
+  // same mousedown/mouseup pair. The drawer's own controls and the toggle
+  // sit in higher z-index layers, so clicks on them never reach here.
+  //
+  // Both this listener and `input.ts`'s pan see the same press: a true
+  // click closes the drawer here and commits a zero-delta (no-op) pan
+  // there; a drag leaves the drawer open and pans. They stay decoupled —
+  // the drawer never learns about the viewport, the input layer never
+  // learns about the drawer.
+  if (dismissSurface !== undefined) {
+    let downX = 0
+    let downY = 0
+    // Only a press that began on the fractal *while the drawer was open*
+    // can dismiss it. Re-checked on every press, so a release left dangling
+    // by a drag off-canvas (no `mouseup` on the surface) can't later fire a
+    // stray dismiss — the next press re-arms from the live state.
+    let armed = false
+    dismissSurface.addEventListener('mousedown', (event) => {
+      // Primary button only; a right/middle press belongs to the browser
+      // and shouldn't double as a dismiss.
+      armed = isOpen && event.button === 0
+      downX = event.clientX
+      downY = event.clientY
+    })
+    dismissSurface.addEventListener('mouseup', (event) => {
+      if (!armed) return
+      armed = false
+      const movedFar =
+        Math.abs(event.clientX - downX) > CLICK_SLOP_PX ||
+        Math.abs(event.clientY - downY) > CLICK_SLOP_PX
+      if (movedFar) return
+      setOpen(false)
+      // Hand focus back to the toggle: closing makes the drawer `inert`, so
+      // a keyboard focus that was sitting on a control inside it can't be
+      // stranded there.
+      handoffFocus()
+    })
+  }
 }
