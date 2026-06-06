@@ -47,6 +47,7 @@ export type PaletteName =
   | 'twilight'
   | 'earth-and-sky'
   | 'rainbow'
+  | 'kahol-lavan'
   | 'ocean'
 export type NormalisationName = 'cycled' | 'histogram'
 export type FractalMode = 'mandelbrot' | 'julia'

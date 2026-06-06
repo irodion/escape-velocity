@@ -64,6 +64,7 @@ function buildForm(): HTMLFormElement {
         <option value="twilight">Twilight</option>
         <option value="earth-and-sky">Earth &amp; Sky</option>
         <option value="rainbow">Rainbow</option>
+        <option value="kahol-lavan">Kahol&ndash;Lavan</option>
         <option value="ocean">Ocean</option>
       </select>
     </label>

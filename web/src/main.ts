@@ -156,6 +156,7 @@ const PALETTE_ACCENT: Record<PaletteName, string> = {
   twilight: '#b78cff',
   'earth-and-sky': '#ffaa00',
   rainbow: '#ff6ec7',
+  'kahol-lavan': '#3a78d8',
   ocean: '#41c7e8',
 }
 const applyAccent = (palette: PaletteName): void => {
@@ -184,6 +185,8 @@ const paletteEnum = (name: PaletteName): Palette => {
       return Palette.EarthAndSky
     case 'rainbow':
       return Palette.Rainbow
+    case 'kahol-lavan':
+      return Palette.KaholLavan
     case 'ocean':
       return Palette.Ocean
   }

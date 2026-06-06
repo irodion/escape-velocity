@@ -42,6 +42,11 @@
 //! colours match), so they wrap cleanly under
 //! [`NormalizationMode::Cycled`].
 //!
+//! [`Palette::KaholLavan`] ("blue–white" in Hebrew, the Israeli flag
+//! colours) is a hand-rolled cyclic ramp white → flag-blue → white; its
+//! matching endpoints make the `Cycled` bands alternate like the flag's
+//! stripes.
+//!
 //! [`Palette::Grayscale`] is a hand-rolled two-stop ramp, included as
 //! a reference baseline.
 
@@ -60,6 +65,7 @@ pub enum Palette {
     EarthAndSky,
     Rainbow,
     Ocean,
+    KaholLavan,
 }
 
 /// Identifies how `nu` values are mapped into `[0, 1]` before palette
@@ -201,6 +207,17 @@ const OCEAN_STOPS: &[Stop] = &[
     (1.000, [224, 255, 255]),
 ];
 
+// "Kahol–Lavan" (כחול–לבן, "blue–white") — the Israeli flag colours.
+// White → flag-blue (#0038B8) → white; the matching endpoints make the
+// cycle seamless, so `Cycled` bands alternate like the flag's stripes.
+const KAHOL_LAVAN_STOPS: &[Stop] = &[
+    (0.00, [255, 255, 255]),
+    (0.25, [120, 170, 235]),
+    (0.50, [0, 56, 184]),
+    (0.75, [120, 170, 235]),
+    (1.00, [255, 255, 255]),
+];
+
 impl Palette {
     fn stops(self) -> &'static [Stop] {
         match self {
@@ -215,6 +232,7 @@ impl Palette {
             Palette::EarthAndSky => EARTH_AND_SKY_STOPS,
             Palette::Rainbow => RAINBOW_STOPS,
             Palette::Ocean => OCEAN_STOPS,
+            Palette::KaholLavan => KAHOL_LAVAN_STOPS,
         }
     }
 
@@ -227,7 +245,10 @@ impl Palette {
     /// are likewise cyclic, so they share the longer period.
     pub fn period(self) -> f32 {
         match self {
-            Palette::Twilight | Palette::EarthAndSky | Palette::Rainbow => 96.0,
+            Palette::Twilight
+            | Palette::EarthAndSky
+            | Palette::Rainbow
+            | Palette::KaholLavan => 96.0,
             _ => 64.0,
         }
     }
@@ -280,6 +301,7 @@ mod tests {
         Palette::EarthAndSky,
         Palette::Rainbow,
         Palette::Ocean,
+        Palette::KaholLavan,
     ];
 
     #[test]
@@ -334,7 +356,12 @@ mod tests {
         // where `t` wraps 1.0 → 0.0 every period. If their first and
         // last stop colours disagree, that wrap shows a hard seam — so
         // the endpoint match is a load-bearing contract, not cosmetics.
-        for &p in &[Palette::Twilight, Palette::EarthAndSky, Palette::Rainbow] {
+        for &p in &[
+            Palette::Twilight,
+            Palette::EarthAndSky,
+            Palette::Rainbow,
+            Palette::KaholLavan,
+        ] {
             assert_eq!(p.sample(0.0), p.sample(1.0), "{p:?} endpoints differ");
         }
     }

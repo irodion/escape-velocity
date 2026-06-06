@@ -67,6 +67,7 @@ pub enum Palette {
     EarthAndSky = 8,
     Rainbow = 9,
     Ocean = 10,
+    KaholLavan = 11,
 }
 
 #[wasm_bindgen]
@@ -106,6 +107,7 @@ impl From<Palette> for CorePalette {
             Palette::EarthAndSky => CorePalette::EarthAndSky,
             Palette::Rainbow => CorePalette::Rainbow,
             Palette::Ocean => CorePalette::Ocean,
+            Palette::KaholLavan => CorePalette::KaholLavan,
         }
     }
 }
