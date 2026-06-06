@@ -102,3 +102,11 @@ stands; only its "one f32 = `nu`" detail generalises to "a scalar Field".
 - [ADR-0002](0002-split-compute-and-colorize.md) — refined here: the seam now
   carries a scalar Field, of which `nu` is one value.
 - [ADR-0001](0001-cpu-side-wasm-compute.md) — what the compute loop does.
+- Wilson, L. R. (2012), *Distance estimation method for drawing Mandelbrot and
+  Julia sets* — primary reference for the `escape_distance` kernel: derives the
+  Hubbard–Douady potential `G = (1/2ⁿ)·ln|zₙ|`, the distance estimate
+  `d = |z|·ln|z| / |z'|`, and the derivative recurrence `z'ₙ₊₁ = 2·zₙ·z'ₙ + dc`
+  (`dc = 1` for Mandelbrot, `dc = 0` for Julia). Our implementation matches it
+  for both families. http://www.imajeenyus.com/mathematics/20121112_distance_estimates/distance_estimation_method_for_fractals.pdf
+  (Itself crediting Iñigo Quílez's distance-fractals article and mrob's
+  distance-estimator notes.)
