@@ -740,6 +740,125 @@ mod tests {
         );
     }
 
+    // --- Distance Estimate for Julia (#62) -----------------------------
+    //
+    // The Julia compute path rides the same family-agnostic kernel as
+    // Mandelbrot (wired in #61); these lock its behaviour at the pipeline
+    // level — finite exterior, NaN interior, the partition agreeing with
+    // Escape Time, and the Julia seeds genuinely driving a different image
+    // than the Mandelbrot seeds on the same viewport.
+
+    #[test]
+    fn julia_distance_estimate_is_finite_outside_and_nan_inside() {
+        // Origin-centred view of the Douady-rabbit Julia set: the centre
+        // pixel maps to z_0 = 0, inside the connected filled set → NaN;
+        // the exterior (corners) escapes → finite. Mirrors the Mandelbrot
+        // DE shape test on the Julia family.
+        let vp = origin_viewport();
+        let buf = compute(
+            &vp,
+            MAX_ITER,
+            FractalKind::Julia { c: JULIA_C },
+            Field::DistanceEstimate,
+        );
+        assert_eq!(buf.len(), (vp.width as usize) * (vp.height as usize));
+        assert!(
+            buf[center_idx(&vp)].is_nan(),
+            "Julia set interior must be NaN"
+        );
+        assert!(
+            buf.iter().any(|d| d.is_finite()),
+            "no finite Julia distances — exterior not rendered?",
+        );
+        for &d in &buf {
+            assert!(d.is_nan() || d >= 0.0, "negative Julia distance: {d}");
+        }
+    }
+
+    #[test]
+    fn julia_distance_estimate_partition_matches_escape_time() {
+        // Switching Field must not reclassify Julia pixels either: a pixel
+        // is NaN under Distance Estimate iff it is NaN under Escape Time,
+        // because both kernels share the bailout.
+        let vp = mapping_viewport();
+        let et = compute(
+            &vp,
+            MAX_ITER,
+            FractalKind::Julia { c: JULIA_C },
+            Field::EscapeTime,
+        );
+        let de = compute(
+            &vp,
+            MAX_ITER,
+            FractalKind::Julia { c: JULIA_C },
+            Field::DistanceEstimate,
+        );
+        assert_eq!(et.len(), de.len());
+        for (i, (e, d)) in et.iter().zip(de.iter()).enumerate() {
+            assert_eq!(
+                e.is_nan(),
+                d.is_nan(),
+                "Julia pixel {i}: NaN partition differs (et={e}, de={d})",
+            );
+        }
+    }
+
+    #[test]
+    fn julia_and_mandelbrot_distance_estimate_produce_different_buffers() {
+        // Proves the Julia seed pair (dz_0=1, dc=0) actually flows through
+        // the compute branch: on the same viewport, the Julia and
+        // Mandelbrot Distance Estimate buffers must differ. A regression
+        // that wired Julia DE back to the Mandelbrot seeds would still pass
+        // the shape and partition checks (the origin viewport's centre is
+        // interior either way) — this is the assertion that breaks.
+        let vp = origin_viewport();
+        let m = compute(
+            &vp,
+            MAX_ITER,
+            FractalKind::Mandelbrot,
+            Field::DistanceEstimate,
+        );
+        let j = compute(
+            &vp,
+            MAX_ITER,
+            FractalKind::Julia { c: JULIA_C },
+            Field::DistanceEstimate,
+        );
+        assert_ne!(m, j, "Julia and Mandelbrot DE buffers are identical");
+    }
+
+    #[test]
+    fn julia_distance_estimate_is_resolution_independent_in_pixel_units() {
+        // The same pixel-unit resolution-independence the Mandelbrot path
+        // has, on the Julia family: a shared plane point reads a
+        // bit-identical pixel-distance when both dimensions double at a
+        // fixed zoom. Centre on an exterior z_0 so the probed pixel escapes.
+        let center = Complex64::new(1.5, 0.0); // well outside the rabbit set
+        let vp1 = Viewport::new(center, 200.0, 100, 100);
+        let vp2 = Viewport::new(center, 200.0, 200, 200);
+        assert_eq!(vp1.pixel_to_complex(50, 50), vp2.pixel_to_complex(100, 100));
+        let b1 = compute(
+            &vp1,
+            MAX_ITER,
+            FractalKind::Julia { c: JULIA_C },
+            Field::DistanceEstimate,
+        );
+        let b2 = compute(
+            &vp2,
+            MAX_ITER,
+            FractalKind::Julia { c: JULIA_C },
+            Field::DistanceEstimate,
+        );
+        let d1 = b1[50 * 100 + 50];
+        let d2 = b2[100 * 200 + 100];
+        assert!(d1.is_finite() && d2.is_finite(), "centre must be exterior");
+        assert_eq!(
+            d1.to_bits(),
+            d2.to_bits(),
+            "Julia pixel-distance drifted with resolution: {d1} vs {d2}",
+        );
+    }
+
     // --- colorize() shape ----------------------------------------------
 
     #[test]
