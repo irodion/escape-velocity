@@ -120,7 +120,6 @@ export class InputController {
     this.dragState = {
       startClientX: event.clientX,
       startClientY: event.clientY,
-      startViewport: this.currentViewport,
       snapshot: ctx.getImageData(0, 0, this.canvas.width, this.canvas.height),
     }
     this.canvas.classList.add('dragging')
@@ -152,7 +151,7 @@ export class InputController {
 
   private readonly handleMouseUp = (event: MouseEvent): void => {
     if (this.dragState === null) return
-    const { startClientX, startClientY, startViewport } = this.dragState
+    const { startClientX, startClientY } = this.dragState
 
     this.dragState = null
     this.canvas.classList.remove('dragging')
@@ -168,13 +167,27 @@ export class InputController {
     if (rect.width <= 0 || rect.height <= 0) return
     const dxCss = event.clientX - startClientX
     const dyCss = event.clientY - startClientY
-    // Pan operates on the viewport's logical grid, not the render
-    // buffer — scale CSS deltas by the viewport dimensions so a pan
-    // moves the same complex-plane distance regardless of render scale.
-    const dxInternal = (dxCss * startViewport.width()) / rect.width
-    const dyInternal = (dyCss * startViewport.height()) / rect.height
+    // Pan from `currentViewport`, not the drag-start snapshot. They are
+    // the same object for a drag with no concurrent resize, but a
+    // debounced `refitToCanvas` (ResizeObserver) can fire mid-drag and
+    // `setViewport` a viewport at new dimensions. `with_resolution`
+    // preserves center and zoom, so `currentViewport` still depicts the
+    // same framing the dragged snapshot shows — only its width/height
+    // are refreshed to the live box. Panning from the stale snapshot
+    // instead would commit its old dimensions, reverting the refit: the
+    // buffer would be computed for the old size and CSS-stretched onto
+    // the new box (non-square pixels), and since the box hasn't changed
+    // again the ResizeObserver never re-fires to correct it.
+    //
+    // The deltas scale by the viewport's logical grid (not the render
+    // buffer) so a pan moves the same complex-plane distance regardless
+    // of render scale — and by the *live* dimensions, matching the
+    // post-resize `rect`.
+    const base = this.currentViewport
+    const dxInternal = (dxCss * base.width()) / rect.width
+    const dyInternal = (dyCss * base.height()) / rect.height
 
-    const next = startViewport.pan_by_pixels(dxInternal, dyInternal)
+    const next = base.pan_by_pixels(dxInternal, dyInternal)
     this.currentViewport = next
     this.onChange(next)
   }
@@ -306,7 +319,6 @@ export class InputController {
 interface DragState {
   readonly startClientX: number
   readonly startClientY: number
-  readonly startViewport: Viewport
   readonly snapshot: ImageData
 }
 
