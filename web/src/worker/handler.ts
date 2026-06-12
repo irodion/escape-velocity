@@ -117,10 +117,6 @@ export interface RenderHooks {
  * standalone result on send.
  */
 export async function handleRender(
-  // A render rebuilds the whole iteration buffer, so it ignores the prior
-  // cache state and produces fresh state below. The parameter is kept for
-  // signature symmetry with `handleRecolorize` and the worker's call site.
-  _state: WorkerState,
   msg: RenderRequest,
   wasm: InitOutput,
   hooks: RenderHooks,

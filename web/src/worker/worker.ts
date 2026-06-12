@@ -72,16 +72,18 @@ let latestSeen = 0
 // clamp, so yielding between a frame's ~12 bands adds negligible latency
 // while still returning control to the event loop so a queued `cancel` is
 // delivered (and `latestSeen` updated) before the next band. Only one render
-// runs at a time, so at most one yield is ever outstanding; the FIFO queue
-// pairs each ping with its resolver.
+// runs at a time, so at most one yield is ever outstanding — a single pending
+// resolver suffices.
 const yieldChannel = new MessageChannel()
-const yieldQueue: Array<() => void> = []
+let resumeYield: (() => void) | undefined
 yieldChannel.port1.onmessage = (): void => {
-  yieldQueue.shift()?.()
+  const resolve = resumeYield
+  resumeYield = undefined
+  resolve?.()
 }
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => {
-    yieldQueue.push(resolve)
+    resumeYield = resolve
     yieldChannel.port2.postMessage(null)
   })
 }
@@ -124,7 +126,7 @@ ctx.onmessage = (event: MessageEvent<RenderRequest | RecolorizeRequest | CancelR
 
 async function runRender(msg: RenderRequest): Promise<void> {
   try {
-    const result = await handleRender(state, msg, wasm, {
+    const result = await handleRender(msg, wasm, {
       yieldToEventLoop,
       shouldAbort: () => latestSeen > msg.epoch,
       onProgress: (rowsDone, rowsTotal) => {

@@ -220,9 +220,7 @@ describe('handleRender', () => {
   it('computes every band then colorizes once, in that order', async () => {
     const { hooks } = makeHooks()
     // height 2 → two bands [0,1], [1,2] (planBands).
-    const result = expectRendered(
-      await handleRender(createWorkerState(), renderRequest({ epoch: 7 }), wasmInit, hooks),
-    )
+    const result = expectRendered(await handleRender(renderRequest({ epoch: 7 }), wasmInit, hooks))
 
     expect(wasm.compute_band).toHaveBeenCalledTimes(2)
     expect(wasm.colorize).toHaveBeenCalledTimes(1)
@@ -239,12 +237,7 @@ describe('handleRender', () => {
 
   it('reconstructs the Viewport and forwards (kind, cRe, cIm, field, band range) to each band', async () => {
     const { hooks } = makeHooks()
-    await handleRender(
-      createWorkerState(),
-      renderRequest({ fractalKind: FractalKind.Julia }),
-      wasmInit,
-      hooks,
-    )
+    await handleRender(renderRequest({ fractalKind: FractalKind.Julia }), wasmInit, hooks)
 
     expect(wasm.compute_band).toHaveBeenCalledTimes(2)
     const first = wasm.compute_band.mock.calls[0] as [
@@ -280,7 +273,7 @@ describe('handleRender', () => {
 
   it('reports progress after each band as rows-done / rows-total', async () => {
     const { hooks, progressSpy } = makeHooks()
-    await handleRender(createWorkerState(), renderRequest(), wasmInit, hooks)
+    await handleRender(renderRequest(), wasmInit, hooks)
     // Two bands of one row each over a 2-row frame: 1/2 then 2/2.
     expect(progressSpy.mock.calls).toEqual([
       [1, 2],
@@ -290,7 +283,7 @@ describe('handleRender', () => {
 
   it('yields between bands but not after the last (one yield for two bands)', async () => {
     const { hooks, yieldSpy } = makeHooks()
-    await handleRender(createWorkerState(), renderRequest(), wasmInit, hooks)
+    await handleRender(renderRequest(), wasmInit, hooks)
     expect(yieldSpy).toHaveBeenCalledTimes(1)
   })
 
@@ -299,7 +292,7 @@ describe('handleRender', () => {
     // never computes and no frame is produced.
     const abort = vi.fn(() => true)
     const { hooks } = makeHooks({ shouldAbort: abort })
-    const result = await handleRender(createWorkerState(), renderRequest(), wasmInit, hooks)
+    const result = await handleRender(renderRequest(), wasmInit, hooks)
 
     expect('aborted' in result && result.aborted).toBe(true)
     expect(wasm.compute_band).toHaveBeenCalledTimes(1) // only the first band ran
@@ -309,9 +302,7 @@ describe('handleRender', () => {
 
   it('a recolorize after a render reuses the cached (ptr, len) and skips compute', async () => {
     const { hooks } = makeHooks()
-    const { state } = expectRendered(
-      await handleRender(createWorkerState(), renderRequest(), wasmInit, hooks),
-    )
+    const { state } = expectRendered(await handleRender(renderRequest(), wasmInit, hooks))
     const [iterPtr, iterLen] = wasm.colorize.mock.calls[0] as [number, number, ...unknown[]]
 
     const { response } = handleRecolorize(state, recolorizeRequest(), wasmInit)
@@ -337,20 +328,8 @@ describe('handleRender', () => {
 
   it('two renders with different `fractalKind` both recompute (every band, both times)', async () => {
     const { hooks } = makeHooks()
-    const first = expectRendered(
-      await handleRender(
-        createWorkerState(),
-        renderRequest({ fractalKind: FractalKind.Mandelbrot }),
-        wasmInit,
-        hooks,
-      ),
-    )
-    await handleRender(
-      first.state,
-      renderRequest({ fractalKind: FractalKind.Julia }),
-      wasmInit,
-      hooks,
-    )
+    await handleRender(renderRequest({ fractalKind: FractalKind.Mandelbrot }), wasmInit, hooks)
+    await handleRender(renderRequest({ fractalKind: FractalKind.Julia }), wasmInit, hooks)
     // 2 bands × 2 renders.
     expect(wasm.compute_band).toHaveBeenCalledTimes(4)
     expect((wasm.compute_band.mock.calls[0] as unknown[])[2]).toBe(FractalKind.Mandelbrot)
@@ -359,20 +338,8 @@ describe('handleRender', () => {
 
   it('two renders with different `field` both recompute', async () => {
     const { hooks } = makeHooks()
-    const first = expectRendered(
-      await handleRender(
-        createWorkerState(),
-        renderRequest({ field: Field.EscapeTime }),
-        wasmInit,
-        hooks,
-      ),
-    )
-    await handleRender(
-      first.state,
-      renderRequest({ field: Field.DistanceEstimate }),
-      wasmInit,
-      hooks,
-    )
+    await handleRender(renderRequest({ field: Field.EscapeTime }), wasmInit, hooks)
+    await handleRender(renderRequest({ field: Field.DistanceEstimate }), wasmInit, hooks)
     expect(wasm.compute_band).toHaveBeenCalledTimes(4)
     expect((wasm.compute_band.mock.calls[0] as unknown[])[5]).toBe(Field.EscapeTime)
     expect((wasm.compute_band.mock.calls[2] as unknown[])[5]).toBe(Field.DistanceEstimate)
@@ -386,7 +353,7 @@ describe('handleRender', () => {
 
     const { hooks } = makeHooks()
     const { response, transfer } = expectRendered(
-      await handleRender(createWorkerState(), renderRequest(), wasmInit, hooks),
+      await handleRender(renderRequest(), wasmInit, hooks),
     )
 
     expect(transfer).toContain(response.rgba.buffer)
