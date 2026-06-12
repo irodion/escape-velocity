@@ -17,8 +17,8 @@ describe('wasm binding (Slice 7B)', () => {
     expect(typeof wasm.initThreadPool).toBe('function')
   })
 
-  it('still exposes the Slice 6 compute/colorize surface unchanged', () => {
-    expect(typeof wasm.compute).toBe('function')
+  it('exposes the render surface the worker depends on', () => {
+    expect(typeof wasm.compute_band).toBe('function')
     expect(typeof wasm.colorize).toBe('function')
     expect(typeof wasm.compute_len).toBe('function')
     expect(typeof wasm.colorize_len).toBe('function')

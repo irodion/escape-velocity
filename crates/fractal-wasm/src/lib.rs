@@ -10,15 +10,15 @@
 //!
 //! ## Buffer lifetime
 //!
-//! `compute` returns a pointer into a `thread_local!` `Vec<f32>`; that
-//! pointer is invalidated as soon as the next `compute` runs and refills
-//! the `Vec` in place (a `resize` that can move the allocation if the new
-//! frame is larger than the buffer's retained capacity).
+//! `compute_band` returns a pointer into a `thread_local!` `Vec<f32>`; that
+//! pointer is invalidated as soon as the next frame's first band (`y0 == 0`)
+//! refills the `Vec` in place (a `resize` that can move the allocation if the
+//! new frame is larger than the buffer's retained capacity).
 //! `colorize` may be called repeatedly against the same `(iter_ptr,
 //! len)` pair — that is the load-bearing fast-path payoff of Slice 4:
 //! changing palette or normalisation alone reuses the same iteration
 //! buffer instead of triggering a recompute. The caller is responsible
-//! for not interleaving a fresh `compute` between a cached
+//! for not interleaving a fresh frame's bands between a cached
 //! `(iter_ptr, len)` and its next `colorize`; the JS render layer
 //! enforces this with a module-level cache that is invalidated only
 //! after a full `render` cycle.
@@ -36,12 +36,12 @@ use wasm_bindgen::prelude::*;
 /// from `wasm-bindgen-rayon` so the generated glue surfaces it as the
 /// async JS function `initThreadPool(numThreads)`. The worker awaits it
 /// once, after `init()` and before announcing readiness, so the pool is
-/// live before the first `compute` runs (Slice 7C). On a single-core
+/// live before the first render runs (Slice 7C). On a single-core
 /// device a pool of one is created and rendering still works.
 ///
-/// This is the *only* export Slice 7 adds; `compute` / `colorize` and
-/// their lengths, and the `Viewport` class, keep their exact Slice 6
-/// signatures — the parallelism is internal to `compute`.
+/// This is the *only* export Slice 7 adds; `compute_band` / `colorize` and
+/// their lengths, and the `Viewport` class, keep their exact prior
+/// signatures — the parallelism is internal to the core compute.
 pub use wasm_bindgen_rayon::init_thread_pool;
 
 thread_local! {
@@ -88,12 +88,12 @@ pub enum NormalizationMode {
 /// JS-visible fractal-family discriminant. Mirrors
 /// `fractal_core::FractalKind` but carries no payload — the core's
 /// `Julia { c }` payload arrives as flat `c_re` / `c_im` scalars
-/// alongside the discriminant in [`compute`], matching the calling
+/// alongside the discriminant in [`compute_band`], matching the calling
 /// convention the JS side already uses for the viewport constructor
-/// (no wasm-bindgen `Complex` struct). Inlining the
-/// (`kind`, `c_re`, `c_im`) → `CoreFractalKind` translation inside
-/// `compute` is the natural shape because that's the only place the
-/// scalar payload exists.
+/// (no wasm-bindgen `Complex` struct). Translating the
+/// (`kind`, `c_re`, `c_im`) triple into a `CoreFractalKind` (via
+/// `core_fractal_kind`) is the natural shape because that's the only place
+/// the scalar payload exists.
 #[wasm_bindgen]
 #[derive(Clone, Copy, Debug)]
 pub enum FractalKind {
@@ -299,8 +299,8 @@ impl Viewport {
 }
 
 /// Validate the Julia `c` payload at the WASM↔JS boundary and translate the
-/// flat `(kind, c_re, c_im)` triple into a [`CoreFractalKind`]. Shared by
-/// [`compute`] and [`compute_band`]; `context` names the caller so a
+/// flat `(kind, c_re, c_im)` triple into a [`CoreFractalKind`]. Used by
+/// [`compute_band`]; `context` names the caller so a
 /// non-finite `c` surfaces a located message. `c_re` / `c_im` are validated
 /// **unconditionally** — the Mandelbrot path ignores them mathematically, but
 /// validating regardless forecloses a class of latent JS bugs where a stale
@@ -325,66 +325,8 @@ fn core_fractal_kind(
     })
 }
 
-/// Compute the smooth-iteration buffer for `viewport` and return a
-/// pointer into WASM linear memory. JS pairs this with [`compute_len`]
-/// to build a `Float32Array` view; the values are the continuous
-/// escape-time count `nu` (NaN for inside-set pixels).
-///
-/// `kind` selects the fractal family; `c_re` / `c_im` carry the Julia
-/// parameter `c`. Both scalars are validated for `is_finite()`
-/// **unconditionally** — the Mandelbrot path ignores them, but
-/// validating regardless costs nothing and forecloses a class of
-/// latent JS bugs where a stale `NaN` in a hidden Julia input would
-/// surface only at the next mode toggle.
-///
-/// `field` selects which per-pixel scalar to emit (ADR-0013). It is the
-/// last parameter so the existing positional call shape is preserved
-/// (append, never insert) — the same wire-stability rule the enum
-/// discriminants follow. Only [`Field::EscapeTime`] is computed today.
-///
-/// The returned `(ptr, len)` pair is the only handle JS keeps to the
-/// iteration buffer; it is valid until the next `compute` rewrites the
-/// underlying `Vec`. The render layer's module-level cache (see
-/// `web/src/render.ts`) encodes this lifetime explicitly so a
-/// palette/normalisation-only change can call [`colorize`] against the
-/// cached pair without re-iterating.
-#[wasm_bindgen]
-pub fn compute(
-    viewport: &Viewport,
-    max_iter: u32,
-    kind: FractalKind,
-    c_re: f64,
-    c_im: f64,
-    field: Field,
-) -> Result<*const f32, JsError> {
-    let core_kind = core_fractal_kind("compute", kind, c_re, c_im)?;
-    let width = viewport.inner.width as usize;
-    let height = viewport.inner.height as usize;
-    Ok(ITER_BUFFER.with(|cell| {
-        let mut iters = cell.borrow_mut();
-        // Reuse the persistent buffer's capacity (P4, #80): clear keeps the
-        // allocation, resize grows the length back to the frame size (a no-op
-        // realloc when the previous frame was at least this large). `compute`
-        // then fills every element in place, so the zero-fill `resize` performs
-        // is immediately overwritten — paid once, cheaper than allocating and
-        // freeing a fresh `Vec` per frame and letting linear memory ratchet.
-        iters.clear();
-        iters.resize(width * height, 0.0);
-        fractal_core::compute_rows_into(
-            &viewport.inner,
-            max_iter,
-            core_kind,
-            field.into(),
-            0,
-            viewport.inner.height,
-            &mut iters,
-        );
-        iters.as_ptr()
-    }))
-}
-
 /// Length (element count, not bytes) of the iteration buffer last
-/// produced by [`compute`] or accumulated by [`compute_band`].
+/// accumulated by [`compute_band`].
 #[wasm_bindgen]
 pub fn compute_len() -> usize {
     ITER_BUFFER.with(|cell| cell.borrow().len())
@@ -393,14 +335,15 @@ pub fn compute_len() -> usize {
 /// Compute one horizontal **band** — pixel rows `[y0, y1)` — of a frame
 /// into the shared iteration buffer, and return the buffer pointer.
 ///
-/// This is the cancellable counterpart to [`compute`] (P2, #78). The render
-/// worker drives a frame band-by-band: it calls `compute_band` for each row
-/// range, yields to its event loop between bands, and abandons the rest the
-/// moment a newer viewport supersedes the in-flight one — so a doomed deep
-/// render stops within a band instead of blocking the worker for seconds.
-/// Concatenated, the bands are bit-identical to a single [`compute`]
-/// (`fractal_core::compute_rows` keys every row to its absolute `py`), so
-/// the final [`colorize`] over the whole buffer is unchanged.
+/// This is the cancellable, banded way to fill the iteration buffer (P2,
+/// #78). The render worker drives a frame band-by-band: it calls
+/// `compute_band` for each row range, yields to its event loop between bands,
+/// and abandons the rest the moment a newer viewport supersedes the in-flight
+/// one — so a doomed deep render stops within a band instead of blocking the
+/// worker for seconds. Concatenated, the bands are bit-identical to a single
+/// full-frame compute (`fractal_core::compute_rows` keys every row to its
+/// absolute `py`), so the final [`colorize`] over the whole buffer is
+/// unchanged.
 ///
 /// ## Buffer protocol
 ///
@@ -414,12 +357,13 @@ pub fn compute_len() -> usize {
 /// MUST start a frame at `y0 == 0` and walk a contiguous partition up to
 /// `height`; the worker's band planner does exactly this.
 ///
-/// `c_re` / `c_im` are validated for finiteness like [`compute`], and the
-/// band range is checked (`y0 <= y1 <= height`) at this WASM↔JS boundary.
+/// `c_re` / `c_im` are validated for finiteness (via `core_fractal_kind`),
+/// and the band range is checked (`y0 <= y1 <= height`) at this WASM↔JS
+/// boundary.
 #[wasm_bindgen]
 #[allow(
     clippy::too_many_arguments,
-    reason = "wasm-bindgen exports take flat positional primitives across the JS↔WASM boundary (no struct grouping survives `postMessage`/the bindgen ABI); this mirrors `compute`'s six-arg shape with the band range `(y0, y1)` appended."
+    reason = "wasm-bindgen exports take flat positional primitives across the JS↔WASM boundary (no struct grouping survives `postMessage`/the bindgen ABI): viewport, max_iter, the (kind, c_re, c_im) family payload, field, and the band range (y0, y1)."
 )]
 pub fn compute_band(
     viewport: &Viewport,
@@ -477,7 +421,7 @@ pub fn compute_band(
 /// `Uint8ClampedArray` view.
 ///
 /// `iter_ptr` / `len` must be the pair previously returned by
-/// [`compute`] + [`compute_len`]. Slice 4's render-layer cache lets
+/// [`compute_band`] + [`compute_len`]. Slice 4's render-layer cache lets
 /// this be called repeatedly against the same `(iter_ptr, len)` pair
 /// — the fast-path payoff of ADR-0002: a palette or normalisation
 /// change repaints in milliseconds because no iteration runs.
@@ -494,8 +438,8 @@ pub fn colorize(
     max_iter: u32,
 ) -> *const u8 {
     // SAFETY: caller guarantees (iter_ptr, len) was previously returned
-    // by `compute` + `compute_len` and has not been invalidated by an
-    // intervening `compute`. The ITER_BUFFER it points into is owned
+    // by `compute_band` + `compute_len` and has not been invalidated by an
+    // intervening frame's bands. The ITER_BUFFER it points into is owned
     // by this module and outlives the call.
     let iters = unsafe { std::slice::from_raw_parts(iter_ptr, len) };
     RGBA_BUFFER.with(|cell| {
