@@ -11,8 +11,9 @@
 //! ## Buffer lifetime
 //!
 //! `compute` returns a pointer into a `thread_local!` `Vec<f32>`; that
-//! pointer is invalidated as soon as the next `compute` runs and the
-//! `Vec` is reassigned (which can move the underlying allocation).
+//! pointer is invalidated as soon as the next `compute` runs and refills
+//! the `Vec` in place (a `resize` that can move the allocation if the new
+//! frame is larger than the buffer's retained capacity).
 //! `colorize` may be called repeatedly against the same `(iter_ptr,
 //! len)` pair — that is the load-bearing fast-path payoff of Slice 4:
 //! changing palette or normalisation alone reuses the same iteration
@@ -357,10 +358,27 @@ pub fn compute(
     field: Field,
 ) -> Result<*const f32, JsError> {
     let core_kind = core_fractal_kind("compute", kind, c_re, c_im)?;
-    let buf = fractal_core::compute(&viewport.inner, max_iter, core_kind, field.into());
+    let width = viewport.inner.width as usize;
+    let height = viewport.inner.height as usize;
     Ok(ITER_BUFFER.with(|cell| {
         let mut iters = cell.borrow_mut();
-        *iters = buf;
+        // Reuse the persistent buffer's capacity (P4, #80): clear keeps the
+        // allocation, resize grows the length back to the frame size (a no-op
+        // realloc when the previous frame was at least this large). `compute`
+        // then fills every element in place, so the zero-fill `resize` performs
+        // is immediately overwritten — paid once, cheaper than allocating and
+        // freeing a fresh `Vec` per frame and letting linear memory ratchet.
+        iters.clear();
+        iters.resize(width * height, 0.0);
+        fractal_core::compute_rows_into(
+            &viewport.inner,
+            max_iter,
+            core_kind,
+            field.into(),
+            0,
+            viewport.inner.height,
+            &mut iters,
+        );
         iters.as_ptr()
     }))
 }
@@ -387,14 +405,14 @@ pub fn compute_len() -> usize {
 /// ## Buffer protocol
 ///
 /// The **first** band of a frame (`y0 == 0`) clears [`ITER_BUFFER`] and
-/// reserves the whole frame (`width * height`) up front. That single
-/// allocation never moves while the remaining bands are appended, so the
-/// returned pointer stays valid across the entire band sequence *and* the
-/// trailing `colorize` — the caller may read it after the last band, paired
-/// with [`compute_len`]. Bands are appended in order, so each lands at its
-/// absolute offset `y0 * width`. The caller MUST start a frame at `y0 == 0`
-/// and walk a contiguous partition up to `height`; the worker's band planner
-/// does exactly this.
+/// resizes it to the whole frame (`width * height`) up front. That single
+/// allocation never moves while the remaining bands fill, so the returned
+/// pointer stays valid across the entire band sequence *and* the trailing
+/// `colorize` — the caller may read it after the last band, paired with
+/// [`compute_len`]. Each band writes directly into its absolute slice
+/// `[y0 * width, y1 * width)` (no intermediate buffer, no copy). The caller
+/// MUST start a frame at `y0 == 0` and walk a contiguous partition up to
+/// `height`; the worker's band planner does exactly this.
 ///
 /// `c_re` / `c_im` are validated for finiteness like [`compute`], and the
 /// band range is checked (`y0 <= y1 <= height`) at this WASM↔JS boundary.
@@ -421,21 +439,34 @@ pub fn compute_band(
         ));
     }
     let core_kind = core_fractal_kind("compute_band", kind, c_re, c_im)?;
-    let band =
-        fractal_core::compute_rows(&viewport.inner, max_iter, core_kind, field.into(), y0, y1);
+    let w = width as usize;
     Ok(ITER_BUFFER.with(|cell| {
         let mut iters = cell.borrow_mut();
         if y0 == 0 {
-            // Fresh frame: reserve the whole frame up front so the single
-            // allocation never moves as bands append — keeping the returned
-            // pointer valid through the final colorize — while skipping the
-            // zero-fill a `resize` would do (every cell is overwritten anyway).
+            // Fresh frame: size the persistent buffer to the whole frame once.
+            // `resize` zero-fills, but that single memset is far cheaper than
+            // the per-band intermediate `Vec` + concatenating copy the old
+            // `extend_from_slice(&compute_rows(..))` paid every band — and it
+            // lets each band fill its slice in place below. The allocation is
+            // reused across frames (capacity retained, P4 #80) and never moves
+            // while bands fill, so the returned pointer stays valid through the
+            // trailing colorize.
             iters.clear();
-            iters.reserve((width as usize) * (height as usize));
+            iters.resize(w * (height as usize), 0.0);
         }
-        // Bands arrive in order over a contiguous partition (the caller's
-        // contract), so appending lands each band at its absolute `y0 * width`.
-        iters.extend_from_slice(&band);
+        // Each band writes straight into its absolute slice `[y0*w, y1*w)` — no
+        // intermediate buffer, no copy. The caller's contiguous-partition
+        // contract guarantees the slices tile the frame exactly once.
+        let band = &mut iters[(y0 as usize) * w..(y1 as usize) * w];
+        fractal_core::compute_rows_into(
+            &viewport.inner,
+            max_iter,
+            core_kind,
+            field.into(),
+            y0,
+            y1,
+            band,
+        );
         iters.as_ptr()
     }))
 }
@@ -467,10 +498,13 @@ pub fn colorize(
     // intervening `compute`. The ITER_BUFFER it points into is owned
     // by this module and outlives the call.
     let iters = unsafe { std::slice::from_raw_parts(iter_ptr, len) };
-    let rgba = fractal_core::colorize(iters, palette.into(), mode.into(), max_iter);
     RGBA_BUFFER.with(|cell| {
         let mut buf = cell.borrow_mut();
-        *buf = rgba;
+        // Fill the persistent RGBA buffer in place (P4, #80): `colorize_into`
+        // clears and reserves, reusing the prior frame's allocation instead of
+        // swapping in a fresh `Vec` (which would free the old one and let wasm
+        // linear memory ratchet under per-frame churn).
+        fractal_core::colorize_into(iters, palette.into(), mode.into(), max_iter, &mut buf);
         buf.as_ptr()
     })
 }

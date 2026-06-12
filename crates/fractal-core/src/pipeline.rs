@@ -132,9 +132,38 @@ pub fn compute_rows(
     y0: u32,
     y1: u32,
 ) -> Vec<f32> {
+    let mut out = vec![0.0f32; ((y1 - y0) as usize) * (viewport.width as usize)];
+    compute_rows_into(viewport, max_iter, kind, field, y0, y1, &mut out);
+    out
+}
+
+/// Fill the chosen Field for rows `[y0, y1)` of `viewport` **into `out`**, the
+/// allocation-free core of [`compute_rows`]. `out` must be exactly `(y1 - y0) *
+/// viewport.width` elements; pixel `(px, py)` for `py ∈ [y0, y1)` is written at
+/// the band-relative index `(py - y0) * width + px`, so the band is byte-
+/// identical to the matching slice of a full-frame compute.
+///
+/// Filling in place is what lets the WASM layer write each render band straight
+/// into the persistent iteration buffer (P4, #80): no per-band `Vec` is
+/// allocated and no concatenating copy runs — unlike returning a fresh buffer
+/// the caller must then splice in.
+pub fn compute_rows_into(
+    viewport: &Viewport,
+    max_iter: u32,
+    kind: FractalKind,
+    field: Field,
+    y0: u32,
+    y1: u32,
+    out: &mut [f32],
+) {
+    debug_assert_eq!(
+        out.len(),
+        ((y1 - y0) as usize) * (viewport.width as usize),
+        "compute_rows_into: out length must equal (y1 - y0) * width",
+    );
     match field {
-        Field::EscapeTime => compute_escape_time(viewport, max_iter, kind, y0, y1),
-        Field::DistanceEstimate => compute_distance_estimate(viewport, max_iter, kind, y0, y1),
+        Field::EscapeTime => fill_escape_time(viewport, max_iter, kind, y0, out),
+        Field::DistanceEstimate => fill_distance_estimate(viewport, max_iter, kind, y0, out),
     }
 }
 
@@ -151,55 +180,50 @@ pub fn compute_rows(
 /// is hoisted out of the per-pixel work so the branch predictor sees
 /// the same target every pixel within one frame.
 ///
-/// The per-pixel escape-time calls are independent, so the work fans
-/// out across a `rayon` parallel iterator over pixel **rows**: each row
-/// `py` contributes its `width` pixels in order via `flat_map_iter`, and
-/// rayon preserves the produced order, so the buffer stays row-major
-/// (`buf[py * width + px]`) and bit-identical to a serial walk —
-/// parallelism is invisible in the output. Iterating rows keeps the
-/// parallel bound a `u32` row count and never forms the `width * height`
-/// product, which would overflow `usize` on a 32-bit target such as
-/// wasm32. Natively this uses rayon's OS-thread pool; in the browser the
-/// worker first stands up a `wasm-bindgen-rayon` thread pool (Slice 7C)
-/// that backs the same `par_iter`.
-fn compute_escape_time(
+/// The per-pixel escape-time calls are independent, so the work fans out
+/// across a `rayon` parallel iterator over pixel **rows** — `out` is split
+/// into `width`-sized row chunks by [`par_chunks_mut`], and each chunk is
+/// filled in place. `par_chunks_mut` is an *indexed* parallel iterator, so
+/// rayon writes straight into `out` with no per-split intermediate buffers and
+/// no concatenating copy (the cost the old `flat_map_iter → collect` paid every
+/// frame, P4 #80). Order is preserved: band-relative chunk `i` is absolute row
+/// `py = y0 + i`, so `out[(py - y0) * width + px]` stays row-major and
+/// bit-identical to a serial walk — parallelism is invisible in the output.
+/// Natively this uses rayon's OS-thread pool; in the browser the worker first
+/// stands up a `wasm-bindgen-rayon` thread pool (Slice 7C) that backs the same
+/// `par_iter`.
+fn fill_escape_time(
     viewport: &Viewport,
     max_iter: u32,
     kind: FractalKind,
     y0: u32,
-    y1: u32,
-) -> Vec<f32> {
-    let width = viewport.width;
+    out: &mut [f32],
+) {
+    let width = viewport.width as usize;
     // Dispatch on `kind` once, outside the parallel map, so the hot
     // closure carries a single escape-time rule per frame — the same
-    // branch-hoist the serial nested loops relied on. The parallel bound is
-    // the band's row range `[y0, y1)`; each row maps to its absolute `py`,
-    // so a band is byte-identical to the matching slice of a full compute.
+    // branch-hoist the serial nested loops relied on.
     match kind {
-        FractalKind::Mandelbrot => (y0..y1)
-            .into_par_iter()
-            .flat_map_iter(|py| {
-                (0..width).map(move |px| {
-                    let c = viewport.pixel_to_complex(px, py);
-                    // O(1) interior cull: the cardioid/bulb pixels are the
-                    // bulk of the set's area and resolve to the same NaN
-                    // sentinel the full loop would return (see
-                    // `in_main_cardioid_or_bulb`).
-                    if in_main_cardioid_or_bulb(c) {
-                        f32::NAN
-                    } else {
-                        escape_time(ORIGIN, c, max_iter)
-                    }
-                })
-            })
-            .collect(),
-        FractalKind::Julia { c } => (y0..y1)
-            .into_par_iter()
-            .flat_map_iter(|py| {
-                (0..width)
-                    .map(move |px| escape_time(viewport.pixel_to_complex(px, py), c, max_iter))
-            })
-            .collect(),
+        FractalKind::Mandelbrot => out.par_chunks_mut(width).enumerate().for_each(|(i, row)| {
+            let py = y0 + i as u32;
+            for (px, slot) in row.iter_mut().enumerate() {
+                let c = viewport.pixel_to_complex(px as u32, py);
+                // O(1) interior cull: the cardioid/bulb pixels are the bulk of
+                // the set's area and resolve to the same NaN sentinel the full
+                // loop would return (see `in_main_cardioid_or_bulb`).
+                *slot = if in_main_cardioid_or_bulb(c) {
+                    f32::NAN
+                } else {
+                    escape_time(ORIGIN, c, max_iter)
+                };
+            }
+        }),
+        FractalKind::Julia { c } => out.par_chunks_mut(width).enumerate().for_each(|(i, row)| {
+            let py = y0 + i as u32;
+            for (px, slot) in row.iter_mut().enumerate() {
+                *slot = escape_time(viewport.pixel_to_complex(px as u32, py), c, max_iter);
+            }
+        }),
     }
 }
 
@@ -227,46 +251,44 @@ fn compute_escape_time(
 /// same family-agnostic kernel so selecting Distance Estimate in Julia
 /// mode renders correctly rather than panicking — Slice 3 (#62) adds its
 /// dedicated witness tests and acceptance.
-fn compute_distance_estimate(
+fn fill_distance_estimate(
     viewport: &Viewport,
     max_iter: u32,
     kind: FractalKind,
     y0: u32,
-    y1: u32,
-) -> Vec<f32> {
-    let width = viewport.width;
+    out: &mut [f32],
+) {
+    let width = viewport.width as usize;
     // Plane → pixel units. Hoisted out of the per-pixel closure; the
     // scale depends only on `zoom` (ADR-0011), constant across the frame.
     let scale = viewport.pixel_scale();
+    // Same in-place, row-chunked fan-out as `fill_escape_time` (P4 #80).
     match kind {
-        FractalKind::Mandelbrot => (y0..y1)
-            .into_par_iter()
-            .flat_map_iter(|py| {
-                (0..width).map(move |px| {
-                    let c = viewport.pixel_to_complex(px, py);
-                    // Same interior cull as the Escape Time path: an inside
-                    // point's distance is the NaN sentinel, which the
-                    // `f64::from(NaN) / scale` cast below would produce
-                    // anyway — short-circuit it (ADR-0013 shares the
-                    // sentinel, so the Field partition stays in lockstep).
-                    if in_main_cardioid_or_bulb(c) {
-                        return f32::NAN;
-                    }
+        FractalKind::Mandelbrot => out.par_chunks_mut(width).enumerate().for_each(|(i, row)| {
+            let py = y0 + i as u32;
+            for (px, slot) in row.iter_mut().enumerate() {
+                let c = viewport.pixel_to_complex(px as u32, py);
+                // Same interior cull as the Escape Time path: an inside point's
+                // distance is the NaN sentinel, which the `f64::from(NaN) /
+                // scale` cast below would produce anyway — short-circuit it
+                // (ADR-0013 shares the sentinel, so the Field partition stays in
+                // lockstep).
+                *slot = if in_main_cardioid_or_bulb(c) {
+                    f32::NAN
+                } else {
                     let d = escape_distance(ORIGIN, c, ORIGIN, ONE, max_iter);
                     (f64::from(d) / scale) as f32
-                })
-            })
-            .collect(),
-        FractalKind::Julia { c } => (y0..y1)
-            .into_par_iter()
-            .flat_map_iter(|py| {
-                (0..width).map(move |px| {
-                    let z0 = viewport.pixel_to_complex(px, py);
-                    let d = escape_distance(z0, c, ONE, ORIGIN, max_iter);
-                    (f64::from(d) / scale) as f32
-                })
-            })
-            .collect(),
+                };
+            }
+        }),
+        FractalKind::Julia { c } => out.par_chunks_mut(width).enumerate().for_each(|(i, row)| {
+            let py = y0 + i as u32;
+            for (px, slot) in row.iter_mut().enumerate() {
+                let z0 = viewport.pixel_to_complex(px as u32, py);
+                let d = escape_distance(z0, c, ONE, ORIGIN, max_iter);
+                *slot = (f64::from(d) / scale) as f32;
+            }
+        }),
     }
 }
 
@@ -290,12 +312,31 @@ fn compute_distance_estimate(
 ///   bucket. An all-NaN input short-circuits to all-black with no
 ///   panic.
 pub fn colorize(nus: &[f32], palette: Palette, mode: NormalizationMode, max_iter: u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(nus.len() * 4);
+    let mut out = Vec::new();
+    colorize_into(nus, palette, mode, max_iter, &mut out);
+    out
+}
+
+/// Colorize **into `out`**, reusing its existing capacity — the allocation-free
+/// core of [`colorize`]. `out` is cleared (keeping its backing allocation) and
+/// reserved to the exact RGBA size, so the per-pixel `extend_from_slice` in each
+/// mode never reallocates. The WASM layer hands in a persistent thread-local
+/// buffer so a frame's colorize doesn't allocate a fresh `4·N`-byte `Vec` each
+/// time (P4, #80).
+pub fn colorize_into(
+    nus: &[f32],
+    palette: Palette,
+    mode: NormalizationMode,
+    max_iter: u32,
+    out: &mut Vec<u8>,
+) {
+    out.clear();
+    out.reserve(nus.len() * 4);
     match mode {
-        NormalizationMode::Cycled => colorize_cycled(nus, palette, &mut out),
-        NormalizationMode::Histogram => colorize_histogram(nus, palette, max_iter, &mut out),
-        NormalizationMode::Linear => colorize_global(nus, palette, |s| s, &mut out),
-        NormalizationMode::SquareRoot => colorize_global(nus, palette, f32::sqrt, &mut out),
+        NormalizationMode::Cycled => colorize_cycled(nus, palette, out),
+        NormalizationMode::Histogram => colorize_histogram(nus, palette, max_iter, out),
+        NormalizationMode::Linear => colorize_global(nus, palette, |s| s, out),
+        NormalizationMode::SquareRoot => colorize_global(nus, palette, f32::sqrt, out),
         NormalizationMode::Logarithmic => {
             // ln(1 + s·(e − 1)) maps [0, 1] → [0, 1] (s = 1 gives
             // ln(e) = 1) with no division, expanding the low end so
@@ -304,12 +345,11 @@ pub fn colorize(nus: &[f32], palette: Palette, mode: NormalizationMode, max_iter
                 nus,
                 palette,
                 |s| (1.0 + s * (std::f32::consts::E - 1.0)).ln(),
-                &mut out,
+                out,
             )
         }
-        NormalizationMode::Clamped => colorize_clamped(nus, palette, &mut out),
+        NormalizationMode::Clamped => colorize_clamped(nus, palette, out),
     }
-    out
 }
 
 /// The `Clamped` distance ramp (ADR-0013) — the Distance Estimate Field's
