@@ -49,6 +49,42 @@ const ONE: Complex64 = Complex64::new(1.0, 0.0);
 /// crisp, so the `tanh` fallback was not needed.
 const CLAMPED_DISTANCE_K: f32 = 1.5;
 
+/// Closed-form interior test for the two largest components of the
+/// Mandelbrot set: the main cardioid and the period-2 bulb. Together they
+/// cover the large majority of the set's interior *area*, and membership
+/// in either is an O(1) algebraic test — no iteration.
+///
+/// Returns `true` only for points provably inside the set, whose orbit is
+/// bounded forever. For such a point [`escape_time`] / [`escape_distance`]
+/// would run the full `max_iter` loop and return the [`f32::NAN`]
+/// inside-set sentinel; short-circuiting straight to `f32::NAN` is
+/// therefore **output-identical** (the same sentinel, the same bit
+/// pattern) while skipping up to `max_iter` iterations per interior pixel.
+/// That is the whole win: a slider `max_iter` of 8192 over millions of
+/// interior pixels otherwise burns the full loop on pixels whose answer is
+/// analytically known.
+///
+/// Membership is exact, so there are **no false positives**: any point
+/// this returns `false` for still runs the full kernel, so no exterior or
+/// boundary pixel is ever misclassified — the inside/outside partition is
+/// untouched. Mandelbrot-only: the family is known at the dispatch seam
+/// (the kernels stay family-agnostic, ADR-0013), and the cardioid/bulb
+/// geometry does not transfer to Julia.
+fn in_main_cardioid_or_bulb(c: Complex64) -> bool {
+    // Main cardioid: with `q = (re − ¼)² + im²`, the point lies inside iff
+    // `q·(q + (re − ¼)) ≤ ¼·im²`. (The cusp `c = 0.25` satisfies it with
+    // equality, so the boundary — part of the set — is included.)
+    let x = c.re - 0.25;
+    let q = x * x + c.im * c.im;
+    if q * (q + x) <= 0.25 * c.im * c.im {
+        return true;
+    }
+    // Period-2 bulb: the disc of radius ¼ centred at −1, i.e.
+    // `(re + 1)² + im² ≤ 1/16`.
+    let x1 = c.re + 1.0;
+    x1 * x1 + c.im * c.im <= 0.0625
+}
+
 /// Run `compute` for every pixel in `viewport`, dispatching first on the
 /// [`Field`] (what scalar each pixel carries) and then on `kind` (which
 /// fractal family).
@@ -107,8 +143,18 @@ fn compute_escape_time(viewport: &Viewport, max_iter: u32, kind: FractalKind) ->
         FractalKind::Mandelbrot => (0..height)
             .into_par_iter()
             .flat_map_iter(|py| {
-                (0..width)
-                    .map(move |px| escape_time(ORIGIN, viewport.pixel_to_complex(px, py), max_iter))
+                (0..width).map(move |px| {
+                    let c = viewport.pixel_to_complex(px, py);
+                    // O(1) interior cull: the cardioid/bulb pixels are the
+                    // bulk of the set's area and resolve to the same NaN
+                    // sentinel the full loop would return (see
+                    // `in_main_cardioid_or_bulb`).
+                    if in_main_cardioid_or_bulb(c) {
+                        f32::NAN
+                    } else {
+                        escape_time(ORIGIN, c, max_iter)
+                    }
+                })
             })
             .collect(),
         FractalKind::Julia { c } => (0..height)
@@ -157,6 +203,14 @@ fn compute_distance_estimate(viewport: &Viewport, max_iter: u32, kind: FractalKi
             .flat_map_iter(|py| {
                 (0..width).map(move |px| {
                     let c = viewport.pixel_to_complex(px, py);
+                    // Same interior cull as the Escape Time path: an inside
+                    // point's distance is the NaN sentinel, which the
+                    // `f64::from(NaN) / scale` cast below would produce
+                    // anyway — short-circuit it (ADR-0013 shares the
+                    // sentinel, so the Field partition stays in lockstep).
+                    if in_main_cardioid_or_bulb(c) {
+                        return f32::NAN;
+                    }
                     let d = escape_distance(ORIGIN, c, ORIGIN, ONE, max_iter);
                     (f64::from(d) / scale) as f32
                 })
@@ -629,6 +683,93 @@ mod tests {
             let second = compute(&vp, MAX_ITER, kind, Field::EscapeTime);
             assert_buffers_bit_identical(&first, &second, &format!("{kind:?}"));
         }
+    }
+
+    // --- Cardioid / bulb interior cull (P1, #77) -----------------------
+
+    #[test]
+    fn cardioid_bulb_test_accepts_known_interior_points() {
+        // Points provably inside the set whose component the cull covers:
+        // the cardioid centre region (c = 0 and c = −0.5), the cardioid
+        // cusp on its boundary (c = 0.25, included by the `≤`), and the
+        // period-2 bulb (its centre c = −1, and the bulb-boundary point
+        // c = −0.75 where it meets the cardioid).
+        for c in [
+            Complex64::new(0.0, 0.0),
+            Complex64::new(-0.5, 0.0),
+            Complex64::new(0.25, 0.0),
+            Complex64::new(-1.0, 0.0),
+            Complex64::new(-0.75, 0.0),
+            Complex64::new(0.0, 0.3),
+        ] {
+            assert!(
+                in_main_cardioid_or_bulb(c),
+                "{c:?} should be culled as interior",
+            );
+        }
+    }
+
+    #[test]
+    fn cardioid_bulb_test_rejects_exterior_and_uncovered_points() {
+        // Exterior points must NOT be culled (they'd be mis-painted as
+        // inside the set). Also reject interior points the cull does *not*
+        // cover — a period-3 bulb centre (c ≈ −0.1226 + 0.7449i) and the
+        // c = −0.123 + 0.745i rabbit param: these are inside the set but
+        // outside the cardioid/bulb, so the test must return false and let
+        // the full kernel run (a false positive here would be a bug).
+        for c in [
+            Complex64::new(2.0, 0.0),      // far exterior
+            Complex64::new(0.35, 0.0),     // just right of the cusp, exterior
+            Complex64::new(-2.0, 0.0),     // far exterior
+            Complex64::new(0.30, 0.5),     // exterior
+            Complex64::new(-0.123, 0.745), // period-3 bulb interior, NOT covered
+        ] {
+            assert!(!in_main_cardioid_or_bulb(c), "{c:?} should not be culled",);
+        }
+    }
+
+    // An unoptimised serial Distance Estimate reference, mirroring
+    // `compute_serial` for the Escape Time Field: it never calls the
+    // cardioid/bulb cull, so comparing the production buffer against it
+    // proves the cull changes no output (not even the NaN bit pattern).
+    fn compute_distance_estimate_serial(viewport: &Viewport, max_iter: u32) -> Vec<f32> {
+        let scale = viewport.pixel_scale();
+        let total = (viewport.width as usize) * (viewport.height as usize);
+        let mut buf = Vec::with_capacity(total);
+        for py in 0..viewport.height {
+            for px in 0..viewport.width {
+                let c = viewport.pixel_to_complex(px, py);
+                let d = escape_distance(ORIGIN, c, ORIGIN, ONE, max_iter);
+                buf.push((f64::from(d) / scale) as f32);
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn cardioid_cull_is_output_identical_to_unoptimised_reference() {
+        // The load-bearing equivalence test for the cull: on an
+        // origin-centred viewport that straddles the whole set — so the
+        // main cardioid and period-2 bulb fill most of the frame and the
+        // cull fires on the bulk of pixels — the optimised production
+        // `compute` must reproduce the unoptimised serial reference
+        // bit-for-bit, for BOTH Fields. The cull's NaN sentinel and the
+        // full loop's NaN sentinel share a bit pattern, so any drift here
+        // would mean a real misclassification, not a benign NaN difference.
+        let vp = origin_viewport();
+
+        let et_opt = compute(&vp, MAX_ITER, FractalKind::Mandelbrot, Field::EscapeTime);
+        let et_ref = compute_serial(&vp, MAX_ITER, FractalKind::Mandelbrot);
+        assert_buffers_bit_identical(&et_opt, &et_ref, "EscapeTime cull vs serial");
+
+        let de_opt = compute(
+            &vp,
+            MAX_ITER,
+            FractalKind::Mandelbrot,
+            Field::DistanceEstimate,
+        );
+        let de_ref = compute_distance_estimate_serial(&vp, MAX_ITER);
+        assert_buffers_bit_identical(&de_opt, &de_ref, "DistanceEstimate cull vs serial");
     }
 
     // --- Field axis (ADR-0013) -----------------------------------------
