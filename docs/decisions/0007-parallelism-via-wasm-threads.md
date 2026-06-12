@@ -70,8 +70,10 @@ rendered image is unchanged.
   `par_iter()` over pixel rows instead of bespoke tile coordination.
 - Teaches genuine shared-memory threading on a non-trivial workload — high
   pedagogical value.
-- Cancellation (slice 6) means a new pan/zoom discards stale tiles instead
-  of painting them.
+- Cancellation (slice 6) keeps a new pan/zoom from *painting* a stale frame —
+  though the worker still computed it to completion; real work-cancellation
+  (abandoning the stale compute itself) landed later in P2 (see the amendment
+  under **Decision** above).
 
 ### Negative
 

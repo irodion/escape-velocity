@@ -296,10 +296,16 @@ function issue(req: ClientRequest, ctx: CanvasRenderingContext2D): void {
   } else {
     pending = { ...req, epoch: latestEpoch }
   }
-  // If a render is already on the worker, this issue supersedes it — tell the
-  // worker to abort its remaining bands so the frame we just queued starts as
-  // soon as possible instead of after the doomed one finishes (P2).
-  postCancel()
+  // Cancel the in-flight render only when a newer *render* makes it obsolete —
+  // then the queued frame starts sooner instead of after the doomed one
+  // finishes (P2). A queued recolorize is the opposite: it re-tints whatever
+  // the in-flight render is computing, so it must let that render finish. (It
+  // also must not abort it: an aborted render leaves a partial iteration buffer
+  // that the recolorize would then read.) Once the render completes, the
+  // recolorize dispatches against its whole, fresh buffer.
+  if (pending?.kind === 'render') {
+    postCancel()
+  }
   flush()
 }
 

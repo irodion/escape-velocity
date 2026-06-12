@@ -531,6 +531,24 @@ describe('render-client', () => {
     expect(postedEpochs(worker)).toEqual([1])
   })
 
+  it('does not cancel an in-flight render when a recolorize supersedes it', async () => {
+    // A recolorize re-tints whatever the in-flight render is computing, so it
+    // must let that render finish rather than abort it — aborting would leave a
+    // partial iteration buffer for the recolorize to read. The render runs to
+    // completion; the recolorize then dispatches against its whole buffer.
+    const { client, worker } = await loadClient()
+    const ctx = makeCtx()
+    deliver(worker, readyMsg())
+
+    doRender(client, ctx) // epoch 1 → posted, in flight
+    client.recolorize(ctx, PALETTE_MAGMA, MODE_HISTOGRAM) // epoch 2 → queued
+
+    expect(postedCancels(worker)).toHaveLength(0)
+
+    deliver(worker, response(1)) // render completes → flush the queued recolorize
+    expect((postedWork(worker)[1] as { kind: string }).kind).toBe('recolorize')
+  })
+
   it('does not post a cancel for the first render (nothing in flight to cancel)', async () => {
     const { client, worker } = await loadClient()
     const ctx = makeCtx()

@@ -140,8 +140,15 @@ async function runRender(msg: RenderRequest): Promise<void> {
       },
     })
     if ('aborted' in result) {
-      // Superseded mid-flight: post `aborted` (not a response) so the client
-      // frees its in-flight slot and dispatches the request that overtook us.
+      // Superseded mid-flight. The abandoned render already clobbered the
+      // shared iteration buffer with partial bands, so the cached (ptr, len)
+      // no longer describes a complete frame — drop it so a later recolorize
+      // can't re-tint partial data (it will hit the no-cache guard and surface
+      // a recoverable error instead). The superseding render, the usual next
+      // request, rebuilds the buffer regardless.
+      state = createWorkerState()
+      // Post `aborted` (not a response) so the client frees its in-flight slot
+      // and dispatches the request that overtook us.
       const aborted: Aborted = { kind: 'aborted', epoch: msg.epoch }
       ctx.postMessage(aborted)
       return
