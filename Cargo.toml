@@ -9,3 +9,16 @@ members = [
 version = "0.0.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
+
+# The hot path is a per-pixel escape-time loop in `fractal-core`, inlined into
+# the `pipeline.rs` band closures and the `compute_band` WASM export. The default
+# release profile (`codegen-units = 16`, no LTO) does not guarantee cross-module
+# inlining of `escape_time` / `Complex64::norm_sqr` into those closures — exactly
+# where it matters most. Fat LTO + a single codegen unit force whole-program
+# inlining at the cost of slower release compiles (acceptable: the crates are
+# tiny). Governs every release build in the workspace — native `--release` and
+# the wasm-pack `--release` artifact alike (P3, #79).
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
