@@ -13,12 +13,14 @@ import { defaultModeForField, isModeValidForField } from './field-modes.js'
  * state, not a stale cached copy.
  *
  * Only the `change` event triggers callbacks (commit-not-live
- * semantics): a recompute at 8192 iterations during dropdown scrub
- * would jank the page, and likewise we don't want a recompute on every
- * keystroke inside the `c.re` / `c.im` fields. `<select>` natively
- * fires `change` only when the user commits a selection;
- * `<input type="number">` fires `change` on blur or Enter — both match
- * the desired UX.
+ * semantics): a recompute at 8192 iterations mid-scrub would jank the
+ * page, and likewise we don't want a recompute on every keystroke inside
+ * the `c.re` / `c.im` fields. `<select>` natively fires `change` only when
+ * the user commits a selection; `<input type="number">` fires `change` on
+ * blur or Enter; the iterations `<input type="range">` fires `change` when
+ * the drag is released (and per keyboard step) while streaming `input`
+ * throughout the drag — so the slider's numeric readout tracks live while
+ * the single recompute still waits for the commit. All match the UX.
  *
  * The render-scale `<select>` values are plain multipliers (`"0.5"`,
  * `"1"`, `"2"`) parsed with a single `Number(...)`. The multiplier is a
@@ -29,8 +31,8 @@ import { defaultModeForField, isModeValidForField } from './field-modes.js'
  * `main.ts` maps them to the wasm-bindgen enum discriminants at the
  * WASM seam. Keeping the form-side type as a string union (not a
  * number) means the construction-time guards below catch a drifted
- * HTML option list exactly the same way they catch a bad numeric
- * `maxIter`.
+ * HTML option list exactly the same way they catch a `maxIter` that
+ * isn't one of the slider's `MAX_ITER_STOPS`.
  *
  * The numeric `c.re` / `c.im` inputs are different: their domain is
  * the real line, so the runtime "did this value parse?" check is
@@ -78,6 +80,30 @@ export type FractalMode = 'mandelbrot' | 'julia'
  */
 export type FieldName = 'escape-time' | 'distance-estimate'
 
+/**
+ * Iteration-count stops for the log slider, low → high.
+ *
+ * The old `<select>` sampled only the octave boundaries (64, 128, 256, …
+ * 8192), so the smallest step *doubled* the iteration count — too coarse.
+ * This is a quarter-octave geometric grid instead: each octave `2^k` is
+ * subdivided into `2^k × {1, 1.25, 1.5, 1.75}` (so 64, 80, 96, 112, then
+ * 128, 160, …), capped by the 8192 endpoint. ~29 clean integer stops give
+ * fine control, and because the spacing is geometric every step is the same
+ * ~19–25% change — the slider feels uniform across its whole travel rather
+ * than crawling at the low end and leaping at the high end.
+ *
+ * The slider's `value` is an INDEX into this array — a plain linear `0..N-1`
+ * range — so equal pixel travel maps to equal ratio with no log maths in the
+ * event handler. The table lives here, not in the markup, because it's a
+ * computed sequence the constructor uses to drive the input's `min`/`max`/
+ * `value` and to map an index back to its iteration count; keeping it in one
+ * place is what stops the two from drifting.
+ */
+export const MAX_ITER_STOPS: readonly number[] = [
+  64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280, 1536,
+  1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192,
+]
+
 export interface Settings {
   readonly maxIter: number
   /**
@@ -100,7 +126,7 @@ export class Controls {
   private readonly cImInput: HTMLInputElement
 
   constructor(form: HTMLFormElement, initial: Settings, onChange: (settings: Settings) => void) {
-    const maxIterSelect = form.elements.namedItem('max-iter')
+    const maxIterRange = form.elements.namedItem('max-iter')
     const renderScaleSelect = form.elements.namedItem('render-scale')
     const paletteSelect = form.elements.namedItem('palette')
     const normalisationSelect = form.elements.namedItem('normalisation')
@@ -108,8 +134,12 @@ export class Controls {
     const modeSelect = form.elements.namedItem('mode')
     const cReInput = form.elements.namedItem('c-re')
     const cImInput = form.elements.namedItem('c-im')
-    if (!(maxIterSelect instanceof HTMLSelectElement)) {
-      throw new Error('Controls: form is missing a <select name="max-iter">')
+    if (!(maxIterRange instanceof HTMLInputElement) || maxIterRange.type !== 'range') {
+      throw new Error('Controls: form is missing an <input type="range" name="max-iter">')
+    }
+    const maxIterReadout = form.querySelector('output[data-for="max-iter"]')
+    if (!(maxIterReadout instanceof HTMLOutputElement)) {
+      throw new Error('Controls: form is missing an <output data-for="max-iter">')
     }
     if (!(renderScaleSelect instanceof HTMLSelectElement)) {
       throw new Error('Controls: form is missing a <select name="render-scale">')
@@ -133,15 +163,21 @@ export class Controls {
       throw new Error('Controls: form is missing an <input name="c-im">')
     }
 
-    // HTMLSelectElement.value silently becomes '' when assigned a
-    // string that matches no <option>. Fail fast here so the bug
-    // surfaces at boot (caller's `initial` is out of sync with the
-    // option list) rather than emitting `Number('')`=0 and tripping
-    // the wasm boundary inside an event handler.
-    maxIterSelect.value = String(initial.maxIter)
-    if (maxIterSelect.value === '') {
-      throw new Error(`Controls: initial.maxIter=${initial.maxIter} has no matching <option>`)
+    // The slider is index-addressed: its value is a position in
+    // MAX_ITER_STOPS, not the iteration count itself. Drive its range from
+    // the table (so markup and table can't drift) and translate the initial
+    // count to its index. A count that isn't a stop is the same drifted-
+    // constant programmer error the <select> guards caught — fail fast at
+    // boot rather than letting an out-of-range index read `undefined` and
+    // push NaN through the wasm boundary inside an event handler.
+    maxIterRange.min = '0'
+    maxIterRange.max = String(MAX_ITER_STOPS.length - 1)
+    maxIterRange.step = '1'
+    const initialIndex = MAX_ITER_STOPS.indexOf(initial.maxIter)
+    if (initialIndex === -1) {
+      throw new Error(`Controls: initial.maxIter=${initial.maxIter} is not one of MAX_ITER_STOPS`)
     }
+    maxIterRange.value = String(initialIndex)
     const initialRenderScale = String(initial.renderScale)
     renderScaleSelect.value = initialRenderScale
     if (renderScaleSelect.value === '') {
@@ -216,8 +252,22 @@ export class Controls {
     // — the browser only sets it to a listed <option value> on
     // user interaction. Combined with the construction-time guard
     // above, every parser/cast below sees a well-formed string.
+
+    // Translate the slider index back to the iteration count it stands for.
+    // The construction guard above pinned the initial index in range, and a
+    // range input clamps user interaction to [min, max], so the lookup is
+    // always defined.
+    const maxIterFromSlider = (): number => MAX_ITER_STOPS[Number(maxIterRange.value)]
+    // Mirror the live slider value into the readout text — on `input` (every
+    // step of a drag) for instant feedback, separate from the `change`-gated
+    // recompute below.
+    const syncMaxIterReadout = (): void => {
+      maxIterReadout.textContent = String(maxIterFromSlider())
+    }
+    syncMaxIterReadout()
+
     const emit = (): void => {
-      const maxIter = Number(maxIterSelect.value)
+      const maxIter = maxIterFromSlider()
       const renderScale = Number(renderScaleSelect.value)
       onChange({
         maxIter,
@@ -236,12 +286,16 @@ export class Controls {
       })
     }
 
-    // `change` only — not `input`. `<select>` fires `change` on commit
-    // (mouse: option click; keyboard: Enter on a focused option);
-    // `<input type="number">` fires `change` on blur or Enter. Both
-    // are the boundary where we want a recompute (or, for the visual-
-    // only selects, a fast re-colorize).
-    maxIterSelect.addEventListener('change', emit)
+    // The recompute is `change`-gated everywhere — not `input`. `<select>`
+    // fires `change` on commit (mouse: option click; keyboard: Enter on a
+    // focused option); `<input type="number">` fires `change` on blur or
+    // Enter. Both are the boundary where we want a recompute (or, for the
+    // visual-only selects, a fast re-colorize). The iterations slider is the
+    // one control that also listens to `input` — but only to stream its
+    // readout text during the drag, never to recompute; its recompute still
+    // waits for `change` (drag release, or a keyboard step).
+    maxIterRange.addEventListener('input', syncMaxIterReadout)
+    maxIterRange.addEventListener('change', emit)
     renderScaleSelect.addEventListener('change', emit)
     paletteSelect.addEventListener('change', emit)
     normalisationSelect.addEventListener('change', emit)

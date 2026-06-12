@@ -3,10 +3,19 @@ import {
   Controls,
   type FieldName,
   type FractalMode,
+  MAX_ITER_STOPS,
   type NormalisationName,
   type PaletteName,
   type Settings,
 } from './controls.js'
+
+// Index of an iteration count within the slider's stop table — the value
+// the range input actually carries.
+function iterIndex(count: number): number {
+  const i = MAX_ITER_STOPS.indexOf(count)
+  if (i === -1) throw new Error(`${count} is not a MAX_ITER_STOPS value`)
+  return i
+}
 
 const INITIAL: Settings = {
   maxIter: 256,
@@ -20,9 +29,12 @@ const INITIAL: Settings = {
 }
 
 // Build the same form layout the production index.html ships. Slices
-// 3 and 4 pin the option lists in their PRDs (max-iter: 64..8192
-// doubling; render-scale: 0.5×/1×/2× quality multipliers; palette: five
-// matplotlib-derived names; normalisation: cycled or histogram). Slice 5C adds
+// 3 and 4 pin the option lists in their PRDs (render-scale: 0.5×/1×/2×
+// quality multipliers; palette: five matplotlib-derived names;
+// normalisation: cycled or histogram). Iterations is a log slider — an
+// `<input type="range">` whose value is an index into MAX_ITER_STOPS, plus
+// an `<output>` readout — replacing the original 64..8192 doubling
+// `<select>`; the constructor drives its min/max/value. Slice 5C adds
 // the `mode <select>` and the two `c.re` / `c.im` number inputs; the
 // numeric inputs ship `disabled` because the default mode is
 // Mandelbrot (which ignores `c`). The defaults selected here match
@@ -39,16 +51,8 @@ function buildForm(): HTMLFormElement {
   form.innerHTML = `
     <label>
       Iterations:
-      <select name="max-iter">
-        <option value="64">64</option>
-        <option value="128">128</option>
-        <option value="256" selected>256</option>
-        <option value="512">512</option>
-        <option value="1024">1024</option>
-        <option value="2048">2048</option>
-        <option value="4096">4096</option>
-        <option value="8192">8192</option>
-      </select>
+      <output data-for="max-iter">256</output>
+      <input type="range" name="max-iter" />
     </label>
     <label>
       Resolution:
@@ -132,6 +136,14 @@ function inputByName(form: HTMLFormElement, name: string): HTMLInputElement {
   return el
 }
 
+// Set the iterations slider to the index for `count` and fire the given
+// event ('change' to commit/recompute, 'input' to stream the readout).
+function setMaxIter(form: HTMLFormElement, count: number, eventType: 'change' | 'input'): void {
+  const range = inputByName(form, 'max-iter')
+  range.value = String(iterIndex(count))
+  range.dispatchEvent(new Event(eventType, { bubbles: true }))
+}
+
 describe('Controls', () => {
   let form: HTMLFormElement
   let onChange: ReturnType<typeof vi.fn<(settings: Settings) => void>>
@@ -145,14 +157,14 @@ describe('Controls', () => {
     document.body.removeChild(form)
   })
 
-  it('throws when initial.maxIter does not match any <option>', () => {
-    // Programmer error: caller's INITIAL_MAX_ITER constant drifted
-    // from the HTML option list. Without the construction-time guard,
-    // maxIterSelect.value silently becomes '' and the first emit
-    // would push maxIter=0 through to the WASM boundary.
+  it('throws when initial.maxIter is not one of the slider stops', () => {
+    // Programmer error: caller's INITIAL_MAX_ITER constant drifted from
+    // MAX_ITER_STOPS. Without the construction-time guard, the index would
+    // be -1 and the first emit would read `undefined` → NaN through the
+    // WASM boundary. 999 sits between stops, so it's not a valid count.
     expect(() => {
       new Controls(form, { ...INITIAL, maxIter: 999 }, onChange)
-    }).toThrow(/initial\.maxIter=999/)
+    }).toThrow(/initial\.maxIter=999 is not one of MAX_ITER_STOPS/)
   })
 
   it('throws when initial render scale does not match any <option>', () => {
@@ -202,7 +214,12 @@ describe('Controls', () => {
 
   it('populates all eight controls from `initial` and fires nothing during construction', () => {
     new Controls(form, INITIAL, onChange)
-    expect(selectByName(form, 'max-iter').value).toBe('256')
+    // The slider carries the *index* of 256 in the stop table; its readout
+    // shows the count. The constructor also drives the range bounds.
+    const maxIterRange = inputByName(form, 'max-iter')
+    expect(maxIterRange.value).toBe(String(iterIndex(256)))
+    expect(maxIterRange.max).toBe(String(MAX_ITER_STOPS.length - 1))
+    expect(form.querySelector('output[data-for="max-iter"]')?.textContent).toBe('256')
     expect(selectByName(form, 'render-scale').value).toBe('1')
     expect(selectByName(form, 'palette').value).toBe('viridis')
     expect(selectByName(form, 'normalisation').value).toBe('cycled')
@@ -225,13 +242,21 @@ describe('Controls', () => {
     expect(inputByName(form, 'c-im').disabled).toBe(false)
   })
 
-  it('fires onChange once with the new maxIter when max-iter changes', () => {
+  it('fires onChange once with the stop the slider lands on when max-iter changes', () => {
     new Controls(form, INITIAL, onChange)
-    const maxIterSelect = selectByName(form, 'max-iter')
-    maxIterSelect.value = '4096'
-    maxIterSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    setMaxIter(form, 4096, 'change')
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledWith({ ...INITIAL, maxIter: 4096 })
+  })
+
+  it('updates the readout on `input` (slider drag) without recomputing', () => {
+    new Controls(form, INITIAL, onChange)
+    setMaxIter(form, 384, 'input')
+    // The intermediate stop now in MAX_ITER_STOPS — finer than the old
+    // doubling <select>, which jumped 256 → 512 with nothing between.
+    expect(form.querySelector('output[data-for="max-iter"]')?.textContent).toBe('384')
+    // Commit-not-live: dragging streams the readout but fires no recompute.
+    expect(onChange).not.toHaveBeenCalled()
   })
 
   it('fires onChange once with the parsed multiplier when render-scale changes', () => {
@@ -419,16 +444,19 @@ describe('Controls', () => {
   })
 
   it('ignores the `input` event on every control', () => {
-    // `<input type="number">` fires `input` on every keystroke; the
-    // PRD's commit-not-live contract is that ONLY blur/Enter (which
-    // emit `change`) triggers a render. Same contract for the four
-    // <select>s, where `input` would fire on dropdown scrub.
+    // `<input type="number">` fires `input` on every keystroke and the
+    // iterations slider fires it on every drag step; the PRD's commit-not-
+    // live contract is that ONLY a `change` (blur/Enter, or slider release)
+    // triggers a render. Same contract for the <select>s, where `input`
+    // would fire on dropdown scrub.
     new Controls(form, INITIAL, onChange)
-    for (const name of ['max-iter', 'render-scale', 'palette', 'normalisation', 'field', 'mode']) {
+    for (const name of ['render-scale', 'palette', 'normalisation', 'field', 'mode']) {
       const sel = selectByName(form, name)
       sel.value = sel.options[sel.options.length - 1]?.value ?? sel.value
       sel.dispatchEvent(new Event('input', { bubbles: true }))
     }
+    // The iterations slider's `input` updates only its readout, never emits.
+    setMaxIter(form, 8192, 'input')
     for (const name of ['c-re', 'c-im']) {
       const inp = inputByName(form, name)
       inp.valueAsNumber = 1.5
@@ -439,11 +467,9 @@ describe('Controls', () => {
 
   it('reads the live DOM on each emit so callbacks see cumulative state', () => {
     new Controls(form, INITIAL, onChange)
-    const maxIterSelect = selectByName(form, 'max-iter')
     const paletteSelect = selectByName(form, 'palette')
 
-    maxIterSelect.value = '1024'
-    maxIterSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    setMaxIter(form, 1024, 'change')
     expect(onChange).toHaveBeenLastCalledWith({ ...INITIAL, maxIter: 1024 })
 
     // The second emit must reflect the first change's `max-iter`
