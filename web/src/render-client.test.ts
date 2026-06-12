@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { RenderRequest, RenderResponse } from './worker/protocol.js'
+import type { RenderError, RenderRequest, RenderResponse } from './worker/protocol.js'
 
 // jsdom ships no `ImageData`; the client constructs one before
 // `putImageData`. A minimal double that records its data is enough to
@@ -31,6 +31,7 @@ if (typeof globalThis.ImageData === 'undefined') {
 class FakeWorker {
   static instances: FakeWorker[] = []
   onmessage: ((event: MessageEvent) => void) | null = null
+  onerror: ((event: ErrorEvent) => void) | null = null
   readonly posted: unknown[] = []
   constructor(
     readonly url: string | URL,
@@ -58,6 +59,7 @@ interface RenderClient {
   ) => void
   recolorize: (ctx: CanvasRenderingContext2D, palette: number, mode: number) => void
   discardInFlight: () => void
+  setFatalHandler: (handler: (message: string) => void) => void
 }
 
 const VIEWPORT = { centerRe: -0.5, centerIm: 0, zoom: 1, width: 2, height: 2 }
@@ -91,8 +93,18 @@ function makeCtx(): CanvasRenderingContext2D {
   return { canvas, putImageData: vi.fn() } as unknown as CanvasRenderingContext2D
 }
 
-function deliver(worker: FakeWorker, data: RenderResponse | { kind: 'ready' }): void {
+function deliver(worker: FakeWorker, data: RenderResponse | RenderError | { kind: 'ready' }): void {
   worker.onmessage?.({ data } as MessageEvent)
+}
+
+function deliverError(worker: FakeWorker, epoch: number, message: string): void {
+  worker.onmessage?.({ data: { kind: 'error', epoch, message } } as MessageEvent)
+}
+
+// Fire the worker's `onerror` (a top-level worker throw). `preventDefault` is
+// a no-op spy since the client calls it.
+function fireWorkerError(worker: FakeWorker, message: string): void {
+  worker.onerror?.({ message, preventDefault: () => {} } as ErrorEvent)
 }
 
 function readyMsg(): { kind: 'ready' } {
@@ -373,5 +385,86 @@ describe('render-client', () => {
     deliver(worker, response(1)) // spurious pre-ready response
 
     expect(ctx.putImageData).not.toHaveBeenCalled()
+  })
+
+  it('frees the slot and dispatches the next request when a render errors (B4)', async () => {
+    const { client, worker } = await loadClient()
+    const ctx = makeCtx()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    deliver(worker, readyMsg())
+
+    doRender(client, ctx) // epoch 1, in flight
+    doRender(client, ctx) // epoch 2, queued
+    expect(worker.posted).toHaveLength(1)
+
+    // Worker throws on epoch 1 instead of responding. Without an error arm
+    // `inFlight` would stay true forever and epoch 2 would never dispatch.
+    deliverError(worker, 1, 'compute: invalid viewport')
+
+    // The queued epoch-2 render is dispatched, proving the slot was freed.
+    expect(worker.posted).toHaveLength(2)
+    expect((worker.posted[1] as RenderRequest).epoch).toBe(2)
+    // An error never paints.
+    expect(ctx.putImageData).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a fatal handler when the worker throws at the top level (B4)', async () => {
+    const { client, worker } = await loadClient()
+    const fatal = vi.fn()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    client.setFatalHandler(fatal)
+
+    fireWorkerError(worker, 'LinkError: shared memory unavailable')
+
+    expect(fatal).toHaveBeenCalledTimes(1)
+    expect(fatal).toHaveBeenCalledWith('LinkError: shared memory unavailable')
+  })
+
+  it('a dead worker (onerror) stops dispatching further requests (B4)', async () => {
+    const { client, worker } = await loadClient()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    deliver(worker, readyMsg())
+    fireWorkerError(worker, 'worker died')
+
+    const ctx = makeCtx()
+    doRender(client, ctx)
+
+    // Nothing posted after death — a dead worker can't drain the slot, so we
+    // don't park requests in it.
+    expect(worker.posted).toHaveLength(0)
+  })
+
+  it('fires the fatal handler if `ready` never arrives within the boot timeout (B4)', async () => {
+    vi.useFakeTimers()
+    try {
+      const { client } = await loadClient()
+      const fatal = vi.fn()
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      // Registering the handler arms the watchdog. No `ready` is delivered.
+      client.setFatalHandler(fatal)
+
+      vi.advanceTimersByTime(5000)
+
+      expect(fatal).toHaveBeenCalledTimes(1)
+      expect(fatal).toHaveBeenCalledWith(expect.stringContaining('did not start'))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not fire the boot watchdog once `ready` has arrived (B4)', async () => {
+    vi.useFakeTimers()
+    try {
+      const { client, worker } = await loadClient()
+      const fatal = vi.fn()
+      client.setFatalHandler(fatal)
+      deliver(worker, readyMsg()) // boot succeeds, cancelling the watchdog
+
+      vi.advanceTimersByTime(5000)
+
+      expect(fatal).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

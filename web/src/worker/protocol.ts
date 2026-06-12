@@ -59,6 +59,23 @@ export interface Ready {
   readonly kind: 'ready'
 }
 
+/**
+ * A request that threw inside the worker. The worker wraps `handleMessage`
+ * in a try/catch and posts this instead of a `RenderResponse`, echoing the
+ * failed request's `epoch` so the client can match it to the in-flight slot.
+ *
+ * Without it a throw posts *nothing*: the client's `inFlight` flag (set in
+ * `flush`, cleared only in `onmessage`) stays true forever, so every later
+ * request parks in the pending slot and the canvas silently never updates
+ * again. This arm converts that permanent freeze into a single dropped
+ * frame — the client frees the slot, logs, and dispatches the next request.
+ */
+export interface RenderError {
+  readonly kind: 'error'
+  readonly epoch: number
+  readonly message: string
+}
+
 export interface RenderResponse {
   readonly kind: 'response'
   readonly epoch: number

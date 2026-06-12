@@ -5,6 +5,7 @@ import type {
   Palette,
   Ready,
   RecolorizeRequest,
+  RenderError,
   RenderRequest,
   RenderResponse,
 } from './worker/protocol.js'
@@ -73,16 +74,38 @@ let inFlight = false
 let inFlightKind: ClientRequest['kind'] | null = null
 let pending: ClientRequest | null = null
 let ready = false
+// Set once the worker is known to be unusable (it threw at the top level, or
+// never reached `ready`). A dead worker will never respond, so `issue` and
+// `flush` no-op rather than parking requests in a slot that can't drain.
+let dead = false
 // The canvas context to paint the next fresh response onto. Only the
 // latest-epoch response paints, and `targetCtx` always tracks the
 // latest request's context, so a single reference suffices (in practice
 // it is the one canvas for the page's lifetime).
 let targetCtx: CanvasRenderingContext2D | null = null
 
-worker.onmessage = (event: MessageEvent<RenderResponse | Ready>): void => {
+// How long to wait for the worker's `ready` before declaring boot failed.
+// The worker bootstraps WASM + a rayon thread pool; on a cold cache that is
+// well under a second, so 5 s is generous headroom that still surfaces a
+// stuck boot (a stripped cross-origin-isolation header, a LinkError) rather
+// than hanging on a black screen forever.
+const BOOT_TIMEOUT_MS = 5000
+// Surfaced to the host (main.ts wires `showFatal`). Null until registered;
+// `reportFatal` no-ops without it, so the worker can boot before the handler
+// is set without losing a later, real failure.
+let onFatal: ((message: string) => void) | null = null
+let bootTimer: ReturnType<typeof setTimeout> | undefined
+
+worker.onmessage = (event: MessageEvent<RenderResponse | Ready | RenderError>): void => {
   const msg = event.data
   if (msg.kind === 'ready') {
     ready = true
+    // Boot succeeded — the watchdog (if armed) must not later declare a
+    // false failure.
+    if (bootTimer !== undefined) {
+      clearTimeout(bootTimer)
+      bootTimer = undefined
+    }
     flush()
     return
   }
@@ -94,13 +117,79 @@ worker.onmessage = (event: MessageEvent<RenderResponse | Ready>): void => {
   if (!inFlight) {
     return
   }
-  // A response frees the worker. Paint it only if it is still the frame
-  // the user wants; then dispatch whatever queued up while it ran.
+  // A response (or error) frees the worker for the next request.
   inFlight = false
+  if (msg.kind === 'error') {
+    // A render/recolorize threw inside the worker (a boundary-validation
+    // JsError, or the recolorize-before-render guard). The worker stays
+    // alive and idle, so this is recoverable: free the slot, log, and
+    // dispatch whatever queued — a single dropped frame, not a permanent
+    // freeze. The canvas keeps its last good frame.
+    console.error(`render worker error (epoch ${msg.epoch}): ${msg.message}`)
+    flush()
+    return
+  }
+  // Paint it only if it is still the frame the user wants; then dispatch
+  // whatever queued up while it ran.
   if (msg.epoch === latestEpoch && targetCtx !== null) {
     paint(targetCtx, msg, inFlightKind)
   }
   flush()
+}
+
+// A top-level throw in the worker (boot failure: WASM instantiation, or the
+// cross-origin-isolation gate in worker.ts) fires here, not `onmessage`. No
+// response will ever come, so mark the client dead and surface a fatal
+// panel. `preventDefault` suppresses the browser's default console spam,
+// which `reportFatal` (via console.error) already covers more legibly.
+worker.onerror = (event: ErrorEvent): void => {
+  event.preventDefault()
+  dead = true
+  reportFatal(
+    event.message ||
+      'The render worker failed to start. The page may not be cross-origin ' +
+        'isolated, which the multithreaded renderer requires (SharedArrayBuffer).',
+  )
+}
+
+/**
+ * Report an unrecoverable boot failure exactly once: mark the worker dead,
+ * cancel the watchdog, log, and hand a human message to the host surface (if
+ * registered). Idempotent so a worker.onerror and the watchdog can both fire
+ * without double-reporting.
+ */
+function reportFatal(message: string): void {
+  if (bootTimer !== undefined) {
+    clearTimeout(bootTimer)
+    bootTimer = undefined
+  }
+  dead = true
+  console.error(`render worker fatal: ${message}`)
+  onFatal?.(message)
+}
+
+/**
+ * Register the host's fatal-error surface and arm the boot watchdog. Arming
+ * here (rather than at module load) means a test that never registers a
+ * handler leaves no stray timer running. If `ready` already arrived, the
+ * watchdog is pointless and skipped.
+ */
+export function setFatalHandler(handler: (message: string) => void): void {
+  onFatal = handler
+  if (ready || dead || bootTimer !== undefined) {
+    return
+  }
+  bootTimer = setTimeout(() => {
+    bootTimer = undefined
+    if (ready) {
+      return
+    }
+    reportFatal(
+      `The renderer did not start within ${BOOT_TIMEOUT_MS / 1000}s. The page ` +
+        'may not be cross-origin isolated, which the multithreaded renderer ' +
+        'requires (SharedArrayBuffer).',
+    )
+  }, BOOT_TIMEOUT_MS)
 }
 
 /**
@@ -110,7 +199,7 @@ worker.onmessage = (event: MessageEvent<RenderResponse | Ready>): void => {
  * stranded.
  */
 function flush(): void {
-  if (!ready || inFlight || pending === null) {
+  if (dead || !ready || inFlight || pending === null) {
     return
   }
   inFlight = true
