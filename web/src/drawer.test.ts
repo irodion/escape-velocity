@@ -5,18 +5,36 @@ function setup(): {
   toggle: HTMLButtonElement
   drawer: HTMLElement
   firstSelect: HTMLSelectElement
+  surface: HTMLCanvasElement
 } {
   document.body.innerHTML = `
     <button id="controls-toggle" type="button" aria-expanded="true">☰</button>
     <form id="controls">
       <select name="max-iter"><option value="256">256</option></select>
     </form>
+    <canvas id="fractal"></canvas>
   `
   const toggle = document.getElementById('controls-toggle') as HTMLButtonElement
   const drawer = document.getElementById('controls') as HTMLElement
   const firstSelect = drawer.querySelector('select') as HTMLSelectElement
-  mountDrawer(toggle, drawer)
-  return { toggle, drawer, firstSelect }
+  const surface = document.getElementById('fractal') as HTMLCanvasElement
+  mountDrawer(toggle, drawer, surface)
+  return { toggle, drawer, firstSelect, surface }
+}
+
+// Press-then-release on the surface, separated by a CSS-pixel distance. A
+// small distance reads as a click; a large one as a pan-drag.
+function clickSurface(
+  surface: HTMLElement,
+  opts: { fromX?: number; fromY?: number; toX?: number; toY?: number; button?: number } = {},
+): void {
+  const { fromX = 100, fromY = 100, toX = fromX, toY = fromY, button = 0 } = opts
+  surface.dispatchEvent(
+    new MouseEvent('mousedown', { clientX: fromX, clientY: fromY, button, bubbles: true }),
+  )
+  surface.dispatchEvent(
+    new MouseEvent('mouseup', { clientX: toX, clientY: toY, button, bubbles: true }),
+  )
 }
 
 describe('mountDrawer', () => {
@@ -70,5 +88,41 @@ describe('mountDrawer', () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
     expect(drawer.classList.contains('open')).toBe(false)
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('closes on a deliberate click on the fractal and returns focus to the toggle', () => {
+    const { toggle, drawer, surface } = setup()
+    toggle.click()
+    expect(drawer.classList.contains('open')).toBe(true)
+
+    clickSurface(surface)
+    expect(drawer.classList.contains('open')).toBe(false)
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(drawer.inert).toBe(true)
+    expect(document.activeElement).toBe(toggle)
+  })
+
+  it('stays open on a pan-drag across the fractal (moved past the click slop)', () => {
+    const { drawer, toggle, surface } = setup()
+    toggle.click()
+    // Press and release far apart: a pan, not a click — the drawer must
+    // stay open so the user can reframe the view while tuning.
+    clickSurface(surface, { fromX: 100, fromY: 100, toX: 260, toY: 140 })
+    expect(drawer.classList.contains('open')).toBe(true)
+  })
+
+  it('is a no-op when the fractal is clicked while the drawer is already closed', () => {
+    const { drawer, surface } = setup()
+    // Drawer starts closed; a canvas click must not toggle it open or
+    // otherwise touch its state.
+    clickSurface(surface)
+    expect(drawer.classList.contains('open')).toBe(false)
+  })
+
+  it('ignores a non-primary (e.g. right-button) press on the fractal', () => {
+    const { drawer, toggle, surface } = setup()
+    toggle.click()
+    clickSurface(surface, { button: 2 })
+    expect(drawer.classList.contains('open')).toBe(true)
   })
 })
