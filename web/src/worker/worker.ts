@@ -11,15 +11,25 @@
  * (Slice 6), so gating `ready` on the pool means the first render — and
  * every render after — runs in parallel with no client-side change.
  *
- * Deliberately logic-free: it bootstraps WASM + the thread pool,
- * announces `ready`, and forwards every message to `handleMessage` (the
- * deep module from #29), threading the cache state across calls and
- * echoing back the transfer list so the RGBA buffer moves zero-copy to
- * the client.
+ * Bootstraps WASM + the thread pool, announces `ready`, then routes each
+ * message to the deep handler module (#29): a `render` runs as a cancellable
+ * band sequence via `handleRender`, a `recolorize` takes the synchronous
+ * fast path via `handleRecolorize`, and a `cancel` just advances the
+ * "latest epoch seen" so an in-flight banded render can abandon itself (P2,
+ * #78). It threads the cache state across calls and echoes back the transfer
+ * list so the RGBA buffer moves zero-copy to the client.
  */
 import init, { initThreadPool } from '../../wasm/fractal_wasm.js'
-import { createWorkerState, handleMessage, type WorkerState } from './handler.js'
-import type { Ready, RecolorizeRequest, RenderError, RenderRequest } from './protocol.js'
+import { createWorkerState, handleRecolorize, handleRender, type WorkerState } from './handler.js'
+import type {
+  Aborted,
+  CancelRequest,
+  ProgressResponse,
+  Ready,
+  RecolorizeRequest,
+  RenderError,
+  RenderRequest,
+} from './protocol.js'
 
 // `self` is the DedicatedWorkerGlobalScope inside a module worker.
 const ctx = self as unknown as DedicatedWorkerGlobalScope
@@ -50,26 +60,108 @@ await initThreadPool(navigator.hardwareConcurrency)
 
 let state: WorkerState = createWorkerState()
 
+// The highest epoch this worker has *seen* on any incoming message. A banded
+// render compares its own epoch against this between bands: once a newer
+// request has arrived (a `cancel`, the client's supersede signal), the render
+// abandons its remaining bands rather than grinding a doomed frame to
+// completion (P2, #78). Monotonic.
+let latestSeen = 0
+
+// A MessageChannel-backed macrotask yield. A `setTimeout(0)` is clamped to
+// ~4ms once nested a few deep; a channel ping is a true macrotask with no
+// clamp, so yielding between a frame's ~12 bands adds negligible latency
+// while still returning control to the event loop so a queued `cancel` is
+// delivered (and `latestSeen` updated) before the next band. Only one render
+// runs at a time, so at most one yield is ever outstanding; the FIFO queue
+// pairs each ping with its resolver.
+const yieldChannel = new MessageChannel()
+const yieldQueue: Array<() => void> = []
+yieldChannel.port1.onmessage = (): void => {
+  yieldQueue.shift()?.()
+}
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => {
+    yieldQueue.push(resolve)
+    yieldChannel.port2.postMessage(null)
+  })
+}
+
 const ready: Ready = { kind: 'ready' }
 ctx.postMessage(ready)
 
-ctx.onmessage = (event: MessageEvent<RenderRequest | RecolorizeRequest>): void => {
-  // `handleMessage` can throw — the `recolorize: no cached buffer` guard, or
-  // a `JsError` from the WASM `Viewport` / `compute` boundary validation.
-  // Catch it and post an `error` arm (echoing the request's epoch) instead of
-  // letting the throw post nothing: a silent no-response wedges the client's
-  // single-slot pipeline permanently (see `RenderError`). The worker stays
-  // alive and ready for the next request; only the failed frame is lost.
+ctx.onmessage = (event: MessageEvent<RenderRequest | RecolorizeRequest | CancelRequest>): void => {
+  const msg = event.data
+  // Record the newest epoch across ALL message kinds first, so an in-flight
+  // banded render can detect supersession even by a bare `cancel`.
+  if (msg.epoch > latestSeen) {
+    latestSeen = msg.epoch
+  }
+
+  if (msg.kind === 'cancel') {
+    // The signal's entire job is the `latestSeen` bump above; the in-flight
+    // render observes it between bands. Nothing to post.
+    return
+  }
+
+  if (msg.kind === 'recolorize') {
+    // Fast path (ADR-0002): no per-band work to cancel, run it straight
+    // through. Per the client's single-in-flight contract a recolorize never
+    // races a render, so the cached buffer it reads is whole.
+    try {
+      const result = handleRecolorize(state, msg, wasm)
+      ctx.postMessage(result.response, result.transfer)
+    } catch (err) {
+      postError(msg.epoch, err)
+    }
+    return
+  }
+
+  // A render is async (banded). Fire and forget; the client's single-in-flight
+  // contract guarantees no second render arrives until this one replies, so
+  // the band sequence owns the shared iteration buffer uncontended.
+  void runRender(msg)
+}
+
+async function runRender(msg: RenderRequest): Promise<void> {
   try {
-    const result = handleMessage(state, event.data, wasm)
+    const result = await handleRender(state, msg, wasm, {
+      yieldToEventLoop,
+      shouldAbort: () => latestSeen > msg.epoch,
+      onProgress: (rowsDone, rowsTotal) => {
+        const progress: ProgressResponse = {
+          kind: 'progress',
+          epoch: msg.epoch,
+          rowsDone,
+          rowsTotal,
+        }
+        ctx.postMessage(progress)
+      },
+    })
+    if ('aborted' in result) {
+      // Superseded mid-flight: post `aborted` (not a response) so the client
+      // frees its in-flight slot and dispatches the request that overtook us.
+      const aborted: Aborted = { kind: 'aborted', epoch: msg.epoch }
+      ctx.postMessage(aborted)
+      return
+    }
     state = result.state
     ctx.postMessage(result.response, result.transfer)
   } catch (err) {
-    const error: RenderError = {
-      kind: 'error',
-      epoch: event.data.epoch,
-      message: err instanceof Error ? err.message : String(err),
-    }
-    ctx.postMessage(error)
+    // A throw inside the band loop (a `JsError` from the WASM `Viewport` /
+    // `compute_band` boundary validation). Post an `error` arm echoing the
+    // epoch instead of letting the throw post nothing — a silent no-response
+    // wedges the client's single-slot pipeline permanently (see `RenderError`).
+    postError(msg.epoch, err)
   }
+}
+
+// Post a `RenderError` echoing the failed request's epoch. The worker stays
+// alive and ready for the next request; only the failed frame is lost.
+function postError(epoch: number, err: unknown): void {
+  const error: RenderError = {
+    kind: 'error',
+    epoch,
+    message: err instanceof Error ? err.message : String(err),
+  }
+  ctx.postMessage(error)
 }

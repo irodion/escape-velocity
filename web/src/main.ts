@@ -25,10 +25,17 @@ import {
 import { mountDrawer } from './drawer.js'
 import { showFatal } from './fatal.js'
 import { InputController } from './input.js'
+import { mountProgress } from './progress.js'
 import { createPwaLifecycle } from './pwa-lifecycle.js'
 import { mountPwaUi } from './pwa-ui.js'
 import { computeBufferDims } from './render-buffer.js'
-import { discardInFlight, recolorize, render, setFatalHandler } from './render-client.js'
+import {
+  discardInFlight,
+  recolorize,
+  render,
+  setFatalHandler,
+  setProgressReporter,
+} from './render-client.js'
 
 // PWA install + update lifecycle (Slice 8B). The controller (a deep, tested
 // state machine) is fed the real platform adapters here: the SW registrar is
@@ -125,6 +132,13 @@ mountDrawer(controlsToggle, controlsForm, canvas)
 setFatalHandler((message) => {
   showFatal('Renderer unavailable', message)
 })
+
+// Determinate progress indicator for slow deep renders (P2, #78). The render
+// client drives `begin`/`report`/`end` as a banded render streams its
+// heartbeats; the mounted reporter owns the reveal debounce so fast frames
+// never flash. A no-op until registered, so a render before this point simply
+// shows nothing.
+setProgressReporter(mountProgress(document.body))
 
 // Initialise the WASM module on the main thread so the synchronous
 // `Viewport` class (used by the input controller and the dispatcher

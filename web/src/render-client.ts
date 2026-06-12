@@ -1,14 +1,37 @@
 import type {
+  Aborted,
+  CancelRequest,
   Field,
   FractalKind,
   NormalizationMode,
   Palette,
+  ProgressResponse,
   Ready,
   RecolorizeRequest,
   RenderError,
   RenderRequest,
   RenderResponse,
 } from './worker/protocol.js'
+
+/**
+ * Determinate progress sink for a slow render (P2, #78). The client reports
+ * the lifecycle of the *in-flight render* — `begin` when it is dispatched,
+ * `report(fraction)` on each band heartbeat, `end` when it resolves (painted,
+ * superseded, or errored). The implementation (see `progress.ts`) owns the
+ * debounce that keeps the indicator from flashing on fast frames, so the
+ * client stays DOM-free. Recolorizes never report (no per-band work).
+ */
+export interface ProgressReporter {
+  readonly begin: () => void
+  readonly report: (fraction: number) => void
+  readonly end: () => void
+}
+
+const NOOP_PROGRESS: ProgressReporter = {
+  begin: () => {},
+  report: () => {},
+  end: () => {},
+}
 
 /**
  * Main-thread half of the Slice 6 render pipeline. Replaces the
@@ -95,8 +118,13 @@ const BOOT_TIMEOUT_MS = 5000
 // is set without losing a later, real failure.
 let onFatal: ((message: string) => void) | null = null
 let bootTimer: ReturnType<typeof setTimeout> | undefined
+// Progress sink for the in-flight render (P2). No-op until the host registers
+// one; recolorizes never drive it. See `ProgressReporter`.
+let progress: ProgressReporter = NOOP_PROGRESS
 
-worker.onmessage = (event: MessageEvent<RenderResponse | Ready | RenderError>): void => {
+worker.onmessage = (
+  event: MessageEvent<RenderResponse | Ready | RenderError | ProgressResponse | Aborted>,
+): void => {
   const msg = event.data
   if (msg.kind === 'ready') {
     ready = true
@@ -110,15 +138,33 @@ worker.onmessage = (event: MessageEvent<RenderResponse | Ready | RenderError>): 
     return
   }
 
-  // Ignore a response with nothing outstanding — there is no request it
-  // could belong to (e.g. a stray message before `ready`). Without this
-  // guard a spurious response could paint a frame that was never
-  // dispatched.
+  if (msg.kind === 'progress') {
+    // A non-terminal heartbeat from a banded render (P2): it does NOT free
+    // the slot. Drive the indicator only for the frame the user is still
+    // waiting on — a heartbeat for an already-superseded render is ignored,
+    // so a doomed frame never moves the bar.
+    if (msg.epoch === latestEpoch) {
+      progress.report(msg.rowsTotal > 0 ? msg.rowsDone / msg.rowsTotal : 0)
+    }
+    return
+  }
+
+  // Ignore a terminal message with nothing outstanding — there is no request
+  // it could belong to (e.g. a stray message before `ready`). Without this
+  // guard a spurious response could paint a frame that was never dispatched.
   if (!inFlight) {
     return
   }
-  // A response (or error) frees the worker for the next request.
+  // A response, error, or abort is terminal for the in-flight request: it
+  // frees the worker for the next one and ends any progress indicator.
   inFlight = false
+  progress.end()
+  if (msg.kind === 'aborted') {
+    // The worker abandoned this render because a newer one superseded it
+    // (P2). There is no frame to paint — just dispatch whatever overtook it.
+    flush()
+    return
+  }
   if (msg.kind === 'error') {
     // A render/recolorize threw inside the worker (a boundary-validation
     // JsError, or the recolorize-before-render guard). The worker stays
@@ -206,7 +252,28 @@ function flush(): void {
   const req = pending
   pending = null
   inFlightKind = req.kind
+  // Arm the progress indicator at the true dispatch time so its debounce
+  // measures from when the worker actually starts (P2). Only a render does
+  // per-band work; a recolorize is the fast path and never reports.
+  if (req.kind === 'render') {
+    progress.begin()
+  }
   worker.postMessage(req)
+}
+
+/**
+ * Tell the worker that a render now on it is superseded, so it abandons its
+ * remaining bands instead of grinding the doomed frame to completion (P2,
+ * #78). Sent only when something is actually in flight — otherwise the new
+ * request just dispatches immediately and there is nothing to cancel. The
+ * worker tracks the max epoch it has seen, so the bare epoch is all it needs.
+ */
+function postCancel(): void {
+  if (dead || !inFlight) {
+    return
+  }
+  const cancel: CancelRequest = { kind: 'cancel', epoch: latestEpoch }
+  worker.postMessage(cancel)
 }
 
 /**
@@ -229,6 +296,10 @@ function issue(req: ClientRequest, ctx: CanvasRenderingContext2D): void {
   } else {
     pending = { ...req, epoch: latestEpoch }
   }
+  // If a render is already on the worker, this issue supersedes it — tell the
+  // worker to abort its remaining bands so the frame we just queued starts as
+  // soon as possible instead of after the doomed one finishes (P2).
+  postCancel()
   flush()
 }
 
@@ -250,6 +321,20 @@ function issue(req: ClientRequest, ctx: CanvasRenderingContext2D): void {
 export function discardInFlight(): void {
   latestEpoch += 1
   pending = null
+  // Also stop the in-flight render's *work*, not just its paint: bumping the
+  // epoch already guarantees its response won't paint, and this makes the
+  // worker abandon the remaining bands so it is free for the next real issue
+  // (the Settle render, or a pan commit) immediately (P2).
+  postCancel()
+}
+
+/**
+ * Register the determinate-progress sink (see `ProgressReporter`). Set by the
+ * host (`main.ts`) to a `progress.ts`-backed reporter; absent it, render
+ * progress is silently ignored.
+ */
+export function setProgressReporter(reporter: ProgressReporter): void {
+  progress = reporter
 }
 
 function paint(

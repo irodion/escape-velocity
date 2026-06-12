@@ -103,9 +103,38 @@ fn in_main_cardioid_or_bulb(c: Complex64) -> bool {
 /// The Field match is hoisted out of the per-pixel work, exactly like the
 /// `kind` match below it, so a frame carries one rule end-to-end.
 pub fn compute(viewport: &Viewport, max_iter: u32, kind: FractalKind, field: Field) -> Vec<f32> {
+    compute_rows(viewport, max_iter, kind, field, 0, viewport.height)
+}
+
+/// Compute the chosen Field for the pixel **rows** `[y0, y1)` of
+/// `viewport`, returning a row-major buffer of length `(y1 - y0) *
+/// viewport.width` whose entry `[(py - y0) * width + px]` is the scalar for
+/// absolute pixel `(px, py)`.
+///
+/// This is [`compute`] restricted to a horizontal band. Every row is keyed
+/// to its **absolute** `py` (via [`Viewport::pixel_to_complex`]), so the
+/// band carries exactly the pixels `compute` would put at those rows —
+/// concatenating the buffers of any contiguous partition of `[0, height)`
+/// reproduces the full `compute` buffer bit-for-bit. That invariant is what
+/// lets the render worker compute a frame in cancellable bands (P2, #78):
+/// it yields between bands and abandons the rest when a newer viewport
+/// supersedes the in-flight one, instead of running a doomed full `compute`
+/// to completion before the latest request can even start.
+///
+/// `y0 <= y1 <= viewport.height` is the caller's contract; the WASM binding
+/// (`compute_band`) validates it at the boundary. An empty band
+/// (`y0 == y1`) yields an empty buffer.
+pub fn compute_rows(
+    viewport: &Viewport,
+    max_iter: u32,
+    kind: FractalKind,
+    field: Field,
+    y0: u32,
+    y1: u32,
+) -> Vec<f32> {
     match field {
-        Field::EscapeTime => compute_escape_time(viewport, max_iter, kind),
-        Field::DistanceEstimate => compute_distance_estimate(viewport, max_iter, kind),
+        Field::EscapeTime => compute_escape_time(viewport, max_iter, kind, y0, y1),
+        Field::DistanceEstimate => compute_distance_estimate(viewport, max_iter, kind, y0, y1),
     }
 }
 
@@ -133,14 +162,21 @@ pub fn compute(viewport: &Viewport, max_iter: u32, kind: FractalKind, field: Fie
 /// wasm32. Natively this uses rayon's OS-thread pool; in the browser the
 /// worker first stands up a `wasm-bindgen-rayon` thread pool (Slice 7C)
 /// that backs the same `par_iter`.
-fn compute_escape_time(viewport: &Viewport, max_iter: u32, kind: FractalKind) -> Vec<f32> {
+fn compute_escape_time(
+    viewport: &Viewport,
+    max_iter: u32,
+    kind: FractalKind,
+    y0: u32,
+    y1: u32,
+) -> Vec<f32> {
     let width = viewport.width;
-    let height = viewport.height;
     // Dispatch on `kind` once, outside the parallel map, so the hot
     // closure carries a single escape-time rule per frame — the same
-    // branch-hoist the serial nested loops relied on.
+    // branch-hoist the serial nested loops relied on. The parallel bound is
+    // the band's row range `[y0, y1)`; each row maps to its absolute `py`,
+    // so a band is byte-identical to the matching slice of a full compute.
     match kind {
-        FractalKind::Mandelbrot => (0..height)
+        FractalKind::Mandelbrot => (y0..y1)
             .into_par_iter()
             .flat_map_iter(|py| {
                 (0..width).map(move |px| {
@@ -157,7 +193,7 @@ fn compute_escape_time(viewport: &Viewport, max_iter: u32, kind: FractalKind) ->
                 })
             })
             .collect(),
-        FractalKind::Julia { c } => (0..height)
+        FractalKind::Julia { c } => (y0..y1)
             .into_par_iter()
             .flat_map_iter(|py| {
                 (0..width)
@@ -191,14 +227,19 @@ fn compute_escape_time(viewport: &Viewport, max_iter: u32, kind: FractalKind) ->
 /// same family-agnostic kernel so selecting Distance Estimate in Julia
 /// mode renders correctly rather than panicking — Slice 3 (#62) adds its
 /// dedicated witness tests and acceptance.
-fn compute_distance_estimate(viewport: &Viewport, max_iter: u32, kind: FractalKind) -> Vec<f32> {
+fn compute_distance_estimate(
+    viewport: &Viewport,
+    max_iter: u32,
+    kind: FractalKind,
+    y0: u32,
+    y1: u32,
+) -> Vec<f32> {
     let width = viewport.width;
-    let height = viewport.height;
     // Plane → pixel units. Hoisted out of the per-pixel closure; the
     // scale depends only on `zoom` (ADR-0011), constant across the frame.
     let scale = viewport.pixel_scale();
     match kind {
-        FractalKind::Mandelbrot => (0..height)
+        FractalKind::Mandelbrot => (y0..y1)
             .into_par_iter()
             .flat_map_iter(|py| {
                 (0..width).map(move |px| {
@@ -216,7 +257,7 @@ fn compute_distance_estimate(viewport: &Viewport, max_iter: u32, kind: FractalKi
                 })
             })
             .collect(),
-        FractalKind::Julia { c } => (0..height)
+        FractalKind::Julia { c } => (y0..y1)
             .into_par_iter()
             .flat_map_iter(|py| {
                 (0..width).map(move |px| {
@@ -770,6 +811,90 @@ mod tests {
         );
         let de_ref = compute_distance_estimate_serial(&vp, MAX_ITER);
         assert_buffers_bit_identical(&de_opt, &de_ref, "DistanceEstimate cull vs serial");
+    }
+
+    // --- Band-range compute (P2, #78) ----------------------------------
+
+    // Split [0, height) into a deliberately uneven set of contiguous bands
+    // (so an off-by-one in a band boundary, or a row keyed to a band-relative
+    // rather than absolute py, would surface), compute each via `compute_rows`,
+    // and concatenate. Centred in the seahorse valley via `mapping_viewport`
+    // (non-square, mixes inside/outside) and additionally exercised on the
+    // origin viewport (which fires the cardioid cull) below.
+    fn assert_banded_matches_full(vp: &Viewport, kind: FractalKind, field: Field, ctx: &str) {
+        let full = compute(vp, MAX_ITER, kind, field);
+        // Uneven band edges across the full height, always ending at height.
+        let h = vp.height;
+        let mut edges = vec![0u32];
+        for e in [1, 2, 3, 5, 8, 13, 21] {
+            if e < h {
+                edges.push(e);
+            }
+        }
+        edges.push(h);
+        edges.dedup();
+
+        let mut banded: Vec<f32> = Vec::with_capacity(full.len());
+        for w in edges.windows(2) {
+            let (y0, y1) = (w[0], w[1]);
+            let band = compute_rows(vp, MAX_ITER, kind, field, y0, y1);
+            assert_eq!(
+                band.len(),
+                ((y1 - y0) as usize) * (vp.width as usize),
+                "band [{y0},{y1}) wrong length: {ctx}",
+            );
+            banded.extend_from_slice(&band);
+        }
+        assert_buffers_bit_identical(&banded, &full, ctx);
+    }
+
+    #[test]
+    fn banded_compute_concatenates_to_full_compute_bit_for_bit() {
+        // The load-bearing banding invariant: a contiguous partition of the
+        // rows, computed band-by-band, reproduces the single-shot `compute`
+        // exactly — for both Fields and both families. This is what lets the
+        // worker render in cancellable chunks without changing a single
+        // output pixel.
+        for vp in [mapping_viewport(), origin_viewport()] {
+            for kind in [FractalKind::Mandelbrot, FractalKind::Julia { c: JULIA_C }] {
+                for field in [Field::EscapeTime, Field::DistanceEstimate] {
+                    assert_banded_matches_full(&vp, kind, field, &format!("{kind:?}/{field:?}"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compute_rows_empty_band_is_empty() {
+        // A zero-height band (y0 == y1) produces no pixels — the worker's
+        // band planner never emits one, but the contract is total.
+        let vp = mapping_viewport();
+        let band = compute_rows(
+            &vp,
+            MAX_ITER,
+            FractalKind::Mandelbrot,
+            Field::EscapeTime,
+            4,
+            4,
+        );
+        assert!(band.is_empty());
+    }
+
+    #[test]
+    fn compute_rows_full_range_equals_compute() {
+        // `compute` is defined as `compute_rows(.., 0, height)`; pin that the
+        // delegation is exact (not merely close) for a non-square frame.
+        let vp = mapping_viewport();
+        let full = compute(&vp, MAX_ITER, FractalKind::Mandelbrot, Field::EscapeTime);
+        let rows = compute_rows(
+            &vp,
+            MAX_ITER,
+            FractalKind::Mandelbrot,
+            Field::EscapeTime,
+            0,
+            vp.height,
+        );
+        assert_buffers_bit_identical(&rows, &full, "full-range compute_rows == compute");
     }
 
     // --- Field axis (ADR-0013) -----------------------------------------
