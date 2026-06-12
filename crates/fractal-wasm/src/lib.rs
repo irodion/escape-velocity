@@ -383,6 +383,10 @@ pub fn compute_len() -> usize {
 /// `c_re` / `c_im` are validated for finiteness like [`compute`], and the
 /// band range is checked (`y0 <= y1 <= height`) at this WASM↔JS boundary.
 #[wasm_bindgen]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "wasm-bindgen exports take flat positional primitives across the JS↔WASM boundary (no struct grouping survives `postMessage`/the bindgen ABI); this mirrors `compute`'s six-arg shape with the band range `(y0, y1)` appended."
+)]
 pub fn compute_band(
     viewport: &Viewport,
     max_iter: u32,
