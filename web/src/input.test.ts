@@ -158,6 +158,39 @@ describe('InputController', () => {
     expect(viewport.pan_by_pixels).toHaveBeenCalledWith(50, 40)
   })
 
+  it('commits the pan from the live (refitted) viewport when a resize fires mid-drag', () => {
+    // B1 regression. A debounced `refitToCanvas` (ResizeObserver) can fire
+    // mid-drag and `setViewport` a viewport at new dimensions —
+    // `with_resolution` preserves center/zoom but updates width/height to
+    // the live box. `handleMouseUp` must commit the pan from that live
+    // viewport, not the drag-start snapshot: panning from the snapshot
+    // would re-commit the *old* dimensions, reverting the refit and
+    // leaving the buffer CSS-stretched onto the new box (non-square
+    // pixels) until the next resize — which never comes, the box is stable.
+    const refitPanned = { sentinel: 'refit-panned' } as unknown as Viewport
+    const refitted = makeViewportDouble()
+    refitted.width.mockReturnValue(1000)
+    refitted.height.mockReturnValue(700)
+    refitted.pan_by_pixels.mockReturnValue(refitPanned)
+    const controller = new InputController(canvas, viewport as unknown as Viewport, onChange)
+
+    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
+    // Resize lands mid-drag: the canvas box grows and the viewport is
+    // refitted to 1000×700. The CSS box now measures 1000×700 too.
+    controller.setViewport(refitted as unknown as Viewport)
+    setRect(canvas, { width: 1000, height: 700 })
+
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 150, clientY: 90, bubbles: true }))
+
+    // dx=50, dy=40 CSS; scaled by the live grid (1000/1000, 700/700) → 50,40.
+    // The pan must run on the refitted viewport, never the stale snapshot.
+    expect(refitted.pan_by_pixels).toHaveBeenCalledTimes(1)
+    expect(refitted.pan_by_pixels).toHaveBeenCalledWith(50, 40)
+    expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith(refitPanned)
+  })
+
   it('snapshots the canvas on mousedown and paints it at the drag offset on mousemove', () => {
     viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
     new InputController(canvas, viewport as unknown as Viewport, onChange)
