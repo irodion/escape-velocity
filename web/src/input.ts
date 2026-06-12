@@ -12,6 +12,14 @@ import {
 // still collapsing a fast scrub into a single compute (ADR-0012).
 export const WHEEL_SETTLE_MS = 150
 
+// A mouseup whose total drag is below this many internal (post CSS→internal
+// scaling) pixels on both axes is treated as a click, not a pan: the commit is
+// skipped so a plain click — e.g. the drawer's light-dismiss click — never
+// restarts an in-flight deep render with an identical, no-op viewport (B3,
+// #74). A sub-pixel pan is visually a no-op anyway (the image can't shift by
+// less than a pixel), so suppressing it costs nothing.
+export const PAN_DEADZONE_PX = 0.5
+
 /**
  * Wires pointer events on a canvas into pan/zoom calls on a viewport.
  *
@@ -113,14 +121,18 @@ export class InputController {
     // intermediate frame that paints mid-drag and clobbers the pan snapshot.
     // The pan's mouseup issues the single render. Clearing the transform also
     // means the snapshot/measurement below read an untransformed canvas (a
-    // live transform would scale the pan delta). Discard any already in-flight
-    // render for the same reason (ADR-0012 boundary rule).
+    // live transform would scale the pan delta).
     this.clearZoomPreview()
-    this.onInvalidate()
+    // Do NOT discard in-flight work here. A plain click (mousedown + mouseup
+    // with no move — e.g. the drawer's light-dismiss click) must leave an
+    // in-flight deep render untouched. The discard is deferred to the first
+    // real `mousemove`, when an actual drag begins (B3, #74); `invalidated`
+    // tracks whether it has fired yet for this drag.
     this.dragState = {
       startClientX: event.clientX,
       startClientY: event.clientY,
       snapshot: ctx.getImageData(0, 0, this.canvas.width, this.canvas.height),
+      invalidated: false,
     }
     this.canvas.classList.add('dragging')
     document.addEventListener('mousemove', this.handleMouseMove)
@@ -134,6 +146,15 @@ export class InputController {
 
     const rect = this.canvas.getBoundingClientRect()
     if (rect.width <= 0 || rect.height <= 0) return
+
+    // First real movement of this drag: now discard any in-flight render so it
+    // can't paint over the drag preview (ADR-0012 boundary rule). Deferred from
+    // mousedown so a plain click never throws away in-flight work (B3, #74).
+    if (!this.dragState.invalidated) {
+      this.onInvalidate()
+      this.dragState.invalidated = true
+    }
+
     const dxCss = event.clientX - this.dragState.startClientX
     const dyCss = event.clientY - this.dragState.startClientY
     const dxInternal = (dxCss * this.canvas.width) / rect.width
@@ -186,6 +207,14 @@ export class InputController {
     const base = this.currentViewport
     const dxInternal = (dxCss * base.width()) / rect.width
     const dyInternal = (dyCss * base.height()) / rect.height
+
+    // A click (or sub-pixel drag) commits nothing: the viewport is unchanged,
+    // no mousemove repainted the canvas, and `onChange` would only restart an
+    // identical render — the exact waste B3 (#74) describes. Bail before the
+    // commit. (Cleanup above already ran, so the drag is fully torn down.)
+    if (Math.abs(dxInternal) < PAN_DEADZONE_PX && Math.abs(dyInternal) < PAN_DEADZONE_PX) {
+      return
+    }
 
     const next = base.pan_by_pixels(dxInternal, dyInternal)
     this.currentViewport = next
@@ -324,6 +353,10 @@ interface DragState {
   readonly startClientX: number
   readonly startClientY: number
   readonly snapshot: ImageData
+  // Whether the deferred in-flight-render discard has fired for this drag.
+  // Starts false on mousedown; set true on the first real mousemove so the
+  // discard runs once, when an actual drag begins (B3, #74).
+  invalidated: boolean
 }
 
 // Convert a WheelEvent's deltaY into a pixel-equivalent value so the
