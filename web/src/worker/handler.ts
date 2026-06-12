@@ -1,7 +1,7 @@
 import {
   colorize,
   colorize_len,
-  compute,
+  compute_band,
   compute_len,
   type InitOutput,
   Viewport,
@@ -26,8 +26,10 @@ import type { RecolorizeRequest, RenderRequest, RenderResponse } from './protoco
  * State is threaded explicitly rather than held at module scope: the
  * worker bootstrap (#30) keeps a single `WorkerState` and feeds each
  * message's result back in, which keeps this module free of mutable
- * top-level state and makes each `handleMessage` call independently
- * testable.
+ * top-level state and makes each `handleRender` / `handleRecolorize` call
+ * independently testable. The banded render path (P2, #78) keeps the same
+ * isolation by taking its side effects — yield, abort-check, progress — as
+ * injected {@link RenderHooks} rather than touching `self` / `postMessage`.
  */
 export interface WorkerState {
   /** Pointer into WASM linear memory for the cached iteration buffer,
@@ -56,51 +58,133 @@ export function createWorkerState(): WorkerState {
   }
 }
 
+/** How many bands to split a frame into (P2, #78). The worker yields to its
+ *  event loop between bands and can abandon the rest when a newer viewport
+ *  supersedes the in-flight one, so this sets the cancellation granularity:
+ *  more bands = a doomed render stops sooner, at the cost of one extra
+ *  WASM call + yield + progress post each. ~12 keeps per-band overhead
+ *  negligible while bounding the worst-case wasted work to ~1/12 of a frame. */
+const TARGET_BANDS = 12
+
 /**
- * Turn one protocol message into an RGBA response plus the updated
- * cache state and the transfer list for `postMessage`.
- *
- * `render` reconstructs a fresh `Viewport` from the flat primitives
- * (cheap; no shared state to leak across realms), runs
- * `compute → colorize`, and caches the iteration-buffer handle for a
- * later recolorize. `recolorize` reuses the cached `(ptr, len, maxIter)`
- * and skips `compute` — the fast-path payoff of ADR-0002 — and throws a
- * clear programmer-error if no render has populated the cache yet, the
- * same guard `render.ts` carries today.
- *
- * In both cases the RGBA bytes are copied OUT of WASM linear memory into
- * a fresh `Uint8ClampedArray` before being returned in `transfer`.
- * Transferring a view that aliases WASM memory would detach the worker's
- * entire WASM heap; the copy means only the standalone RGBA buffer is
- * neutered on send.
+ * Split a frame of `height` rows into a contiguous partition of at most
+ * {@link TARGET_BANDS} horizontal bands, each `[y0, y1)`. Bands are at least
+ * one row tall (a short frame yields fewer bands, never empty ones) and the
+ * last band absorbs the remainder. Pure and total — exported for testing.
  */
-export function handleMessage(
-  state: WorkerState,
-  msg: RenderRequest | RecolorizeRequest,
+export function planBands(height: number): Array<readonly [number, number]> {
+  const bandCount = Math.min(TARGET_BANDS, Math.max(1, height))
+  const bandRows = Math.ceil(height / bandCount)
+  const bands: Array<readonly [number, number]> = []
+  for (let y0 = 0; y0 < height; y0 += bandRows) {
+    bands.push([y0, Math.min(y0 + bandRows, height)] as const)
+  }
+  return bands
+}
+
+/**
+ * Side-effecting hooks the worker injects into {@link handleRender} so this
+ * module stays free of `self` / `postMessage` / timer coupling (the same
+ * "deep, isolated" property the synchronous path had).
+ */
+export interface RenderHooks {
+  /** Yield a macrotask so queued worker messages (a `cancel`) are observed. */
+  readonly yieldToEventLoop: () => Promise<void>
+  /** True once a newer request has superseded this render — abandon the rest. */
+  readonly shouldAbort: () => boolean
+  /** Report rows computed so far, to drive a determinate progress indicator. */
+  readonly onProgress: (rowsDone: number, rowsTotal: number) => void
+}
+
+/**
+ * Render a frame in cancellable bands (P2, #78), returning the RGBA
+ * response + updated cache state + transfer list, or `{ aborted: true }` if
+ * a newer request superseded it mid-flight.
+ *
+ * It reconstructs a fresh `Viewport` from the flat primitives (cheap; no
+ * shared state to leak across realms) and computes the iteration buffer one
+ * band at a time via {@link compute_band}, which accumulates into the shared
+ * WASM buffer. Between bands it reports progress, yields (so a queued
+ * `cancel` is seen), and bails the instant `shouldAbort()` turns true — so a
+ * doomed deep render stops within a band instead of blocking the worker for
+ * seconds. Once every band is in, it `colorize`s the whole buffer **once**
+ * (keeping the global-normalisation modes correct — no per-band seams) and
+ * caches the `(ptr, len, maxIter, dims)` handle for a later recolorize.
+ *
+ * The RGBA bytes are copied OUT of WASM linear memory into a fresh
+ * `Uint8ClampedArray` before transfer: transferring a view that aliases WASM
+ * memory would detach the worker's entire heap; the copy neuters only the
+ * standalone result on send.
+ */
+export async function handleRender(
+  msg: RenderRequest,
   wasm: InitOutput,
-): { state: WorkerState; response: RenderResponse; transfer: Transferable[] } {
-  if (msg.kind === 'render') {
-    const viewport = new Viewport(msg.centerRe, msg.centerIm, msg.zoom, msg.width, msg.height)
-    const iterPtr = compute(viewport, msg.maxIter, msg.fractalKind, msg.cRe, msg.cIm, msg.field)
-    const iterLen = compute_len()
-    const nextState: WorkerState = {
-      cachedIterPtr: iterPtr,
-      cachedIterLen: iterLen,
-      cachedMaxIter: msg.maxIter,
-      cachedWidth: msg.width,
-      cachedHeight: msg.height,
+  hooks: RenderHooks,
+): Promise<
+  { state: WorkerState; response: RenderResponse; transfer: Transferable[] } | { aborted: true }
+> {
+  const viewport = new Viewport(msg.centerRe, msg.centerIm, msg.zoom, msg.width, msg.height)
+  const bands = planBands(msg.height)
+  // `compute_band` returns the (stable) buffer pointer on every call; the
+  // first band (y0 === 0) sizes the buffer to the whole frame so it never
+  // moves while later bands fill in. Read the final pointer for colorize.
+  let iterPtr = 0
+  for (let i = 0; i < bands.length; i += 1) {
+    const [y0, y1] = bands[i]
+    iterPtr = compute_band(
+      viewport,
+      msg.maxIter,
+      msg.fractalKind,
+      msg.cRe,
+      msg.cIm,
+      msg.field,
+      y0,
+      y1,
+    )
+    hooks.onProgress(y1, msg.height)
+    // Yield + abort-check between bands only — not after the last band, which
+    // flows straight into colorize, and not before the first, which can never
+    // already be stale (the render started this turn).
+    if (i < bands.length - 1) {
+      await hooks.yieldToEventLoop()
+      if (hooks.shouldAbort()) {
+        return { aborted: true }
+      }
     }
-    const rgba = paint(wasm, iterPtr, iterLen, msg.maxIter, msg.palette, msg.mode)
-    const response: RenderResponse = {
-      kind: 'response',
-      epoch: msg.epoch,
-      rgba,
-      width: msg.width,
-      height: msg.height,
-    }
-    return { state: nextState, response, transfer: [rgba.buffer] }
   }
 
+  const iterLen = compute_len()
+  const nextState: WorkerState = {
+    cachedIterPtr: iterPtr,
+    cachedIterLen: iterLen,
+    cachedMaxIter: msg.maxIter,
+    cachedWidth: msg.width,
+    cachedHeight: msg.height,
+  }
+  const rgba = paint(wasm, iterPtr, iterLen, msg.maxIter, msg.palette, msg.mode)
+  const response: RenderResponse = {
+    kind: 'response',
+    epoch: msg.epoch,
+    rgba,
+    width: msg.width,
+    height: msg.height,
+  }
+  return { state: nextState, response, transfer: [rgba.buffer] }
+}
+
+/**
+ * Re-colorize the cached iteration buffer with a new palette / mode — the
+ * ADR-0002 fast path, no recompute. Reuses the cached `(ptr, len, maxIter)`
+ * and echoes the cached dimensions (a recolorize carries none). Throws a
+ * clear programmer-error if no render has populated the cache yet, the same
+ * guard `render.ts` carried. Synchronous: there is no per-band work to
+ * cancel, so the worker runs it straight through.
+ */
+export function handleRecolorize(
+  state: WorkerState,
+  msg: RecolorizeRequest,
+  wasm: InitOutput,
+): { response: RenderResponse; transfer: Transferable[] } {
   if (state.cachedIterPtr === null) {
     throw new Error('recolorize: no cached iteration buffer — call render(...) first')
   }
@@ -119,9 +203,7 @@ export function handleMessage(
     width: state.cachedWidth,
     height: state.cachedHeight,
   }
-  // Cache survives a recolorize: the iteration buffer is unchanged, so a
-  // subsequent recolorize can reuse it. State is returned verbatim.
-  return { state, response, transfer: [rgba.buffer] }
+  return { response, transfer: [rgba.buffer] }
 }
 
 /**

@@ -297,6 +297,33 @@ impl Viewport {
     }
 }
 
+/// Validate the Julia `c` payload at the WASM↔JS boundary and translate the
+/// flat `(kind, c_re, c_im)` triple into a [`CoreFractalKind`]. Shared by
+/// [`compute`] and [`compute_band`]; `context` names the caller so a
+/// non-finite `c` surfaces a located message. `c_re` / `c_im` are validated
+/// **unconditionally** — the Mandelbrot path ignores them mathematically, but
+/// validating regardless forecloses a class of latent JS bugs where a stale
+/// `NaN` in a hidden Julia input would surface only at the next mode toggle.
+fn core_fractal_kind(
+    context: &str,
+    kind: FractalKind,
+    c_re: f64,
+    c_im: f64,
+) -> Result<CoreFractalKind, JsError> {
+    if !c_re.is_finite() {
+        return Err(JsError::new(&format!("{context}: c_re must be finite")));
+    }
+    if !c_im.is_finite() {
+        return Err(JsError::new(&format!("{context}: c_im must be finite")));
+    }
+    Ok(match kind {
+        FractalKind::Mandelbrot => CoreFractalKind::Mandelbrot,
+        FractalKind::Julia => CoreFractalKind::Julia {
+            c: Complex64::new(c_re, c_im),
+        },
+    })
+}
+
 /// Compute the smooth-iteration buffer for `viewport` and return a
 /// pointer into WASM linear memory. JS pairs this with [`compute_len`]
 /// to build a `Float32Array` view; the values are the continuous
@@ -329,18 +356,7 @@ pub fn compute(
     c_im: f64,
     field: Field,
 ) -> Result<*const f32, JsError> {
-    if !c_re.is_finite() {
-        return Err(JsError::new("compute: c_re must be finite"));
-    }
-    if !c_im.is_finite() {
-        return Err(JsError::new("compute: c_im must be finite"));
-    }
-    let core_kind = match kind {
-        FractalKind::Mandelbrot => CoreFractalKind::Mandelbrot,
-        FractalKind::Julia => CoreFractalKind::Julia {
-            c: Complex64::new(c_re, c_im),
-        },
-    };
+    let core_kind = core_fractal_kind("compute", kind, c_re, c_im)?;
     let buf = fractal_core::compute(&viewport.inner, max_iter, core_kind, field.into());
     Ok(ITER_BUFFER.with(|cell| {
         let mut iters = cell.borrow_mut();
@@ -350,10 +366,78 @@ pub fn compute(
 }
 
 /// Length (element count, not bytes) of the iteration buffer last
-/// produced by [`compute`].
+/// produced by [`compute`] or accumulated by [`compute_band`].
 #[wasm_bindgen]
 pub fn compute_len() -> usize {
     ITER_BUFFER.with(|cell| cell.borrow().len())
+}
+
+/// Compute one horizontal **band** — pixel rows `[y0, y1)` — of a frame
+/// into the shared iteration buffer, and return the buffer pointer.
+///
+/// This is the cancellable counterpart to [`compute`] (P2, #78). The render
+/// worker drives a frame band-by-band: it calls `compute_band` for each row
+/// range, yields to its event loop between bands, and abandons the rest the
+/// moment a newer viewport supersedes the in-flight one — so a doomed deep
+/// render stops within a band instead of blocking the worker for seconds.
+/// Concatenated, the bands are bit-identical to a single [`compute`]
+/// (`fractal_core::compute_rows` keys every row to its absolute `py`), so
+/// the final [`colorize`] over the whole buffer is unchanged.
+///
+/// ## Buffer protocol
+///
+/// The **first** band of a frame (`y0 == 0`) clears [`ITER_BUFFER`] and
+/// reserves the whole frame (`width * height`) up front. That single
+/// allocation never moves while the remaining bands are appended, so the
+/// returned pointer stays valid across the entire band sequence *and* the
+/// trailing `colorize` — the caller may read it after the last band, paired
+/// with [`compute_len`]. Bands are appended in order, so each lands at its
+/// absolute offset `y0 * width`. The caller MUST start a frame at `y0 == 0`
+/// and walk a contiguous partition up to `height`; the worker's band planner
+/// does exactly this.
+///
+/// `c_re` / `c_im` are validated for finiteness like [`compute`], and the
+/// band range is checked (`y0 <= y1 <= height`) at this WASM↔JS boundary.
+#[wasm_bindgen]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "wasm-bindgen exports take flat positional primitives across the JS↔WASM boundary (no struct grouping survives `postMessage`/the bindgen ABI); this mirrors `compute`'s six-arg shape with the band range `(y0, y1)` appended."
+)]
+pub fn compute_band(
+    viewport: &Viewport,
+    max_iter: u32,
+    kind: FractalKind,
+    c_re: f64,
+    c_im: f64,
+    field: Field,
+    y0: u32,
+    y1: u32,
+) -> Result<*const f32, JsError> {
+    let width = viewport.inner.width;
+    let height = viewport.inner.height;
+    if y0 > y1 || y1 > height {
+        return Err(JsError::new(
+            "compute_band: require y0 <= y1 <= viewport.height",
+        ));
+    }
+    let core_kind = core_fractal_kind("compute_band", kind, c_re, c_im)?;
+    let band =
+        fractal_core::compute_rows(&viewport.inner, max_iter, core_kind, field.into(), y0, y1);
+    Ok(ITER_BUFFER.with(|cell| {
+        let mut iters = cell.borrow_mut();
+        if y0 == 0 {
+            // Fresh frame: reserve the whole frame up front so the single
+            // allocation never moves as bands append — keeping the returned
+            // pointer valid through the final colorize — while skipping the
+            // zero-fill a `resize` would do (every cell is overwritten anyway).
+            iters.clear();
+            iters.reserve((width as usize) * (height as usize));
+        }
+        // Bands arrive in order over a contiguous partition (the caller's
+        // contract), so appending lands each band at its absolute `y0 * width`.
+        iters.extend_from_slice(&band);
+        iters.as_ptr()
+    }))
 }
 
 /// Colorize a smooth-iteration buffer with the given palette and

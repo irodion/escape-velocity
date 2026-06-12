@@ -60,6 +60,31 @@ export interface Ready {
 }
 
 /**
+ * A lightweight "a newer request exists" signal the client posts when it
+ * supersedes a render that is already on the worker (P2, #78).
+ *
+ * The client's coalescing keeps a single in-flight request and a single
+ * pending slot, and never sends the *next* request until the in-flight one
+ * responds — so without this the worker would never learn that the frame it
+ * is grinding through is already stale, and would run the whole doomed
+ * `compute` to completion before the user's latest viewport could even
+ * start. A `cancel` carries the latest epoch the client has issued; the
+ * worker tracks the maximum epoch it has *seen* across all messages and, on
+ * a banded render, abandons the remaining bands the moment that exceeds the
+ * in-flight render's own epoch. It frees the slot the same way a response
+ * does, via an {@link Aborted} reply.
+ *
+ * It is intentionally tiny (no payload beyond the epoch) and safe to drop:
+ * if the worker never sees it (e.g. a fast render finishes first) the frame
+ * just completes normally and the epoch check on the client discards the
+ * stale paint, exactly as before.
+ */
+export interface CancelRequest {
+  readonly kind: 'cancel'
+  readonly epoch: number
+}
+
+/**
  * A request that threw inside the worker. The worker wraps `handleMessage`
  * in a try/catch and posts this instead of a `RenderResponse`, echoing the
  * failed request's `epoch` so the client can match it to the in-flight slot.
@@ -74,6 +99,39 @@ export interface RenderError {
   readonly kind: 'error'
   readonly epoch: number
   readonly message: string
+}
+
+/**
+ * Progress heartbeat posted between bands of a banded render (P2, #78), so
+ * the client can drive a determinate "rendering NN%" indicator on a slow
+ * deep render. `rowsDone` is the count of frame rows computed so far,
+ * `rowsTotal` the frame height; their ratio is the fraction complete.
+ *
+ * Carries no pixels — partial bands are never painted (painting them would
+ * show seams under the global-normalisation modes, which key off the whole
+ * frame's statistics). The `epoch` lets the client ignore progress for a
+ * frame it has already moved past; a render that completes before its first
+ * band reports never shows the indicator at all (the client debounces).
+ */
+export interface ProgressResponse {
+  readonly kind: 'progress'
+  readonly epoch: number
+  readonly rowsDone: number
+  readonly rowsTotal: number
+}
+
+/**
+ * Sent when a banded render abandons its remaining bands because a newer
+ * request superseded it (see {@link CancelRequest}). It carries no frame —
+ * the point is that this frame was thrown away — but it MUST be sent so the
+ * client frees its in-flight slot and dispatches the pending request, the
+ * same slot-freeing role a {@link RenderResponse} or {@link RenderError}
+ * plays. Without it the aborted render would wedge the pipeline exactly like
+ * a silent worker throw (the freeze {@link RenderError} guards against).
+ */
+export interface Aborted {
+  readonly kind: 'aborted'
+  readonly epoch: number
 }
 
 export interface RenderResponse {

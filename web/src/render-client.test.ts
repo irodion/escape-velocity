@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { RenderError, RenderRequest, RenderResponse } from './worker/protocol.js'
+import type {
+  Aborted,
+  CancelRequest,
+  ProgressResponse,
+  RenderError,
+  RenderRequest,
+  RenderResponse,
+} from './worker/protocol.js'
 
 // jsdom ships no `ImageData`; the client constructs one before
 // `putImageData`. A minimal double that records its data is enough to
@@ -60,6 +67,11 @@ interface RenderClient {
   recolorize: (ctx: CanvasRenderingContext2D, palette: number, mode: number) => void
   discardInFlight: () => void
   setFatalHandler: (handler: (message: string) => void) => void
+  setProgressReporter: (reporter: {
+    begin: () => void
+    report: (fraction: number) => void
+    end: () => void
+  }) => void
 }
 
 const VIEWPORT = { centerRe: -0.5, centerIm: 0, zoom: 1, width: 2, height: 2 }
@@ -93,12 +105,28 @@ function makeCtx(): CanvasRenderingContext2D {
   return { canvas, putImageData: vi.fn() } as unknown as CanvasRenderingContext2D
 }
 
-function deliver(worker: FakeWorker, data: RenderResponse | RenderError | { kind: 'ready' }): void {
+function deliver(
+  worker: FakeWorker,
+  data: RenderResponse | RenderError | ProgressResponse | Aborted | { kind: 'ready' },
+): void {
   worker.onmessage?.({ data } as MessageEvent)
 }
 
 function deliverError(worker: FakeWorker, epoch: number, message: string): void {
   worker.onmessage?.({ data: { kind: 'error', epoch, message } } as MessageEvent)
+}
+
+function deliverProgress(
+  worker: FakeWorker,
+  epoch: number,
+  rowsDone: number,
+  rowsTotal: number,
+): void {
+  worker.onmessage?.({ data: { kind: 'progress', epoch, rowsDone, rowsTotal } } as MessageEvent)
+}
+
+function deliverAborted(worker: FakeWorker, epoch: number): void {
+  worker.onmessage?.({ data: { kind: 'aborted', epoch } } as MessageEvent)
 }
 
 // Fire the worker's `onerror` (a top-level worker throw). `preventDefault` is
@@ -129,8 +157,25 @@ function doRender(client: RenderClient, ctx: CanvasRenderingContext2D): void {
   )
 }
 
+// Only render / recolorize messages are "work" the worker dispatches; a
+// `cancel` is a side-channel supersede signal (P2) that the client also posts
+// while a render is in flight. Tests that assert on dispatched work filter it
+// out via these helpers so a cancel can't masquerade as a dispatched frame.
+function isWork(m: unknown): boolean {
+  const kind = (m as { kind: string }).kind
+  return kind === 'render' || kind === 'recolorize'
+}
+
+function postedWork(worker: FakeWorker): unknown[] {
+  return worker.posted.filter(isWork)
+}
+
 function postedEpochs(worker: FakeWorker): number[] {
-  return worker.posted.map((m) => (m as RenderRequest).epoch)
+  return postedWork(worker).map((m) => (m as RenderRequest).epoch)
+}
+
+function postedCancels(worker: FakeWorker): CancelRequest[] {
+  return worker.posted.filter((m) => (m as { kind: string }).kind === 'cancel') as CancelRequest[]
 }
 
 describe('render-client', () => {
@@ -294,13 +339,13 @@ describe('render-client', () => {
     doRender(client, ctx) // epoch 1 → posted, in flight
     client.recolorize(ctx, PALETTE_VIRIDIS, MODE_CYCLED) // epoch 2 → queued
 
-    expect(worker.posted).toHaveLength(1)
+    expect(postedWork(worker)).toHaveLength(1)
 
     deliver(worker, response(1))
 
-    expect(worker.posted).toHaveLength(2)
-    expect((worker.posted[1] as { kind: string }).kind).toBe('recolorize')
-    expect((worker.posted[1] as RenderRequest).epoch).toBe(2)
+    expect(postedWork(worker)).toHaveLength(2)
+    expect((postedWork(worker)[1] as { kind: string }).kind).toBe('recolorize')
+    expect((postedWork(worker)[1] as RenderRequest).epoch).toBe(2)
   })
 
   it('folds a recolorize into a pending render instead of replacing it', async () => {
@@ -327,12 +372,12 @@ describe('render-client', () => {
     ) // render B → epoch 2, queued
     client.recolorize(ctx, PALETTE_MAGMA, MODE_HISTOGRAM) // epoch 3 → folds into B
 
-    expect(worker.posted).toHaveLength(1) // worker still busy with A
+    expect(postedWork(worker)).toHaveLength(1) // worker still busy with A
 
     deliver(worker, response(1)) // A returns → flush the merged request
 
-    expect(worker.posted).toHaveLength(2)
-    const dispatched = worker.posted[1] as RenderRequest
+    expect(postedWork(worker)).toHaveLength(2)
+    const dispatched = postedWork(worker)[1] as RenderRequest
     // The compute survives: it is still a render carrying B's viewport.
     expect(dispatched.kind).toBe('render')
     expect(dispatched.centerRe).toBe(VIEWPORT_B.centerRe)
@@ -357,8 +402,8 @@ describe('render-client', () => {
 
     deliver(worker, readyMsg())
 
-    expect(worker.posted).toHaveLength(1)
-    const dispatched = worker.posted[0] as RenderRequest
+    expect(postedWork(worker)).toHaveLength(1)
+    const dispatched = postedWork(worker)[0] as RenderRequest
     expect(dispatched.kind).toBe('render')
     expect(dispatched.palette).toBe(PALETTE_MAGMA)
     expect(dispatched.mode).toBe(MODE_HISTOGRAM)
@@ -395,15 +440,15 @@ describe('render-client', () => {
 
     doRender(client, ctx) // epoch 1, in flight
     doRender(client, ctx) // epoch 2, queued
-    expect(worker.posted).toHaveLength(1)
+    expect(postedWork(worker)).toHaveLength(1)
 
     // Worker throws on epoch 1 instead of responding. Without an error arm
     // `inFlight` would stay true forever and epoch 2 would never dispatch.
     deliverError(worker, 1, 'compute: invalid viewport')
 
     // The queued epoch-2 render is dispatched, proving the slot was freed.
-    expect(worker.posted).toHaveLength(2)
-    expect((worker.posted[1] as RenderRequest).epoch).toBe(2)
+    expect(postedWork(worker)).toHaveLength(2)
+    expect((postedWork(worker)[1] as RenderRequest).epoch).toBe(2)
     // An error never paints.
     expect(ctx.putImageData).not.toHaveBeenCalled()
   })
@@ -466,5 +511,129 @@ describe('render-client', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // --- P2 (#78): band cancellation + progress ------------------------------
+
+  it('posts a cancel carrying the new epoch when a render supersedes one in flight', async () => {
+    const { client, worker } = await loadClient()
+    const ctx = makeCtx()
+    deliver(worker, readyMsg())
+
+    doRender(client, ctx) // epoch 1 → posted, in flight
+    doRender(client, ctx) // epoch 2 → supersedes 1 while it is on the worker
+
+    // The second issue tells the worker to abandon the doomed epoch-1 render.
+    const cancels = postedCancels(worker)
+    expect(cancels).toHaveLength(1)
+    expect(cancels[0].epoch).toBe(2)
+    // The superseding render itself is queued, not yet dispatched.
+    expect(postedEpochs(worker)).toEqual([1])
+  })
+
+  it('does not cancel an in-flight render when a recolorize supersedes it', async () => {
+    // A recolorize re-tints whatever the in-flight render is computing, so it
+    // must let that render finish rather than abort it — aborting would leave a
+    // partial iteration buffer for the recolorize to read. The render runs to
+    // completion; the recolorize then dispatches against its whole buffer.
+    const { client, worker } = await loadClient()
+    const ctx = makeCtx()
+    deliver(worker, readyMsg())
+
+    doRender(client, ctx) // epoch 1 → posted, in flight
+    client.recolorize(ctx, PALETTE_MAGMA, MODE_HISTOGRAM) // epoch 2 → queued
+
+    expect(postedCancels(worker)).toHaveLength(0)
+
+    deliver(worker, response(1)) // render completes → flush the queued recolorize
+    expect((postedWork(worker)[1] as { kind: string }).kind).toBe('recolorize')
+  })
+
+  it('does not post a cancel for the first render (nothing in flight to cancel)', async () => {
+    const { client, worker } = await loadClient()
+    const ctx = makeCtx()
+    deliver(worker, readyMsg())
+
+    doRender(client, ctx) // epoch 1 → dispatched immediately, nothing to cancel
+
+    expect(postedCancels(worker)).toHaveLength(0)
+  })
+
+  it('discardInFlight posts a cancel so the worker abandons the in-flight render', async () => {
+    const { client, worker } = await loadClient()
+    const ctx = makeCtx()
+    deliver(worker, readyMsg())
+
+    doRender(client, ctx) // epoch 1, in flight
+    client.discardInFlight() // bumps to epoch 2 and cancels the worker's work
+
+    const cancels = postedCancels(worker)
+    expect(cancels).toHaveLength(1)
+    expect(cancels[0].epoch).toBe(2)
+  })
+
+  it('an aborted reply frees the slot and dispatches the queued request (no paint)', async () => {
+    const { client, worker } = await loadClient()
+    const ctx = makeCtx()
+    deliver(worker, readyMsg())
+
+    doRender(client, ctx) // epoch 1, in flight
+    doRender(client, ctx) // epoch 2, queued (and a cancel posted)
+    expect(postedEpochs(worker)).toEqual([1])
+
+    // The worker abandoned epoch 1 mid-flight; without freeing the slot the
+    // queued epoch 2 would never dispatch (the freeze the aborted arm guards).
+    deliverAborted(worker, 1)
+
+    expect(postedEpochs(worker)).toEqual([1, 2])
+    // An abort carries no frame, so nothing paints.
+    expect(ctx.putImageData).not.toHaveBeenCalled()
+  })
+
+  it('drives the progress reporter across a render lifecycle', async () => {
+    const { client, worker } = await loadClient()
+    const ctx = makeCtx()
+    const reporter = { begin: vi.fn(), report: vi.fn(), end: vi.fn() }
+    client.setProgressReporter(reporter)
+    deliver(worker, readyMsg())
+
+    doRender(client, ctx) // dispatched → begin()
+    expect(reporter.begin).toHaveBeenCalledTimes(1)
+
+    deliverProgress(worker, 1, 3, 12) // a band heartbeat → report(0.25)
+    deliverProgress(worker, 1, 9, 12) // → report(0.75)
+    expect(reporter.report.mock.calls).toEqual([[0.25], [0.75]])
+
+    deliver(worker, response(1)) // frame lands → end()
+    expect(reporter.end).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores progress for an already-superseded render (a doomed frame never moves the bar)', async () => {
+    const { client, worker } = await loadClient()
+    const ctx = makeCtx()
+    const reporter = { begin: vi.fn(), report: vi.fn(), end: vi.fn() }
+    client.setProgressReporter(reporter)
+    deliver(worker, readyMsg())
+
+    doRender(client, ctx) // epoch 1, in flight
+    doRender(client, ctx) // epoch 2 supersedes it (latestEpoch is now 2)
+
+    // A late heartbeat for the doomed epoch-1 render must not advance the
+    // indicator the user is now waiting on for epoch 2.
+    deliverProgress(worker, 1, 6, 12)
+    expect(reporter.report).not.toHaveBeenCalled()
+  })
+
+  it('ends progress when the in-flight render is aborted', async () => {
+    const { client, worker } = await loadClient()
+    const ctx = makeCtx()
+    const reporter = { begin: vi.fn(), report: vi.fn(), end: vi.fn() }
+    client.setProgressReporter(reporter)
+    deliver(worker, readyMsg())
+
+    doRender(client, ctx) // begin()
+    deliverAborted(worker, 1) // terminal → end()
+
+    expect(reporter.end).toHaveBeenCalledTimes(1)
   })
 })

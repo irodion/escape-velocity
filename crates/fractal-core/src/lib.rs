@@ -38,5 +38,5 @@ pub use escape_time::escape_time;
 pub use field::Field;
 pub use fractal_kind::FractalKind;
 pub use palette::{NormalizationMode, Palette};
-pub use pipeline::{colorize, compute};
+pub use pipeline::{colorize, compute, compute_rows};
 pub use viewport::{MAX_ZOOM, MIN_ZOOM, Viewport};

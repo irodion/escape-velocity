@@ -1,15 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-// Mock the WASM module before the handler imports it. Unlike
-// `render.test.ts`, the handler threads its cache through explicit
-// `WorkerState` arguments rather than module-level mutable state, so no
-// `resetModules()` dance is needed — a `mockClear()` per test is enough
-// to reset call counts. The factory adds a `Viewport` class double
-// (the handler constructs one from the flat primitives) on top of the
-// surface `render.test.ts` mocks.
+// Mock the WASM module before the handler imports it. The handler threads its
+// cache through explicit `WorkerState` arguments rather than module-level
+// mutable state, so a `mockClear()` per test is enough to reset call counts.
+// The render path now computes in bands via `compute_band` (P2, #78); the
+// double records each band's args so a test can read the row ranges back.
 vi.mock('../../wasm/fractal_wasm.js', () => {
   return {
-    compute: vi.fn(
+    compute_band: vi.fn(
       (
         _viewport: unknown,
         _maxIter: number,
@@ -17,6 +15,8 @@ vi.mock('../../wasm/fractal_wasm.js', () => {
         _cRe: number,
         _cIm: number,
         _field: number,
+        _y0: number,
+        _y1: number,
       ) => 0x1000,
     ),
     compute_len: vi.fn(() => 4),
@@ -71,18 +71,24 @@ import {
   NormalizationMode,
   Palette,
 } from '../../wasm/fractal_wasm.js'
-import { createWorkerState, handleMessage } from './handler.js'
+import {
+  createWorkerState,
+  handleRecolorize,
+  handleRender,
+  planBands,
+  type RenderHooks,
+} from './handler.js'
 import type { RecolorizeRequest, RenderRequest } from './protocol.js'
 
 interface MockedWasm {
-  compute: ReturnType<typeof vi.fn>
+  compute_band: ReturnType<typeof vi.fn>
   compute_len: ReturnType<typeof vi.fn>
   colorize: ReturnType<typeof vi.fn>
   colorize_len: ReturnType<typeof vi.fn>
 }
 
 // Shape the mock `Viewport` class records its constructor inputs under,
-// so a test can read them back off the value handed to `compute`.
+// so a test can read them back off the value handed to `compute_band`.
 interface MockViewport {
   re: number
   im: number
@@ -93,25 +99,17 @@ interface MockViewport {
 
 const wasm = wasmModule as unknown as MockedWasm
 
-// Enum discriminants come from the (mocked) WASM module's own exports
-// rather than re-declared literals, so request construction and the
-// matching assertions read from one source — a drift between the two
-// can't hide behind duplicated magic numbers. Importing them as values
-// also carries the real enum types, which removes the per-field
-// `as RenderRequest['palette']` casts below.
-//
-// `cRe` / `cIm` stay pinned literals: the handler module defines no
-// shared default for them (it is pure compute), and the only runtime
-// source is `main.ts`'s boot constants — importing that into a worker
-// unit test would invert the dependency and drag in DOM bootstrap. The
-// pinned pair mirrors `render.test.ts` and still flags a divergence in
-// the Slice 5C UI defaults as a failure here.
+// Enum discriminants come from the (mocked) WASM module's own exports rather
+// than re-declared literals, so request construction and the matching
+// assertions read from one source. `cRe` / `cIm` stay pinned literals (the
+// handler defines no shared default; the only runtime source is main.ts's
+// boot constants, importing which would drag DOM bootstrap into a worker unit
+// test) — mirroring the pre-banding test.
 const C_RE_DEFAULT = -0.7
 const C_IM_DEFAULT = 0.27015
 
-// The mock's `colorize` returns ptr 0x2000 and `colorize_len` returns
-// 16, so `paint` reads 16 bytes at offset 0x2000. One WASM page (64KiB)
-// is plenty of headroom for that view.
+// The mock's `colorize` returns ptr 0x2000 and `colorize_len` returns 16, so
+// `paint` reads 16 bytes at offset 0x2000. One WASM page (64KiB) is plenty.
 let wasmInit: InitOutput
 
 function makeWasmInit(): InitOutput {
@@ -148,9 +146,67 @@ function recolorizeRequest(overrides: Partial<RecolorizeRequest> = {}): Recolori
   }
 }
 
-describe('handleMessage', () => {
+// Default hooks: never abort, instant yield, progress recorded. A test
+// overrides individual hooks (notably `shouldAbort`) as needed.
+function makeHooks(overrides: Partial<RenderHooks> = {}): {
+  hooks: RenderHooks
+  yieldSpy: ReturnType<typeof vi.fn>
+  abortSpy: ReturnType<typeof vi.fn>
+  progressSpy: ReturnType<typeof vi.fn>
+} {
+  const yieldSpy = vi.fn(() => Promise.resolve())
+  const abortSpy = vi.fn(() => false)
+  const progressSpy = vi.fn()
+  const hooks: RenderHooks = {
+    yieldToEventLoop: yieldSpy,
+    shouldAbort: abortSpy,
+    onProgress: progressSpy,
+    ...overrides,
+  }
+  return { hooks, yieldSpy, abortSpy, progressSpy }
+}
+
+// Narrow a non-aborted render result; throws (failing the test) on an abort.
+function expectRendered(
+  result: Awaited<ReturnType<typeof handleRender>>,
+): Extract<typeof result, { response: unknown }> {
+  if ('aborted' in result) {
+    throw new Error('expected a render result, got aborted')
+  }
+  return result
+}
+
+describe('planBands', () => {
+  it('splits a frame into a contiguous partition ending at height', () => {
+    for (const height of [1, 2, 5, 13, 100, 601]) {
+      const bands = planBands(height)
+      expect(bands[0][0]).toBe(0)
+      expect(bands[bands.length - 1][1]).toBe(height)
+      // Contiguous, strictly forward, no gaps or overlaps.
+      for (let i = 1; i < bands.length; i += 1) {
+        expect(bands[i][0]).toBe(bands[i - 1][1])
+      }
+      // Never empty; at most TARGET_BANDS (12) bands.
+      for (const [y0, y1] of bands) {
+        expect(y1).toBeGreaterThan(y0)
+      }
+      expect(bands.length).toBeLessThanOrEqual(12)
+      expect(bands.length).toBeGreaterThanOrEqual(1)
+    }
+  })
+
+  it('makes one band per row for a short frame, never an empty band', () => {
+    expect(planBands(1)).toEqual([[0, 1]])
+    expect(planBands(2)).toEqual([
+      [0, 1],
+      [1, 2],
+    ])
+  })
+})
+
+describe('handleRender', () => {
   beforeEach(() => {
-    wasm.compute.mockClear()
+    wasm.compute_band.mockClear()
     wasm.compute_len.mockClear()
     wasm.colorize.mockClear()
     wasm.colorize_len.mockClear()
@@ -161,184 +217,150 @@ describe('handleMessage', () => {
     vi.restoreAllMocks()
   })
 
-  it('a render request calls compute once and colorize once, in that order', () => {
-    const { response } = handleMessage(createWorkerState(), renderRequest({ epoch: 7 }), wasmInit)
-    expect(wasm.compute).toHaveBeenCalledTimes(1)
+  it('computes every band then colorizes once, in that order', async () => {
+    const { hooks } = makeHooks()
+    // height 2 → two bands [0,1], [1,2] (planBands).
+    const result = expectRendered(await handleRender(renderRequest({ epoch: 7 }), wasmInit, hooks))
+
+    expect(wasm.compute_band).toHaveBeenCalledTimes(2)
     expect(wasm.colorize).toHaveBeenCalledTimes(1)
-    const computeOrder = wasm.compute.mock.invocationCallOrder[0]
+    // Both bands compute before the single colorize.
+    const lastBandOrder = wasm.compute_band.mock.invocationCallOrder[1]
     const colorizeOrder = wasm.colorize.mock.invocationCallOrder[0]
-    expect(computeOrder).toBeLessThan(colorizeOrder)
-    expect(response.epoch).toBe(7)
-    expect(response.rgba).toHaveLength(16)
-    expect(response.width).toBe(2)
-    expect(response.height).toBe(2)
+    expect(lastBandOrder).toBeLessThan(colorizeOrder)
+
+    expect(result.response.epoch).toBe(7)
+    expect(result.response.rgba).toHaveLength(16)
+    expect(result.response.width).toBe(2)
+    expect(result.response.height).toBe(2)
   })
 
-  it('reconstructs the Viewport and forwards (kind, cRe, cIm) into the compute call positionally', () => {
-    handleMessage(createWorkerState(), renderRequest({ fractalKind: FractalKind.Julia }), wasmInit)
-    expect(wasm.compute).toHaveBeenCalledTimes(1)
-    const args = wasm.compute.mock.calls[0] as [
+  it('reconstructs the Viewport and forwards (kind, cRe, cIm, field, band range) to each band', async () => {
+    const { hooks } = makeHooks()
+    await handleRender(renderRequest({ fractalKind: FractalKind.Julia }), wasmInit, hooks)
+
+    expect(wasm.compute_band).toHaveBeenCalledTimes(2)
+    const first = wasm.compute_band.mock.calls[0] as [
       MockViewport,
       number,
       number,
       number,
       number,
       number,
+      number,
+      number,
     ]
-    // arg 0 is the freshly reconstructed Viewport — assert the flat
-    // primitives landed in the constructor in the right order so a
-    // regression in `new Viewport(centerRe, centerIm, zoom, width,
-    // height)` fails loudly here rather than silently rendering the
-    // wrong frame.
-    const viewport = args[0]
+    // arg 0 is the freshly reconstructed Viewport — assert the flat primitives
+    // landed in the constructor in the right order.
+    const viewport = first[0]
     expect(viewport.re).toBe(-0.5)
     expect(viewport.im).toBe(0)
     expect(viewport.zoom).toBe(1)
     expect(viewport.width).toBe(2)
     expect(viewport.height).toBe(2)
-    expect(args[1]).toBe(256)
-    expect(args[2]).toBe(FractalKind.Julia)
-    expect(args[3]).toBe(C_RE_DEFAULT)
-    expect(args[4]).toBe(C_IM_DEFAULT)
-    // The Field rides last, appended after the Julia (cRe, cIm) payload —
-    // the wire-stable position from ADR-0013 / the WASM binding.
-    expect(args[5]).toBe(Field.EscapeTime)
+    expect(first[1]).toBe(256)
+    expect(first[2]).toBe(FractalKind.Julia)
+    expect(first[3]).toBe(C_RE_DEFAULT)
+    expect(first[4]).toBe(C_IM_DEFAULT)
+    expect(first[5]).toBe(Field.EscapeTime)
+    // The band ranges partition [0, height): [0,1) then [1,2).
+    const ranges = wasm.compute_band.mock.calls.map((c) => [c[6], c[7]])
+    expect(ranges).toEqual([
+      [0, 1],
+      [1, 2],
+    ])
   })
 
-  it('a recolorize after a render reuses the cached (ptr, len) and skips compute', () => {
-    const { state } = handleMessage(createWorkerState(), renderRequest(), wasmInit)
+  it('reports progress after each band as rows-done / rows-total', async () => {
+    const { hooks, progressSpy } = makeHooks()
+    await handleRender(renderRequest(), wasmInit, hooks)
+    // Two bands of one row each over a 2-row frame: 1/2 then 2/2.
+    expect(progressSpy.mock.calls).toEqual([
+      [1, 2],
+      [2, 2],
+    ])
+  })
+
+  it('yields between bands but not after the last (one yield for two bands)', async () => {
+    const { hooks, yieldSpy } = makeHooks()
+    await handleRender(renderRequest(), wasmInit, hooks)
+    expect(yieldSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('abandons the remaining bands and skips colorize when superseded mid-flight', async () => {
+    // shouldAbort flips true after the first band's yield, so the second band
+    // never computes and no frame is produced.
+    const abort = vi.fn(() => true)
+    const { hooks } = makeHooks({ shouldAbort: abort })
+    const result = await handleRender(renderRequest(), wasmInit, hooks)
+
+    expect('aborted' in result && result.aborted).toBe(true)
+    expect(wasm.compute_band).toHaveBeenCalledTimes(1) // only the first band ran
+    expect(wasm.colorize).not.toHaveBeenCalled() // no wasted colorize
+    expect(abort).toHaveBeenCalledTimes(1)
+  })
+
+  it('a recolorize after a render reuses the cached (ptr, len) and skips compute', async () => {
+    const { hooks } = makeHooks()
+    const { state } = expectRendered(await handleRender(renderRequest(), wasmInit, hooks))
     const [iterPtr, iterLen] = wasm.colorize.mock.calls[0] as [number, number, ...unknown[]]
 
-    const { response } = handleMessage(state, recolorizeRequest(), wasmInit)
+    const { response } = handleRecolorize(state, recolorizeRequest(), wasmInit)
 
-    expect(wasm.compute).toHaveBeenCalledTimes(1) // unchanged from the render
+    expect(wasm.compute_band).toHaveBeenCalledTimes(2) // unchanged from the render
     expect(wasm.colorize).toHaveBeenCalledTimes(2)
     const secondCall = wasm.colorize.mock.calls[1] as [number, number, number, number, number]
     expect(secondCall[0]).toBe(iterPtr)
     expect(secondCall[1]).toBe(iterLen)
     expect(secondCall[2]).toBe(Palette.Magma)
     expect(secondCall[3]).toBe(NormalizationMode.Histogram)
-    // Recolorize echoes the cached render's dimensions.
+    // Recolorize echoes the cached render's dimensions and the new epoch.
     expect(response.width).toBe(2)
     expect(response.height).toBe(2)
     expect(response.epoch).toBe(2)
   })
 
   it('a recolorize before any render throws a programmer-error', () => {
-    expect(() => handleMessage(createWorkerState(), recolorizeRequest(), wasmInit)).toThrow(
+    expect(() => handleRecolorize(createWorkerState(), recolorizeRequest(), wasmInit)).toThrow(
       /recolorize: no cached iteration buffer/,
     )
   })
 
-  it('a render after a recolorize triggers a fresh compute (cache does not become permanent)', () => {
-    const first = handleMessage(createWorkerState(), renderRequest(), wasmInit)
-    const second = handleMessage(first.state, recolorizeRequest(), wasmInit)
-    handleMessage(second.state, renderRequest(), wasmInit)
-    expect(wasm.compute).toHaveBeenCalledTimes(2)
-    // 1 render + 1 recolorize + 1 render = 3 colorize calls total.
-    expect(wasm.colorize).toHaveBeenCalledTimes(3)
+  it('two renders with different `fractalKind` both recompute (every band, both times)', async () => {
+    const { hooks } = makeHooks()
+    await handleRender(renderRequest({ fractalKind: FractalKind.Mandelbrot }), wasmInit, hooks)
+    await handleRender(renderRequest({ fractalKind: FractalKind.Julia }), wasmInit, hooks)
+    // 2 bands × 2 renders.
+    expect(wasm.compute_band).toHaveBeenCalledTimes(4)
+    expect((wasm.compute_band.mock.calls[0] as unknown[])[2]).toBe(FractalKind.Mandelbrot)
+    expect((wasm.compute_band.mock.calls[2] as unknown[])[2]).toBe(FractalKind.Julia)
   })
 
-  it('two renders with different `fractalKind` trigger two distinct computes', () => {
-    // Locks in that a mode change is NOT a fast-path candidate: a
-    // Mandelbrot iteration buffer cannot be re-coloured as if it were
-    // Julia, so each render must call `compute` again.
-    const first = handleMessage(
-      createWorkerState(),
-      renderRequest({ fractalKind: FractalKind.Mandelbrot }),
-      wasmInit,
-    )
-    handleMessage(first.state, renderRequest({ fractalKind: FractalKind.Julia }), wasmInit)
-    expect(wasm.compute).toHaveBeenCalledTimes(2)
-    expect((wasm.compute.mock.calls[0] as unknown[])[2]).toBe(FractalKind.Mandelbrot)
-    expect((wasm.compute.mock.calls[1] as unknown[])[2]).toBe(FractalKind.Julia)
+  it('two renders with different `field` both recompute', async () => {
+    const { hooks } = makeHooks()
+    await handleRender(renderRequest({ field: Field.EscapeTime }), wasmInit, hooks)
+    await handleRender(renderRequest({ field: Field.DistanceEstimate }), wasmInit, hooks)
+    expect(wasm.compute_band).toHaveBeenCalledTimes(4)
+    expect((wasm.compute_band.mock.calls[0] as unknown[])[5]).toBe(Field.EscapeTime)
+    expect((wasm.compute_band.mock.calls[2] as unknown[])[5]).toBe(Field.DistanceEstimate)
   })
 
-  it('two renders with different `field` trigger two distinct computes', () => {
-    // The Field (ADR-0013) is a compute-class input, not a recolorize-
-    // class one: the iteration buffer holds a different scalar per Field,
-    // so a Field change must recompute. Each render computes regardless,
-    // and the differing `field` argument (arg 5) rides through to WASM.
-    const first = handleMessage(
-      createWorkerState(),
-      renderRequest({ field: Field.EscapeTime }),
-      wasmInit,
-    )
-    handleMessage(first.state, renderRequest({ field: Field.DistanceEstimate }), wasmInit)
-    expect(wasm.compute).toHaveBeenCalledTimes(2)
-    expect((wasm.compute.mock.calls[0] as unknown[])[5]).toBe(Field.EscapeTime)
-    expect((wasm.compute.mock.calls[1] as unknown[])[5]).toBe(Field.DistanceEstimate)
-  })
-
-  it('a Julia render in the Distance Estimate Field forwards both kind and field, then recolorizes off the cache', () => {
-    // The (#62) combination: Distance Estimate selected while in Julia
-    // mode. The render must forward FractalKind.Julia (arg 2) AND
-    // Field.DistanceEstimate (arg 5) together, and a following palette
-    // change must still hit the recolorize fast path (no recompute) —
-    // the Field is fixed across a recolorize.
-    const render = handleMessage(
-      createWorkerState(),
-      renderRequest({ fractalKind: FractalKind.Julia, field: Field.DistanceEstimate }),
-      wasmInit,
-    )
-    const call = wasm.compute.mock.calls[0] as unknown[]
-    expect(call[2]).toBe(FractalKind.Julia)
-    expect(call[5]).toBe(Field.DistanceEstimate)
-
-    handleMessage(render.state, recolorizeRequest({ mode: NormalizationMode.Clamped }), wasmInit)
-    expect(wasm.compute).toHaveBeenCalledTimes(1) // recolorize reused the cache
-    expect(wasm.colorize).toHaveBeenCalledTimes(2)
-    expect((wasm.colorize.mock.calls[1] as unknown[])[3]).toBe(NormalizationMode.Clamped)
-  })
-
-  it('two renders in Julia mode with different (cRe, cIm) trigger two distinct computes', () => {
-    // Changing the Julia parameter is a compute-class change, not a
-    // recolorize-class change — the iteration buffer is a different
-    // function of position when c differs.
-    const first = handleMessage(
-      createWorkerState(),
-      renderRequest({
-        fractalKind: FractalKind.Julia,
-        cRe: -0.7,
-        cIm: 0.27015,
-      }),
-      wasmInit,
-    )
-    handleMessage(
-      first.state,
-      renderRequest({
-        fractalKind: FractalKind.Julia,
-        cRe: -0.123,
-        cIm: 0.745,
-      }),
-      wasmInit,
-    )
-    expect(wasm.compute).toHaveBeenCalledTimes(2)
-    const a = wasm.compute.mock.calls[0] as unknown[]
-    const b = wasm.compute.mock.calls[1] as unknown[]
-    expect([a[3], a[4]]).toEqual([-0.7, 0.27015])
-    expect([b[3], b[4]]).toEqual([-0.123, 0.745])
-  })
-
-  it('the response RGBA is copied out of WASM memory and listed as transferable', () => {
-    // Seed recognisable bytes in WASM memory at the colorize pointer so
-    // we can prove the response holds an independent copy, not a live
-    // view.
+  it('the response RGBA is copied out of WASM memory and listed as transferable', async () => {
+    // Seed recognisable bytes in WASM memory at the colorize pointer so we can
+    // prove the response holds an independent copy, not a live view.
     const seed = new Uint8ClampedArray(wasmInit.memory.buffer, 0x2000, 16)
     seed.fill(0xab)
 
-    const { response, transfer } = handleMessage(createWorkerState(), renderRequest(), wasmInit)
+    const { hooks } = makeHooks()
+    const { response, transfer } = expectRendered(
+      await handleRender(renderRequest(), wasmInit, hooks),
+    )
 
-    // The buffer is transferred (zero-copy on the receive side), not
-    // structured-cloned.
     expect(transfer).toContain(response.rgba.buffer)
-    // The response holds its own backing buffer, distinct from WASM
-    // linear memory — transferring it cannot detach the WASM heap.
     expect(response.rgba.buffer).not.toBe(wasmInit.memory.buffer)
     expect(Array.from(response.rgba)).toEqual(new Array(16).fill(0xab))
 
-    // Mutating WASM memory after the call must not bleed into the
-    // already-copied response.
+    // Mutating WASM memory after the call must not bleed into the copy.
     seed.fill(0x00)
     expect(Array.from(response.rgba)).toEqual(new Array(16).fill(0xab))
   })
