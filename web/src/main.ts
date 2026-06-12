@@ -23,11 +23,12 @@ import {
   type Settings,
 } from './controls.js'
 import { mountDrawer } from './drawer.js'
+import { showFatal } from './fatal.js'
 import { InputController } from './input.js'
 import { createPwaLifecycle } from './pwa-lifecycle.js'
 import { mountPwaUi } from './pwa-ui.js'
 import { computeBufferDims } from './render-buffer.js'
-import { discardInFlight, recolorize, render } from './render-client.js'
+import { discardInFlight, recolorize, render, setFatalHandler } from './render-client.js'
 
 // PWA install + update lifecycle (Slice 8B). The controller (a deep, tested
 // state machine) is fed the real platform adapters here: the SW registrar is
@@ -116,12 +117,35 @@ if (!(controlsToggle instanceof HTMLButtonElement)) {
 // fractal closes an open drawer (a pan-drag or wheel-zoom leaves it open).
 mountDrawer(controlsToggle, controlsForm, canvas)
 
+// Route unrecoverable renderer failures to a legible full-screen surface
+// instead of a silent black canvas (B4 / U2). Registering here also arms the
+// render-client's boot watchdog: if the worker never reaches `ready` (a
+// stripped cross-origin-isolation header, a WASM LinkError), the same panel
+// appears after a few seconds rather than the page hanging forever.
+setFatalHandler((message) => {
+  showFatal('Renderer unavailable', message)
+})
+
 // Initialise the WASM module on the main thread so the synchronous
 // `Viewport` class (used by the input controller and the dispatcher
 // below) is callable. The render worker bootstraps its own separate
 // WASM instance; the main thread no longer needs the `InitOutput`
 // handle now that pixel work has moved off-thread.
-await init()
+//
+// A failure here (cross-origin isolation lost, instantiation error) leaves
+// the page with no usable `Viewport`, so surface it and stop boot rather
+// than letting later code throw cryptically against a dead module.
+try {
+  await init()
+} catch (error) {
+  const detail = error instanceof Error ? error.message : String(error)
+  showFatal(
+    'Renderer unavailable',
+    `The WebAssembly module failed to load: ${detail}. This browser or server ` +
+      'configuration may not support the renderer (it requires SharedArrayBuffer).',
+  )
+  throw error
+}
 
 // The viewport's logical dimensions: the canvas's CSS box, rounded and
 // floored to ≥ 1 so a pre-layout or `display:none` canvas can't feed a

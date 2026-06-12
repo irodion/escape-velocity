@@ -19,7 +19,7 @@
  */
 import init, { initThreadPool } from '../../wasm/fractal_wasm.js'
 import { createWorkerState, handleMessage, type WorkerState } from './handler.js'
-import type { Ready, RecolorizeRequest, RenderRequest } from './protocol.js'
+import type { Ready, RecolorizeRequest, RenderError, RenderRequest } from './protocol.js'
 
 // `self` is the DedicatedWorkerGlobalScope inside a module worker.
 const ctx = self as unknown as DedicatedWorkerGlobalScope
@@ -54,7 +54,22 @@ const ready: Ready = { kind: 'ready' }
 ctx.postMessage(ready)
 
 ctx.onmessage = (event: MessageEvent<RenderRequest | RecolorizeRequest>): void => {
-  const result = handleMessage(state, event.data, wasm)
-  state = result.state
-  ctx.postMessage(result.response, result.transfer)
+  // `handleMessage` can throw — the `recolorize: no cached buffer` guard, or
+  // a `JsError` from the WASM `Viewport` / `compute` boundary validation.
+  // Catch it and post an `error` arm (echoing the request's epoch) instead of
+  // letting the throw post nothing: a silent no-response wedges the client's
+  // single-slot pipeline permanently (see `RenderError`). The worker stays
+  // alive and ready for the next request; only the failed frame is lost.
+  try {
+    const result = handleMessage(state, event.data, wasm)
+    state = result.state
+    ctx.postMessage(result.response, result.transfer)
+  } catch (err) {
+    const error: RenderError = {
+      kind: 'error',
+      epoch: event.data.epoch,
+      message: err instanceof Error ? err.message : String(err),
+    }
+    ctx.postMessage(error)
+  }
 }
