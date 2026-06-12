@@ -428,29 +428,33 @@ describe('InputController', () => {
 
     // Pan starts before the Settle fires: no render is issued here (firing the
     // zoom's Settle would paint an intermediate frame mid-drag); any in-flight
-    // render is discarded so it can't clobber the pan snapshot.
+    // render is discarded so it can't clobber the pan snapshot. The wheel
+    // notch already discarded once (B2), so the mousedown brings the total to
+    // two.
     canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
     expect(onChange).not.toHaveBeenCalled()
-    expect(onInvalidate).toHaveBeenCalledTimes(1)
+    expect(onInvalidate).toHaveBeenCalledTimes(2)
     // The cancelled Settle can't fire later either.
     vi.advanceTimersByTime(WHEEL_SETTLE_MS)
     expect(onChange).not.toHaveBeenCalled()
 
     // Mouseup issues the single render: the zoomed viewport, panned. The pan
-    // operates on the accumulated zoom via the start viewport.
+    // operates on the accumulated zoom carried in `currentViewport`.
     document.dispatchEvent(new MouseEvent('mouseup', { clientX: 130, clientY: 70, bubbles: true }))
     expect(zoomed.pan_by_pixels).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledWith(panned)
   })
 
-  it('discards in-flight renders on notches while a Preview is active, but not the first', () => {
+  it('discards in-flight renders on every notch, the first included (B2)', () => {
     // A paint landing mid-scrub clears the Preview transform and snaps the
     // image to an older viewport (e.g. a premature Settle's render returning
-    // after the scrub resumes). The controller signals the render pipeline
-    // to drop any in-flight render whenever a Preview transform is already
-    // applied. The first notch (transform still cleared) leaves the base
-    // frame alone.
+    // after the scrub resumes). The controller signals the render pipeline to
+    // drop any in-flight render on every notch. The first notch must discard
+    // too: a render in flight when the scrub begins (a pan commit, resize, or
+    // slider at deep zoom) would otherwise paint after notch 1 applied its
+    // transform, clear it, and desync the rest of the scrub. Gating the
+    // discard on an already-applied transform left that first notch exposed.
     const onInvalidate = vi.fn()
     const z1 = makeZoomResult(0.8)
     const z2 = makeZoomResult(0.64)
@@ -469,10 +473,10 @@ describe('InputController', () => {
         }),
       )
     }
-    notch() // transform was '' → base frame protected
-    expect(onInvalidate).not.toHaveBeenCalled()
-    notch() // Preview now active → discard any in-flight render
+    notch() // first notch, transform still '' → must still discard
     expect(onInvalidate).toHaveBeenCalledTimes(1)
+    notch() // Preview now active → discard again
+    expect(onInvalidate).toHaveBeenCalledTimes(2)
   })
 
   it('clears the zoom Preview transform when a pan starts (pan reads an untransformed box)', () => {

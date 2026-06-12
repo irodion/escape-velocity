@@ -189,6 +189,31 @@ describe('render-client', () => {
     expect(ctx.canvas.style.transform).toBe('')
   })
 
+  it('keeps the Preview transform on a recolorize paint (B2: palette change mid-scrub)', async () => {
+    const { client, worker } = await loadClient()
+    const ctx = makeCtx()
+    deliver(worker, readyMsg())
+
+    // A render completes first so the worker holds a cached buffer — the
+    // precondition for a standalone recolorize to dispatch at all.
+    doRender(client, ctx)
+    deliver(worker, response(1))
+
+    // A wheel-zoom Preview transform is on the canvas (the input layer set
+    // it). A palette change within the settle window issues a recolorize,
+    // which re-tints the cached pre-scrub buffer without changing geometry.
+    ctx.canvas.style.transform = 'translate(40px, 30px) scale(0.8)'
+    client.recolorize(ctx, PALETTE_MAGMA, MODE_HISTOGRAM)
+    deliver(worker, response(2))
+
+    // The recolorize painted (new colours) but must NOT clear the transform:
+    // the Preview scale still applies to the same image, so clearing it would
+    // snap the frame to identity at the wrong scale until the Settle render
+    // lands. Only a render ends the scrub.
+    expect(ctx.putImageData).toHaveBeenCalledTimes(2)
+    expect(ctx.canvas.style.transform).toBe('translate(40px, 30px) scale(0.8)')
+  })
+
   it('drops a stale response (epoch behind the latest issued)', async () => {
     const { client, worker } = await loadClient()
     const ctx = makeCtx()

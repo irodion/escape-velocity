@@ -66,6 +66,11 @@ type ClientRequest = RenderRequest | RecolorizeRequest
 
 let latestEpoch = 0
 let inFlight = false
+// The kind of the request currently on the worker, captured at dispatch.
+// `paint` reads it to decide whether the response may clear the Preview
+// transform: only a `render` carries fresh geometry that ends a scrub; a
+// `recolorize` re-tints the cached buffer without moving it (see `paint`).
+let inFlightKind: ClientRequest['kind'] | null = null
 let pending: ClientRequest | null = null
 let ready = false
 // The canvas context to paint the next fresh response onto. Only the
@@ -93,7 +98,7 @@ worker.onmessage = (event: MessageEvent<RenderResponse | Ready>): void => {
   // the user wants; then dispatch whatever queued up while it ran.
   inFlight = false
   if (msg.epoch === latestEpoch && targetCtx !== null) {
-    paint(targetCtx, msg)
+    paint(targetCtx, msg, inFlightKind)
   }
   flush()
 }
@@ -111,6 +116,7 @@ function flush(): void {
   inFlight = true
   const req = pending
   pending = null
+  inFlightKind = req.kind
   worker.postMessage(req)
 }
 
@@ -157,7 +163,11 @@ export function discardInFlight(): void {
   pending = null
 }
 
-function paint(ctx: CanvasRenderingContext2D, response: RenderResponse): void {
+function paint(
+  ctx: CanvasRenderingContext2D,
+  response: RenderResponse,
+  requestKind: ClientRequest['kind'] | null,
+): void {
   // Size the canvas backing store to the frame being painted, here at
   // paint time rather than at dispatch. The buffer dimensions can change
   // between requests (a window resize or a render-scale change), and
@@ -174,13 +184,19 @@ function paint(ctx: CanvasRenderingContext2D, response: RenderResponse): void {
   if (canvas.height !== response.height) {
     canvas.height = response.height
   }
-  // Clear any wheel-zoom Preview transform before painting (ADR-0012).
-  // Every real frame is correct at identity transform — Settle, recolorize,
-  // resize, boot alike — so clearing it unconditionally here, in the same
-  // tick as `putImageData`, makes the Preview→true-frame swap atomic (no
-  // snap-back) without any callback back to the input layer. The guard
-  // avoids a needless style write on the common identity-already case.
-  if (canvas.style.transform !== '') {
+  // Clear any wheel-zoom Preview transform before painting (ADR-0012), but
+  // only for a `render`. A render carries fresh geometry — the Settle frame,
+  // a pan/resize commit, boot — so clearing it in the same tick as
+  // `putImageData` makes the Preview→true-frame swap atomic (no snap-back)
+  // without any callback back to the input layer. A `recolorize` is
+  // different: it re-tints the *cached* (pre-scrub) buffer without moving it,
+  // so if a palette change lands mid-scrub (within the settle window) the
+  // Preview scale still applies to the same image — clearing the transform
+  // would snap the frame to identity at the wrong scale until the Settle
+  // render lands. So a recolorize leaves the transform for the render that
+  // ends the scrub. Outside a scrub the transform is already '' and the guard
+  // skips regardless, so this only ever matters while a Preview is live.
+  if (requestKind === 'render' && canvas.style.transform !== '') {
     canvas.style.transform = ''
   }
   const image = new ImageData(response.rgba, response.width, response.height)

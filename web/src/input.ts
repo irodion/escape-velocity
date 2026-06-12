@@ -195,17 +195,21 @@ export class InputController {
   private readonly handleWheel = (event: WheelEvent): void => {
     event.preventDefault()
     // A Preview transform is already applied (a scrub is visually active)
-    // exactly when the canvas transform is non-empty. In that state a paint
-    // would clear the transform mid-gesture and snap the image to an older
-    // viewport — most visibly when a premature Settle's render returns after
-    // the scrub resumes. Discard any in-flight render so it can't paint
-    // stale pixels under us; the final Settle issues the authoritative one
-    // (ADR-0012). On the first notch of a scrub the transform is still
-    // cleared, so the base frame is left to paint normally.
+    // exactly when the canvas transform is non-empty. This gates only whether
+    // the Preview re-bases below — it no longer gates the in-flight discard.
     const previewActive = this.canvas.style.transform !== ''
-    if (previewActive) {
-      this.onInvalidate()
-    }
+    // Discard any in-flight render on *every* notch, the first included. A
+    // render already in flight when the scrub begins — a pan commit, a resize
+    // refit, or a slider change, all slowest exactly at deep zoom / high
+    // iterations — would otherwise paint mid-gesture, and `render-client`'s
+    // `paint` clears the Preview transform in the same tick: the image snaps
+    // back to that older viewport, and the next notch (seeing no transform)
+    // re-bases the Preview a notch behind, so the rest of the scrub previews
+    // at the wrong scale until a second jump at Settle. Gating this on
+    // `previewActive` left the *first* notch exposed — nothing guarantees the
+    // base frame painted before it. The Settle re-renders the accumulated
+    // viewport regardless, so dropping the base frame costs nothing (ADR-0012).
+    this.onInvalidate()
     // Begin a fresh Preview when no scrub is active, or when a paint has
     // cleared the transform (the buffer now matches `currentViewport`, so
     // the Preview re-bases to identity). Mid-scrub, continue the existing
