@@ -157,6 +157,67 @@ describe('Controls', () => {
     document.body.removeChild(form)
   })
 
+  describe('applySettings', () => {
+    // applySettings mirrors an external view (a pasted permalink applied via
+    // `hashchange`, O1 #91) into the form, and must NOT re-enter `onChange`.
+    const readout = (f: HTMLFormElement): string =>
+      f.querySelector('output[data-for="max-iter"]')?.textContent ?? ''
+
+    it('pushes every control to the snapshot without emitting', () => {
+      const controls = new Controls(form, INITIAL, onChange)
+      onChange.mockClear()
+
+      controls.applySettings({
+        maxIter: 1024,
+        renderScale: 2,
+        palette: 'magma',
+        normalisation: 'histogram',
+        field: 'escape-time',
+        mode: 'julia',
+        cRe: -0.512,
+        cIm: 0.61,
+      })
+
+      expect(onChange).not.toHaveBeenCalled()
+      expect(inputByName(form, 'max-iter').value).toBe(String(iterIndex(1024)))
+      expect(readout(form)).toBe('1024')
+      expect(selectByName(form, 'render-scale').value).toBe('2')
+      expect(selectByName(form, 'palette').value).toBe('magma')
+      expect(selectByName(form, 'normalisation').value).toBe('histogram')
+      expect(selectByName(form, 'mode').value).toBe('julia')
+      // Julia mode re-enables the c inputs and writes the new c.
+      expect(inputByName(form, 'c-re').disabled).toBe(false)
+      expect(inputByName(form, 'c-im').disabled).toBe(false)
+      expect(inputByName(form, 'c-re').valueAsNumber).toBeCloseTo(-0.512)
+      expect(inputByName(form, 'c-im').valueAsNumber).toBeCloseTo(0.61)
+    })
+
+    it('leaves a subsequent user edit emitting the applied state', () => {
+      const controls = new Controls(form, INITIAL, onChange)
+      controls.applySettings({ ...INITIAL, palette: 'magma', mode: 'julia', cRe: 0.1, cIm: 0.2 })
+      onChange.mockClear()
+
+      // A later real change must emit a snapshot built on the applied values,
+      // not the originals (proves the form — the source of truth — was updated).
+      selectByName(form, 'palette').value = 'ocean'
+      selectByName(form, 'palette').dispatchEvent(new Event('change', { bubbles: true }))
+
+      expect(onChange).toHaveBeenCalledTimes(1)
+      expect(onChange).toHaveBeenCalledWith(
+        expect.objectContaining({ palette: 'ocean', mode: 'julia', cRe: 0.1, cIm: 0.2 }),
+      )
+    })
+
+    it('ignores a maxIter that is not a slider stop rather than throwing', () => {
+      const controls = new Controls(form, INITIAL, onChange)
+      const before = inputByName(form, 'max-iter').value
+      // External state must never crash the form; an off-stop count is dropped
+      // (the slider keeps its position) — main.ts snaps before calling this.
+      expect(() => controls.applySettings({ ...INITIAL, maxIter: 999 })).not.toThrow()
+      expect(inputByName(form, 'max-iter').value).toBe(before)
+    })
+  })
+
   it('throws when initial.maxIter is not one of the slider stops', () => {
     // Programmer error: caller's INITIAL_MAX_ITER constant drifted from
     // MAX_ITER_STOPS. Without the construction-time guard, the index would

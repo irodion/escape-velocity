@@ -104,6 +104,23 @@ export const MAX_ITER_STOPS: readonly number[] = [
   1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192,
 ]
 
+/**
+ * Snap an arbitrary iteration count to the nearest `MAX_ITER_STOPS` member.
+ *
+ * The `Controls` constructor *throws* on a `maxIter` that isn't exactly a stop
+ * (the slider is index-addressed). That fail-fast is right for an in-code
+ * programmer constant, but fatal for *external* input — a persisted or shared
+ * URL (O1, #91) can carry a stale `1000` from before the slider existed, or a
+ * value from a future stop table. Hydration runs the foreign number through
+ * here first so the form always boots on a real stop instead of killing every
+ * control. Lives beside the table it depends on so the two can't drift.
+ */
+export function nearestMaxIterStop(value: number): number {
+  return MAX_ITER_STOPS.reduce((best, stop) =>
+    Math.abs(stop - value) < Math.abs(best - value) ? stop : best,
+  )
+}
+
 export interface Settings {
   readonly maxIter: number
   /**
@@ -122,8 +139,16 @@ export interface Settings {
 }
 
 export class Controls {
+  private readonly maxIterRange: HTMLInputElement
+  private readonly maxIterReadout: HTMLOutputElement
+  private readonly renderScaleSelect: HTMLSelectElement
+  private readonly paletteSelect: HTMLSelectElement
+  private readonly normalisationSelect: HTMLSelectElement
+  private readonly fieldSelect: HTMLSelectElement
+  private readonly modeSelect: HTMLSelectElement
   private readonly cReInput: HTMLInputElement
   private readonly cImInput: HTMLInputElement
+  private readonly onChange: (settings: Settings) => void
 
   constructor(form: HTMLFormElement, initial: Settings, onChange: (settings: Settings) => void) {
     const maxIterRange = form.elements.namedItem('max-iter')
@@ -218,8 +243,16 @@ export class Controls {
       throw new Error(`Controls: initial.cIm=${initial.cIm} is not a finite number`)
     }
 
+    this.maxIterRange = maxIterRange
+    this.maxIterReadout = maxIterReadout
+    this.renderScaleSelect = renderScaleSelect
+    this.paletteSelect = paletteSelect
+    this.normalisationSelect = normalisationSelect
+    this.fieldSelect = fieldSelect
+    this.modeSelect = modeSelect
     this.cReInput = cReInput
     this.cImInput = cImInput
+    this.onChange = onChange
     // The c inputs are visual-state only — they always hold their last
     // committed value even in Mandelbrot mode (which simply ignores
     // them) so a Julia → Mandelbrot → Julia round-trip preserves the
@@ -227,64 +260,16 @@ export class Controls {
     // dimness via the CSS rule in index.html.
     this.setCInputsEnabled(initial.mode === 'julia')
 
-    // Enforce the (Field × Normalisation mode) validity rule (ADR-0013):
-    // hide the modes that don't apply to the active Field, and if the
-    // current mode is invalid for it, substitute the Field's default. The
-    // pure policy lives in `field-modes.ts`; this is its DOM enforcement.
-    // Run at construction (so the initial option list matches the initial
-    // Field) and on every Field change, before the snapshot is emitted.
-    const applyFieldValidity = (): void => {
-      const field = fieldSelect.value as FieldName
-      for (const option of Array.from(normalisationSelect.options)) {
-        const valid = isModeValidForField(field, option.value as NormalisationName)
-        // `hidden` keeps it out of the dropdown; `disabled` stops keyboard
-        // selection from reaching it — belt and braces.
-        option.hidden = !valid
-        option.disabled = !valid
-      }
-      if (!isModeValidForField(field, normalisationSelect.value as NormalisationName)) {
-        normalisationSelect.value = defaultModeForField(field)
-      }
-    }
-    applyFieldValidity()
+    // Enforce the initial (Field × Normalisation) validity (ADR-0013) before
+    // any snapshot is emitted; the method below is re-run on every Field
+    // change and on `applySettings`.
+    this.applyFieldValidity()
 
     // The select's value is constrained to its option set at runtime
     // — the browser only sets it to a listed <option value> on
     // user interaction. Combined with the construction-time guard
     // above, every parser/cast below sees a well-formed string.
-
-    // Translate the slider index back to the iteration count it stands for.
-    // The construction guard above pinned the initial index in range, and a
-    // range input clamps user interaction to [min, max], so the lookup is
-    // always defined.
-    const maxIterFromSlider = (): number => MAX_ITER_STOPS[Number(maxIterRange.value)]
-    // Mirror the live slider value into the readout text — on `input` (every
-    // step of a drag) for instant feedback, separate from the `change`-gated
-    // recompute below.
-    const syncMaxIterReadout = (): void => {
-      maxIterReadout.textContent = String(maxIterFromSlider())
-    }
-    syncMaxIterReadout()
-
-    const emit = (): void => {
-      const maxIter = maxIterFromSlider()
-      const renderScale = Number(renderScaleSelect.value)
-      onChange({
-        maxIter,
-        renderScale,
-        palette: paletteSelect.value as PaletteName,
-        normalisation: normalisationSelect.value as NormalisationName,
-        field: fieldSelect.value as FieldName,
-        mode: modeSelect.value as FractalMode,
-        // valueAsNumber returns NaN for mid-edit states ("", "-",
-        // "1.5e"). The dispatcher in main.ts substitutes a finite
-        // fallback and calls `setCValues` to back-write the
-        // substitution into the DOM so the visible field always
-        // matches the rendered parameter.
-        cRe: cReInput.valueAsNumber,
-        cIm: cImInput.valueAsNumber,
-      })
-    }
+    this.syncMaxIterReadout()
 
     // The recompute is `change`-gated everywhere — not `input`. `<select>`
     // fires `change` on commit (mouse: option click; keyboard: Enter on a
@@ -294,17 +279,17 @@ export class Controls {
     // one control that also listens to `input` — but only to stream its
     // readout text during the drag, never to recompute; its recompute still
     // waits for `change` (drag release, or a keyboard step).
-    maxIterRange.addEventListener('input', syncMaxIterReadout)
-    maxIterRange.addEventListener('change', emit)
-    renderScaleSelect.addEventListener('change', emit)
-    paletteSelect.addEventListener('change', emit)
-    normalisationSelect.addEventListener('change', emit)
+    maxIterRange.addEventListener('input', () => this.syncMaxIterReadout())
+    maxIterRange.addEventListener('change', () => this.emit())
+    renderScaleSelect.addEventListener('change', () => this.emit())
+    paletteSelect.addEventListener('change', () => this.emit())
+    normalisationSelect.addEventListener('change', () => this.emit())
     fieldSelect.addEventListener('change', () => {
       // Re-derive the valid Normalisation options (and substitute the
       // default if the current mode is now invalid) before emitting, so
       // the snapshot carries a coherent (field, normalisation) pair.
-      applyFieldValidity()
-      emit()
+      this.applyFieldValidity()
+      this.emit()
     })
     modeSelect.addEventListener('change', () => {
       // Re-derive the enabled state from the select's live value
@@ -312,15 +297,99 @@ export class Controls {
       // source of truth, so even a programmatic value change can
       // synchronise the inputs by dispatching `change`.
       this.setCInputsEnabled(modeSelect.value === 'julia')
-      emit()
+      this.emit()
     })
-    cReInput.addEventListener('change', emit)
-    cImInput.addEventListener('change', emit)
+    cReInput.addEventListener('change', () => this.emit())
+    cImInput.addEventListener('change', () => this.emit())
+  }
+
+  // Translate the slider index back to the iteration count it stands for.
+  // The construction guard pinned the initial index in range, and a range
+  // input clamps user interaction to [min, max], so the lookup is always
+  // defined.
+  private maxIterFromSlider(): number {
+    return MAX_ITER_STOPS[Number(this.maxIterRange.value)]
+  }
+
+  // Mirror the live slider value into the readout text — on `input` (every
+  // step of a drag) for instant feedback, separate from the `change`-gated
+  // recompute.
+  private syncMaxIterReadout(): void {
+    this.maxIterReadout.textContent = String(this.maxIterFromSlider())
+  }
+
+  // Enforce the (Field × Normalisation mode) validity rule (ADR-0013): hide
+  // the modes that don't apply to the active Field, and if the current mode is
+  // invalid for it, substitute the Field's default. The pure policy lives in
+  // `field-modes.ts`; this is its DOM enforcement.
+  private applyFieldValidity(): void {
+    const field = this.fieldSelect.value as FieldName
+    for (const option of Array.from(this.normalisationSelect.options)) {
+      const valid = isModeValidForField(field, option.value as NormalisationName)
+      // `hidden` keeps it out of the dropdown; `disabled` stops keyboard
+      // selection from reaching it — belt and braces.
+      option.hidden = !valid
+      option.disabled = !valid
+    }
+    if (!isModeValidForField(field, this.normalisationSelect.value as NormalisationName)) {
+      this.normalisationSelect.value = defaultModeForField(field)
+    }
+  }
+
+  private emit(): void {
+    this.onChange({
+      maxIter: this.maxIterFromSlider(),
+      renderScale: Number(this.renderScaleSelect.value),
+      palette: this.paletteSelect.value as PaletteName,
+      normalisation: this.normalisationSelect.value as NormalisationName,
+      field: this.fieldSelect.value as FieldName,
+      mode: this.modeSelect.value as FractalMode,
+      // valueAsNumber returns NaN for mid-edit states ("", "-",
+      // "1.5e"). The dispatcher in main.ts substitutes a finite
+      // fallback and calls `setCValues` to back-write the
+      // substitution into the DOM so the visible field always
+      // matches the rendered parameter.
+      cRe: this.cReInput.valueAsNumber,
+      cIm: this.cImInput.valueAsNumber,
+    })
   }
 
   private setCInputsEnabled(enabled: boolean): void {
     this.cReInput.disabled = !enabled
     this.cImInput.disabled = !enabled
+  }
+
+  /**
+   * Push a full settings snapshot into the form **without emitting** — used by
+   * `main.ts` when an external view write (a pasted/edited permalink applied
+   * live via `hashchange`, O1 #91) must be mirrored into the controls so the
+   * form and the rendered frame never disagree. Setting `.value` /
+   * `valueAsNumber` / `textContent` programmatically fires no `change`, so
+   * this is a one-way sync that never re-enters the dispatcher (same contract
+   * as `setCValues`).
+   *
+   * The caller guarantees the snapshot is form-valid: `maxIter` pre-snapped to
+   * a stop (`nearestMaxIterStop`) and the (field, normalisation) pair coherent.
+   * A `maxIter` that still isn't a stop is ignored (the slider holds its prior
+   * position) rather than throwing — external state must never crash the form.
+   */
+  public applySettings(settings: Settings): void {
+    const index = MAX_ITER_STOPS.indexOf(settings.maxIter)
+    if (index !== -1) {
+      this.maxIterRange.value = String(index)
+    }
+    this.syncMaxIterReadout()
+    this.renderScaleSelect.value = String(settings.renderScale)
+    this.paletteSelect.value = settings.palette
+    this.fieldSelect.value = settings.field
+    // Re-derive valid Normalisation options for the new Field first, then set
+    // the (coherent) normalisation explicitly so it overrides any default the
+    // validity pass would substitute.
+    this.applyFieldValidity()
+    this.normalisationSelect.value = settings.normalisation
+    this.modeSelect.value = settings.mode
+    this.setCInputsEnabled(settings.mode === 'julia')
+    this.setCValues(settings.cRe, settings.cIm)
   }
 
   /**

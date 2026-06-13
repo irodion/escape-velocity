@@ -67,6 +67,29 @@ describe('mountDrawer', () => {
     expect(document.activeElement).toBe(firstSelect)
   })
 
+  it('autofocuses the first control row, skipping a leading readout input', () => {
+    // Mirrors index.html: the coordinate readout (with an editable, often
+    // `disabled` `c` input) precedes the first `.field` control row. Open must
+    // land focus in a real control, not the disabled readout input (which
+    // would silently no-op and strand the keyboard user outside the drawer).
+    document.body.innerHTML = `
+      <button id="controls-toggle" type="button" aria-expanded="true">☰</button>
+      <form id="controls">
+        <section class="coords">
+          <input name="c-re" type="number" disabled />
+        </section>
+        <label class="field"><input type="range" name="max-iter" /></label>
+      </form>
+      <canvas id="fractal"></canvas>
+    `
+    const toggle = document.getElementById('controls-toggle') as HTMLButtonElement
+    const drawer = document.getElementById('controls') as HTMLElement
+    const surface = document.getElementById('fractal') as HTMLCanvasElement
+    mountDrawer(toggle, drawer, surface)
+    toggle.click()
+    expect(document.activeElement).toBe(drawer.querySelector('input[type="range"]'))
+  })
+
   it('toggles closed on a second click and returns focus to the toggle', () => {
     const { toggle, drawer } = setup()
     toggle.click()

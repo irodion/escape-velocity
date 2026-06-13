@@ -19,11 +19,13 @@ import {
   type FieldName,
   type FractalMode,
   type NormalisationName,
+  nearestMaxIterStop,
   type PaletteName,
   type Settings,
 } from './controls.js'
 import { mountDrawer } from './drawer.js'
 import { showFatal } from './fatal.js'
+import { defaultModeForField, isModeValidForField } from './field-modes.js'
 import { InputController } from './input.js'
 import { mountProgress } from './progress.js'
 import { createPwaLifecycle } from './pwa-lifecycle.js'
@@ -36,6 +38,14 @@ import {
   setFatalHandler,
   setProgressReporter,
 } from './render-client.js'
+import {
+  formatAxis,
+  formatCoords,
+  formatZoom,
+  parse,
+  serialize,
+  type ViewState,
+} from './view-state.js'
 import { createViewportStore } from './viewport-store.js'
 
 // PWA install + update lifecycle (Slice 8B). The controller (a deep, tested
@@ -117,6 +127,21 @@ const controlsToggle = document.getElementById('controls-toggle')
 if (!(controlsToggle instanceof HTMLButtonElement)) {
   throw new Error('button#controls-toggle not found in index.html')
 }
+// The off-screen aria-live mirror (one string for screen readers) and the
+// three visible value cells of the coordinate instrument. main.ts owns the
+// view centre (re/im/zoom); the editable `c` cells are driven by Controls.
+const coordsReadout = document.getElementById('coords')
+if (!(coordsReadout instanceof HTMLElement)) {
+  throw new Error('#coords not found in index.html')
+}
+const coordCell = (axis: 're' | 'im' | 'zoom'): HTMLElement => {
+  const el = document.querySelector(`.coord__val[data-coord="${axis}"]`)
+  if (!(el instanceof HTMLElement)) {
+    throw new Error(`.coord__val[data-coord="${axis}"] not found in index.html`)
+  }
+  return el
+}
+const coordCells = { re: coordCell('re'), im: coordCell('im'), zoom: coordCell('zoom') }
 
 // Collapsible drawer (Slice 4): the controls panel is closed by default and
 // the ☰ button toggles it. Fixed-positioned (index.html), so this is purely
@@ -185,18 +210,60 @@ const measureLogicalSize = (): { width: number; height: number } => {
 // sync ritual into one path, so the next state writer (URL hydration,
 // bookmarks, a reset-view button) is a single `store.set` with no lockstep to
 // remember.
-const boot = measureLogicalSize()
-const store = createViewportStore(new Viewport(CENTER_RE, CENTER_IM, ZOOM, boot.width, boot.height))
-let current: Settings = {
+// Resolve a URL hash into a coherent view (O1, #91): a shared / bookmarked
+// link — or a PWA relaunch that restores the last URL — lands on that exact
+// frame instead of always opening on the hardcoded seahorse. `parse` is
+// tolerant, so any field the hash omits or mangles falls back to the constant
+// default below and a junk hash degrades to the default view rather than
+// failing. Two values get a domain repair the codec can't own: `maxIter` is
+// snapped to a real slider stop (a stale count would otherwise throw in the
+// `Controls` constructor), and an incoherent (field, normalisation) pair is
+// replaced with the field's default — the same rule `Controls` enforces — so
+// `current`, the form, and the rendered frame always agree. `re`/`im` are
+// finite and `zoom` is finite & > 0 by `parse`'s contract, exactly what the
+// `Viewport` constructor validates, so it never throws on resolved input.
+//
+// Render scale is NOT carried in the hash (it's a device quality knob, not
+// part of the shared view), so the caller passes the scale to preserve: the
+// boot default at startup, the live value when re-resolving on a `hashchange`.
+const DEFAULT_VIEW: ViewState = {
+  re: CENTER_RE,
+  im: CENTER_IM,
+  zoom: ZOOM,
   maxIter: INITIAL_MAX_ITER,
-  renderScale: INITIAL_RENDER_SCALE,
   palette: INITIAL_PALETTE,
   normalisation: INITIAL_NORMALISATION,
-  field: INITIAL_FIELD,
   mode: INITIAL_MODE,
+  field: INITIAL_FIELD,
   cRe: INITIAL_C_RE,
   cIm: INITIAL_C_IM,
 }
+const resolveView = (
+  hash: string,
+  renderScale: number,
+): { view: ViewState; settings: Settings } => {
+  const view: ViewState = { ...DEFAULT_VIEW, ...(parse(hash) ?? {}) }
+  const settings: Settings = {
+    maxIter: nearestMaxIterStop(view.maxIter),
+    renderScale,
+    palette: view.palette,
+    normalisation: isModeValidForField(view.field, view.normalisation)
+      ? view.normalisation
+      : defaultModeForField(view.field),
+    field: view.field,
+    mode: view.mode,
+    cRe: view.cRe,
+    cIm: view.cIm,
+  }
+  return { view, settings }
+}
+
+const booted = resolveView(window.location.hash, INITIAL_RENDER_SCALE)
+const boot = measureLogicalSize()
+const store = createViewportStore(
+  new Viewport(booted.view.re, booted.view.im, booted.view.zoom, boot.width, boot.height),
+)
+let current: Settings = booted.settings
 
 // Tune the console's accent to the active palette so the controls read as an
 // instrument keyed to what it's rendering (the `--accent` CSS custom property
@@ -339,12 +406,87 @@ const rerender = (): void => {
 applyAccent(current.palette)
 rerender()
 
+// View persistence + coordinate readout (O1, #91). On every *commit* — a
+// settled pan/zoom, a refit, a mode-reset, or a committed Controls change — the
+// readout updates immediately and the URL hash is rewritten (debounced) so the
+// view is shareable, bookmarkable, and restored on reload / PWA relaunch. This
+// only ever fires at a Settle, never during a Preview: the store is written
+// only when a gesture commits (ADR-0012) and the form is `change`-gated, so
+// there is no mid-gesture writer to guard against.
+const URL_WRITE_DEBOUNCE_MS = 400
+let urlWriteTimer: ReturnType<typeof setTimeout> | undefined
+
+// Assemble the shareable tuple from the two live sources of view state: the
+// framing from the store, the colouring/compute settings from `current`.
+const currentViewState = (): ViewState => {
+  const vp = store.get()
+  return {
+    re: vp.center_re(),
+    im: vp.center_im(),
+    zoom: vp.zoom(),
+    maxIter: current.maxIter,
+    palette: current.palette,
+    normalisation: current.normalisation,
+    mode: current.mode,
+    field: current.field,
+    cRe: current.cRe,
+    cIm: current.cIm,
+  }
+}
+
+const renderCoords = (state: ViewState): void => {
+  coordCells.re.textContent = formatAxis(state.re)
+  coordCells.im.textContent = formatAxis(state.im)
+  coordCells.zoom.textContent = formatZoom(state.zoom)
+  // The off-screen mirror announces all three axes as a single utterance.
+  coordsReadout.textContent = formatCoords(state.re, state.im, state.zoom)
+}
+
+// Update the readout synchronously (cheap, and the user wants instant feedback)
+// and, when `persist`, schedule the history write. The write is debounced and
+// skipped when the hash is unchanged, so a burst of commits collapses to at
+// most one `replaceState` (which browsers rate-limit) shortly after the view
+// settles.
+//
+// `persist` is false for a `refit`: a window/canvas resize changes only the
+// buffer's width/height, which are deliberately excluded from `ViewState`
+// (they describe the device, not the view — see view-state.ts), so the
+// serialized framing is identical before and after. Writing anyway would dirty
+// a first-time visitor's clean URL on a mere resize — turning `#`-less into a
+// full permalink without them ever moving the view. We still re-render the
+// readout (harmless; the centre/zoom are unchanged) but leave the URL alone.
+const syncView = (persist = true): void => {
+  const state = currentViewState()
+  renderCoords(state)
+  if (!persist) return
+  const hash = serialize(state)
+  if (urlWriteTimer !== undefined) {
+    clearTimeout(urlWriteTimer)
+  }
+  urlWriteTimer = setTimeout(() => {
+    urlWriteTimer = undefined
+    if (window.location.hash !== hash) {
+      window.history.replaceState(null, '', hash)
+    }
+  }, URL_WRITE_DEBOUNCE_MS)
+}
+
+// Show the boot coordinates immediately, but do NOT write the URL yet: a
+// first-time visitor's clean URL stays clean until they move the view, and a
+// visitor who arrived via a shared hash keeps that exact hash untouched.
+renderCoords(currentViewState())
+
 // Every viewport write — a committed pan/zoom, a refit, a mode-reset — paints
-// the new frame. A pan/zoom invalidates the iteration buffer by definition, so
-// this routes through `render` (which refreshes the cache too), never
-// `recolorize`. Subscribing here is the *only* thing that turns a `store.set`
-// into pixels, so a future viewport writer needs no render call of its own.
-store.subscribe(() => rerender())
+// the new frame and re-syncs the readout + URL. A pan/zoom invalidates the
+// iteration buffer by definition, so this routes through `render` (which
+// refreshes the cache too), never `recolorize`. Subscribing here is the *only*
+// thing that turns a `store.set` into pixels, so a future viewport writer needs
+// no render call of its own. A `refit` (resize) re-renders without persisting
+// to the URL — it never changes the serialized view (see `syncView`).
+store.subscribe((_viewport, source) => {
+  rerender()
+  syncView(source !== 'refit')
+})
 
 // The controller needs no binding: it wires its own canvas listeners and
 // subscribes to the store in its constructor, and main.ts now reaches the
@@ -394,7 +536,13 @@ const resizeObserver = new ResizeObserver(() => {
 })
 resizeObserver.observe(canvas)
 
-const controls = new Controls(controlsForm, current, (rawNext) => {
+// `applySettings` and `controls` reference each other (the handler back-writes
+// sanitised c values via `controls.setCValues`, and `controls` dispatches to
+// the handler), so `controls` is forward-declared and assigned below. The
+// handler is a const arrow rather than a hoisted `function` so TypeScript keeps
+// the module-level `ctx`-not-null narrowing inside it.
+let controls: Controls
+const applySettings = (rawNext: Settings): void => {
   // Substitute the last-known-finite c values for any non-finite
   // entries in the form snapshot. `<input type="number">` reports
   // NaN for an empty / dash-only `value`, and the WASM `compute`
@@ -506,4 +654,35 @@ const controls = new Controls(controlsForm, current, (rawNext) => {
   // `current` keeps the snapshot in sync with the form so a later
   // Julia switch sees the committed c values.
   current = next
+}
+
+controls = new Controls(controlsForm, current, (rawNext) => {
+  // Apply the committed change, then persist + read out the resulting view.
+  // A mode change also writes the store (branch 1), whose subscription already
+  // fired `syncView` — the call here is then a debounced no-op for that case,
+  // and the sole trigger for the render-scale / compute / visual / no-op
+  // branches, none of which touch the store.
+  applySettings(rawNext)
+  syncView()
+})
+
+// Apply a permalink edited in place (O1, #91). The boot read of `location.hash`
+// is one-shot; a hash changed in an already-open tab — a pasted permalink, a
+// back/forward step, a clicked `#`-link — fires `hashchange` *without*
+// reloading the document, so without this the new view would be silently
+// ignored (and overwritten by the next commit). Our own `replaceState` writes
+// never fire `hashchange`, so this can't echo or loop. Render scale is
+// preserved (it isn't in the hash); the resolved settings are mirrored into
+// the form via `applySettings`, and the framing is applied through the store —
+// whose subscription rerenders and re-syncs the readout/URL. The store write
+// re-uses the current logical dimensions, and its `syncView` is a no-op write
+// when the resolved hash already matches the bar (it only canonicalises a
+// partial hash).
+window.addEventListener('hashchange', () => {
+  const { view, settings } = resolveView(window.location.hash, current.renderScale)
+  current = settings
+  controls.applySettings(settings)
+  applyAccent(settings.palette)
+  const live = store.get()
+  store.set(new Viewport(view.re, view.im, view.zoom, live.width(), live.height()), 'hashchange')
 })

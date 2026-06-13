@@ -7,13 +7,14 @@ import type { Viewport } from '../wasm/fractal_wasm.js'
  *  - `gesture`   — the InputController committing a pan/zoom it just performed.
  *  - `refit`     — fit-to-window resizing the logical grid to the canvas box.
  *  - `mode-reset`— a fractal-family switch jumping to that family's start frame.
+ *  - `hashchange`— a pasted/edited URL permalink applied live (O1, #91).
  *
  * The InputController subscribes to teardown its wheel Preview on any write
  * that *isn't* `gesture` (its own commits already advanced the Preview, so
  * tearing down there would clear the frame the Settle wants to keep). New
- * writers (URL hydration, bookmarks, a reset-view button) pick a label here.
+ * writers (bookmarks, a reset-view button) pick a label here.
  */
-export type ViewportSource = 'gesture' | 'refit' | 'mode-reset'
+export type ViewportSource = 'gesture' | 'refit' | 'mode-reset' | 'hashchange'
 
 export type ViewportListener = (viewport: Viewport, source: ViewportSource) => void
 
