@@ -11,3 +11,9 @@ description = "Mandelbrot/Julia escape-time iteration and coloring. Pure Rust, n
 # natively it fans out over OS threads; in the browser the worker drives
 # it through the `wasm-bindgen-rayon` thread pool (wired in Slice 7C).
 rayon = "1"
+
+[dev-dependencies]
+# Property-based tests for the viewport coordinate invariants (round-trips,
+# pan/zoom symmetry, the ADR-0011 reference-width rule), which generalise the
+# example-based tests in `viewport.rs` over randomised inputs.
+proptest = "1"

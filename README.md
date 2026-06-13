@@ -171,6 +171,18 @@ shipped there is a real codebase to contribute *to*; formal contributor docs
 sensible next addition. In the meantime, the build / verify steps above mirror
 CI, and every change goes through a PR.
 
+Versioned git hooks live in [`.githooks/`](.githooks). They are opt-in (Git
+only runs hooks from `.git/hooks` by default), so point Git at them once per
+clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+The `pre-push` hook blocks direct pushes to `main` — work goes through a feature
+branch + PR. For a genuinely intended, approved push to main, override with
+`ALLOW_MAIN_PUSH=1 git push origin main`.
+
 ## License
 
 [GPL-3.0-or-later](LICENSE). See
