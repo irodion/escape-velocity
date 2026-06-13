@@ -60,7 +60,11 @@ export function mountPwaUi(lifecycle: PwaLifecycle, container: HTMLElement): voi
       // it would silently wipe this update prompt a few seconds after it
       // appeared.
       clearOfflineNoticeTimer()
-      message.textContent = 'New version available.'
+      // The build identifier (O2, #92) names which build is *currently running*
+      // — so when the toast appears, the developer can tell what is being
+      // replaced. The waiting build's own identifier is unknown until it
+      // activates and logs its own boot line.
+      message.textContent = `New version available · build ${__APP_VERSION__}`
       reloadButton.hidden = false
       toast.hidden = false
     } else if (state.offlineReady) {
