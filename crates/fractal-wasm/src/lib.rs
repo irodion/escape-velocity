@@ -101,8 +101,9 @@ pub enum FractalKind {
     Julia = 1,
 }
 
-/// JS-visible **Field** discriminant (ADR-0013) — the per-pixel scalar
-/// `compute` emits. Mirrors `fractal_core::Field`. Numeric values are
+/// JS-visible **Field** discriminant (ADR-0013) — selects the per-pixel
+/// scalar the `fractal_core` kernels produce. Mirrors `fractal_core::Field`.
+/// Numeric values are
 /// explicit and **appended** so the JS↔WASM wire format stays stable as
 /// new Fields arrive, exactly like the palette/mode enums above.
 ///
