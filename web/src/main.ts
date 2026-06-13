@@ -36,6 +36,7 @@ import {
   setFatalHandler,
   setProgressReporter,
 } from './render-client.js'
+import { createViewportStore } from './viewport-store.js'
 
 // PWA install + update lifecycle (Slice 8B). The controller (a deep, tested
 // state machine) is fed the real platform adapters here: the SW registrar is
@@ -177,8 +178,15 @@ const measureLogicalSize = (): { width: number; height: number } => {
   }
 }
 
+// The single authoritative home of the on-screen viewport (A2, #85). Every
+// reader calls `store.get()`, every writer calls `store.set(vp, source)`, and
+// reactions (the rerender below, the InputController's Preview teardown) are
+// subscribers. This collapses the old two-way `viewport` ⇄ `inputController`
+// sync ritual into one path, so the next state writer (URL hydration,
+// bookmarks, a reset-view button) is a single `store.set` with no lockstep to
+// remember.
 const boot = measureLogicalSize()
-let viewport = new Viewport(CENTER_RE, CENTER_IM, ZOOM, boot.width, boot.height)
+const store = createViewportStore(new Viewport(CENTER_RE, CENTER_IM, ZOOM, boot.width, boot.height))
 let current: Settings = {
   maxIter: INITIAL_MAX_ITER,
   renderScale: INITIAL_RENDER_SCALE,
@@ -302,6 +310,7 @@ const rerender = (): void => {
   // dimensions — this scaling is a transient property of the request,
   // and the canvas backing store is sized to match when the frame paints
   // (see `paint` in render-client).
+  const viewport = store.get()
   const { width, height, scale } = computeBufferDims(
     viewport.width(),
     viewport.height(),
@@ -330,15 +339,19 @@ const rerender = (): void => {
 applyAccent(current.palette)
 rerender()
 
-const inputController = new InputController(
+// Every viewport write — a committed pan/zoom, a refit, a mode-reset — paints
+// the new frame. A pan/zoom invalidates the iteration buffer by definition, so
+// this routes through `render` (which refreshes the cache too), never
+// `recolorize`. Subscribing here is the *only* thing that turns a `store.set`
+// into pixels, so a future viewport writer needs no render call of its own.
+store.subscribe(() => rerender())
+
+// The controller needs no binding: it wires its own canvas listeners and
+// subscribes to the store in its constructor, and main.ts now reaches the
+// viewport through the store rather than through the controller.
+new InputController(
   canvas,
-  viewport,
-  (next) => {
-    // Every pan/zoom invalidates the iteration buffer by definition —
-    // route through `render`, which refreshes the cache too.
-    viewport = next
-    rerender()
-  },
+  store,
   // While a wheel Preview is active, drop any in-flight render so a
   // premature Settle's frame can't paint mid-scrub and clear the Preview
   // transform out from under the gesture (ADR-0012).
@@ -359,12 +372,15 @@ let resizeTimer: ReturnType<typeof setTimeout> | undefined
 const refitToCanvas = (): void => {
   resizeTimer = undefined
   const { width, height } = measureLogicalSize()
+  const viewport = store.get()
   if (width === viewport.width() && height === viewport.height()) {
     return
   }
-  viewport = viewport.with_resolution(width, height)
-  inputController.setViewport(viewport)
-  rerender()
+  // One `set` does the whole job: the store subscription rerenders, and the
+  // InputController's subscription mirrors the resized viewport into its
+  // working copy (and tears down any live wheel Preview) — the second job the
+  // old `inputController.setViewport` call carried.
+  store.set(viewport.with_resolution(width, height), 'refit')
 }
 // ResizeObserver delivers an initial callback on observe(); the no-op
 // guard above absorbs it, since the boot viewport already matches the
@@ -426,10 +442,14 @@ const controls = new Controls(controlsForm, current, (rawNext) => {
   // later, at the render seam, so it is not part of the viewport here.
   if (next.mode !== current.mode) {
     const view = next.mode === 'mandelbrot' ? MANDELBROT_DEFAULT_VIEW : JULIA_DEFAULT_VIEW
-    viewport = new Viewport(view.re, view.im, view.zoom, viewport.width(), viewport.height())
-    inputController.setViewport(viewport)
+    const vp = store.get()
+    // Commit `current` before the `set`: the store notifies synchronously, so
+    // the rerender subscription fires inside `set` and must already see the new
+    // settings. The `set` (source `'mode-reset'`) also drives the rerender and
+    // the InputController's Preview teardown — the work the old explicit
+    // `inputController.setViewport` + `rerender` pair did.
     current = next
-    rerender()
+    store.set(new Viewport(view.re, view.im, view.zoom, vp.width(), vp.height()), 'mode-reset')
     return
   }
 

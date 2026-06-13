@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Viewport } from '../wasm/fractal_wasm.js'
 import { InputController, WHEEL_SETTLE_MS } from './input.js'
+import { createViewportStore, type ViewportStore } from './viewport-store.js'
 
 // Plain JS double for Viewport. The InputController calls
 // `pan_by_pixels` / `zoom_around` (which produce new viewports) and
@@ -76,6 +77,30 @@ function makeCtxStub(snapshot: ImageData): {
   return { ctx, getImageData, putImageData, fillRect }
 }
 
+// Construct a controller wired to a real `ViewportStore` seeded with the
+// viewport double, and bridge the controller's gesture commits
+// (`store.set(vp, 'gesture')`) to the `onChange` spy the assertions read.
+// This is the production shape (A2, #85): the controller no longer takes an
+// `onChange`/`initialViewport` — it reads and writes the store. Non-gesture
+// writes (a test simulating a refit / mode-reset via `store.set(vp, 'refit')`)
+// are intentionally *not* bridged to `onChange`, matching main.ts, where a
+// separate subscription owns the rerender and `onChange` modelled only the
+// controller's own commits. Returns the store so a test can simulate an
+// external viewport change.
+function mount(
+  canvas: HTMLCanvasElement,
+  vp: ReturnType<typeof makeViewportDouble>,
+  onChange: (viewport: Viewport) => void,
+  onInvalidate?: () => void,
+): { controller: InputController; store: ViewportStore } {
+  const store = createViewportStore(vp as unknown as Viewport)
+  store.subscribe((next, source) => {
+    if (source === 'gesture') onChange(next)
+  })
+  const controller = new InputController(canvas, store, onInvalidate)
+  return { controller, store }
+}
+
 describe('InputController', () => {
   let canvas: HTMLCanvasElement
   let onChange: ReturnType<typeof vi.fn<(viewport: Viewport) => void>>
@@ -116,7 +141,7 @@ describe('InputController', () => {
   it('emits exactly one onChange on mouseup, none during mousemove', () => {
     const panned = { sentinel: 'panned' } as unknown as Viewport
     viewport.pan_by_pixels.mockReturnValue(panned)
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
+    mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
     document.dispatchEvent(
@@ -149,7 +174,7 @@ describe('InputController', () => {
     setRect(canvas, { width: 800, height: 600 })
     const panned = { sentinel: 'panned' } as unknown as Viewport
     viewport.pan_by_pixels.mockReturnValue(panned)
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
+    mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
     document.dispatchEvent(new MouseEvent('mouseup', { clientX: 150, clientY: 90, bubbles: true }))
@@ -160,7 +185,7 @@ describe('InputController', () => {
 
   it('commits the pan from the live (refitted) viewport when a resize fires mid-drag', () => {
     // B1 regression. A debounced `refitToCanvas` (ResizeObserver) can fire
-    // mid-drag and `setViewport` a viewport at new dimensions —
+    // mid-drag and `store.set` a viewport at new dimensions —
     // `with_resolution` preserves center/zoom but updates width/height to
     // the live box. `handleMouseUp` must commit the pan from that live
     // viewport, not the drag-start snapshot: panning from the snapshot
@@ -172,12 +197,14 @@ describe('InputController', () => {
     refitted.width.mockReturnValue(1000)
     refitted.height.mockReturnValue(700)
     refitted.pan_by_pixels.mockReturnValue(refitPanned)
-    const controller = new InputController(canvas, viewport as unknown as Viewport, onChange)
+    const { store } = mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
     // Resize lands mid-drag: the canvas box grows and the viewport is
-    // refitted to 1000×700. The CSS box now measures 1000×700 too.
-    controller.setViewport(refitted as unknown as Viewport)
+    // refitted to 1000×700 via a non-gesture store write — the controller's
+    // subscription mirrors it into its working viewport. The CSS box now
+    // measures 1000×700 too.
+    store.set(refitted as unknown as Viewport, 'refit')
     setRect(canvas, { width: 1000, height: 700 })
 
     document.dispatchEvent(new MouseEvent('mouseup', { clientX: 150, clientY: 90, bubbles: true }))
@@ -193,7 +220,7 @@ describe('InputController', () => {
 
   it('snapshots the canvas on mousedown and paints it at the drag offset on mousemove', () => {
     viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
+    mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
     expect(ctxStub.getImageData).toHaveBeenCalledWith(0, 0, 800, 600)
@@ -222,7 +249,7 @@ describe('InputController', () => {
     viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
     // Canvas is 800x600 internally but displayed at half size.
     setRect(canvas, { left: 0, top: 0, width: 400, height: 300 })
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
+    mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
     document.dispatchEvent(
@@ -237,7 +264,7 @@ describe('InputController', () => {
 
   it('completes the drag when mouseup is dispatched on document outside the canvas', () => {
     viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
+    mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
     // Coordinates far outside the canvas — document still routes the
@@ -251,7 +278,7 @@ describe('InputController', () => {
 
   it('toggles the dragging class on mousedown / mouseup', () => {
     viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
+    mount(canvas, viewport, onChange)
 
     expect(canvas.classList.contains('dragging')).toBe(false)
     canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, clientY: 0, bubbles: true }))
@@ -267,7 +294,7 @@ describe('InputController', () => {
     // identical viewport (no `onChange` / no `pan_by_pixels`) — it is a pure
     // visual no-op. The drag is still torn down.
     const onInvalidate = vi.fn()
-    new InputController(canvas, viewport as unknown as Viewport, onChange, onInvalidate)
+    mount(canvas, viewport, onChange, onInvalidate)
 
     canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 120, clientY: 80, bubbles: true }))
     document.dispatchEvent(new MouseEvent('mouseup', { clientX: 120, clientY: 80, bubbles: true }))
@@ -281,7 +308,7 @@ describe('InputController', () => {
   it('previews instantly on a wheel notch and defers a single onChange to the Settle', () => {
     const zoomed = makeZoomResult(0.8)
     viewport.zoom_around.mockReturnValue(zoomed)
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
+    mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(
       new WheelEvent('wheel', {
@@ -313,7 +340,7 @@ describe('InputController', () => {
     const afterSecond = makeZoomResult(0.64)
     viewport.zoom_around.mockReturnValue(afterFirst)
     afterFirst.zoom_around.mockReturnValue(afterSecond)
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
+    mount(canvas, viewport, onChange)
 
     const notch = (): void => {
       canvas.dispatchEvent(
@@ -365,7 +392,7 @@ describe('InputController', () => {
     const rectSpy = vi.spyOn(canvas, 'getBoundingClientRect')
     rectSpy.mockReturnValue(transformed)
     rectSpy.mockReturnValueOnce(layout) // only the scrub-start read sees the true box
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
+    mount(canvas, viewport, onChange)
 
     const notch = (): void => {
       canvas.dispatchEvent(
@@ -392,7 +419,7 @@ describe('InputController', () => {
     const next = makeZoomResult(0.64)
     viewport.zoom_around.mockReturnValue(committed)
     committed.zoom_around.mockReturnValue(next)
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
+    mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(
       new WheelEvent('wheel', {
@@ -430,7 +457,7 @@ describe('InputController', () => {
     const panned = { sentinel: 'panned' } as unknown as Viewport
     zoomed.pan_by_pixels.mockReturnValue(panned)
     const onInvalidate = vi.fn()
-    new InputController(canvas, viewport as unknown as Viewport, onChange, onInvalidate)
+    mount(canvas, viewport, onChange, onInvalidate)
 
     // Zoom scrub: Settle pending, currentViewport advanced to `zoomed`.
     canvas.dispatchEvent(
@@ -486,7 +513,7 @@ describe('InputController', () => {
     const z2 = makeZoomResult(0.64)
     viewport.zoom_around.mockReturnValue(z1)
     z1.zoom_around.mockReturnValue(z2)
-    new InputController(canvas, viewport as unknown as Viewport, onChange, onInvalidate)
+    mount(canvas, viewport, onChange, onInvalidate)
 
     const notch = (): void => {
       canvas.dispatchEvent(
@@ -509,7 +536,7 @@ describe('InputController', () => {
     const z1 = makeZoomResult(1.25)
     viewport.zoom_around.mockReturnValue(z1)
     viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
+    mount(canvas, viewport, onChange)
 
     // Active zoom Preview (transform applied), Settle still pending.
     canvas.dispatchEvent(
@@ -533,7 +560,7 @@ describe('InputController', () => {
     viewport.zoom_around.mockReturnValue(makeZoomResult(1))
     // Canvas is 800x600 internally but displayed at half size.
     setRect(canvas, { left: 0, top: 0, width: 400, height: 300 })
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
+    mount(canvas, viewport, onChange)
 
     // CSS-centre cursor at (200, 150) ⇒ internal pixel (400, 300).
     canvas.dispatchEvent(
@@ -550,7 +577,7 @@ describe('InputController', () => {
 
   it('wheel normalizes line-mode deltas (Firefox-on-Linux style)', () => {
     viewport.zoom_around.mockReturnValue(makeZoomResult(1))
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
+    mount(canvas, viewport, onChange)
 
     // Firefox-on-Linux historical wheel: deltaMode = 1 (line),
     // deltaY ≈ ±3 per notch. Without normalization, factor ≈ 0.993
@@ -571,7 +598,7 @@ describe('InputController', () => {
 
   it('wheel normalizes page-mode deltas', () => {
     viewport.zoom_around.mockReturnValue(makeZoomResult(1))
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
+    mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(
       new WheelEvent('wheel', {
@@ -587,7 +614,7 @@ describe('InputController', () => {
   })
 
   it('ignores non-primary mouse buttons on mousedown', () => {
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
+    mount(canvas, viewport, onChange)
 
     // Right-click (button 2) and middle-click (button 1) should not
     // start a drag. No snapshot, no class toggle, no document
@@ -613,7 +640,7 @@ describe('InputController', () => {
     // throw at the WASM finite-input seam. The guard turns this into
     // a no-op without crashing.
     setRect(canvas, { width: 0, height: 0 })
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
+    mount(canvas, viewport, onChange)
 
     // Wheel on a 0×0 canvas: no zoom_around, no onChange.
     canvas.dispatchEvent(
@@ -639,17 +666,17 @@ describe('InputController', () => {
     expect(ctxStub.putImageData).not.toHaveBeenCalled()
   })
 
-  it('setViewport redirects subsequent wheel events to the new viewport without firing onChange', () => {
+  it('a non-gesture store write redirects subsequent wheel events to the new viewport without firing onChange', () => {
     const next = makeViewportDouble()
     next.zoom_around.mockReturnValue(makeZoomResult(0.8))
     viewport.zoom_around.mockReturnValue(makeZoomResult(0.8))
-    const controller = new InputController(canvas, viewport as unknown as Viewport, onChange)
+    const { store } = mount(canvas, viewport, onChange)
 
-    controller.setViewport(next as unknown as Viewport)
-    // setViewport itself must be side-effect-free — Slice 3's main.ts
-    // calls it inside the Controls onChange handler, which already
-    // owns the render trigger; an emitted onChange here would double
-    // the work.
+    store.set(next as unknown as Viewport, 'refit')
+    // The controller's subscription to non-gesture writes is side-effect-free
+    // toward `onChange` — main.ts owns the render via a separate store
+    // subscription, so the controller must not also emit a commit here or the
+    // frame would render twice.
     expect(onChange).not.toHaveBeenCalled()
 
     canvas.dispatchEvent(
@@ -670,10 +697,10 @@ describe('InputController', () => {
     expect(onChange).toHaveBeenCalledTimes(1)
   })
 
-  it('setViewport clears an active Preview transform so the next scrub measures an untransformed box', () => {
+  it('a non-gesture store write clears an active Preview transform so the next scrub measures an untransformed box', () => {
     const z1 = makeZoomResult(0.8)
     viewport.zoom_around.mockReturnValue(z1)
-    const controller = new InputController(canvas, viewport as unknown as Viewport, onChange)
+    const { store } = mount(canvas, viewport, onChange)
 
     // Active zoom Preview transform on the canvas.
     canvas.dispatchEvent(
@@ -691,13 +718,13 @@ describe('InputController', () => {
     // Preview is still on screen must tear down the transform too — leaving
     // it would make the next wheel event capture a transformed rect.
     const next = makeViewportDouble()
-    controller.setViewport(next as unknown as Viewport)
+    store.set(next as unknown as Viewport, 'refit')
     expect(canvas.style.transform).toBe('')
   })
 
   it('wheel calls preventDefault', () => {
     viewport.zoom_around.mockReturnValue(makeZoomResult(1))
-    new InputController(canvas, viewport as unknown as Viewport, onChange)
+    mount(canvas, viewport, onChange)
 
     const event = new WheelEvent('wheel', {
       deltaY: 100,
