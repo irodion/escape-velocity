@@ -547,6 +547,36 @@
         to   { opacity: 1; transform: translateY(0); }
       }
 
+      /* ── PNG export actions (O2, #92) ──
+         A two-button action row pinned to the foot of the controls drawer,
+         skinned like the console's other buttons. Actions, not fields, so they
+         sit outside the `.field` rise-animation sequence. */
+      .export-actions {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: 0.9rem;
+        padding-top: 0.9rem;
+        border-top: 1px solid var(--panel-edge);
+      }
+      .export-btn {
+        flex: 1;
+        padding: 0.55rem 0.6rem;
+        font-family: var(--font-tech);
+        font-size: 0.62rem;
+        font-weight: 500;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--ink);
+        background: var(--panel);
+        border: 1px solid var(--panel-edge);
+        border-radius: var(--r);
+        cursor: pointer;
+        transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
+      }
+      .export-btn:hover { color: var(--accent); border-color: var(--accent-dim); }
+      .export-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+      .export-btn:disabled { opacity: 0.5; cursor: progress; }
+
       /* ── PWA UI (Slice 8B), re-skinned to the console ──
          The Install button sits in normal flow under the canvas; the update /
          offline-ready toast floats bottom-right. Both are created and toggled
@@ -836,6 +866,14 @@
           <input type="checkbox" name="orbit" />
         </span>
       </label>
+      <!-- PNG export (O2, #92). Actions, not form state: wired directly in
+           main.ts (no settings snapshot, no rerender). Both render the current
+           view off-screen so the saved pixels always match the permalink in the
+           filename; 1× matches the on-screen resolution, 2× supersamples. -->
+      <div class="export-actions">
+        <button type="button" id="export-png" class="export-btn">Save PNG</button>
+        <button type="button" id="export-png-2x" class="export-btn">Save PNG 2&times;</button>
+      </div>
     </form>
     <div class="stage">
       <canvas id="fractal" width="800" height="600"></canvas>
