@@ -588,6 +588,12 @@ new InputController(
       }
       return
     }
+    // A click that began while the drawer was open is a light-dismiss, not an
+    // orbit pin either: `orbitOverlay.pin` guards on the *live* `.open` class,
+    // which the dismiss already cleared on the canvas `mouseup` before this
+    // document-level `mouseup` runs — so the same press-time flag must suppress
+    // the pin. The flag re-arms on the next `mousedown`, so no reset is needed.
+    if (drawerOpenAtPress) return
     orbitOverlay.pin(cssX, cssY)
   },
 )
