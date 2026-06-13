@@ -360,10 +360,19 @@ pub fn colorize(nus: &[f32], palette: Palette, mode: NormalizationMode, max_iter
 }
 
 /// Colorize **into `out`**, reusing its existing capacity — the allocation-free
-/// core of [`colorize`]. `out` is cleared and resized to the exact RGBA length
-/// (reusing its backing allocation), then each mode writes every pixel in place.
-/// The WASM layer hands in a persistent thread-local buffer so a frame's
-/// colorize doesn't allocate a fresh `4·N`-byte `Vec` each time (P4, #80).
+/// core of [`colorize`]. `out` is resized to the exact RGBA length (reusing its
+/// backing allocation), then each mode writes every pixel in place. The WASM
+/// layer hands in a persistent thread-local buffer so a frame's colorize doesn't
+/// allocate a fresh `4·N`-byte `Vec` each time (P4, #80).
+///
+/// The resize deliberately does **not** `clear()` first: every mode below
+/// overwrites all four bytes of every pixel, so the previous frame's contents
+/// are stale, not read. Clearing would force `resize` to re-zero all `4·N` bytes,
+/// and a same-size recolorize (the ADR-0002 fast path — repaint on a palette or
+/// mode change with the iteration buffer unchanged) is exactly when the lengths
+/// already match, so the bare `resize` is a no-op there and the writers do the
+/// only pass over the buffer. (On a genuine size change `resize` zero-fills only
+/// the grown tail, which the writers then overwrite too.)
 ///
 /// The palette is baked into a [`ColorLut`] once here (not re-dispatched per
 /// pixel), and the per-pixel work fans out across a `rayon` parallel iterator
@@ -381,7 +390,8 @@ pub fn colorize_into(
     max_iter: u32,
     out: &mut Vec<u8>,
 ) {
-    out.clear();
+    // Resize without clearing — see the note above: the writers overwrite
+    // every byte, so a same-size repaint skips the zero-fill entirely.
     out.resize(nus.len() * 4, 0);
     let lut = ColorLut::build(palette);
     match mode {
@@ -1234,6 +1244,25 @@ mod tests {
     }
 
     // --- colorize() shape ----------------------------------------------
+
+    #[test]
+    fn colorize_into_overwrites_a_dirty_reused_buffer_for_every_combo() {
+        // `colorize_into` resizes without clearing (the recolorize hot path
+        // skips the zero-fill), so correctness now rests on every mode
+        // overwriting *all four bytes* of every pixel. Pre-fill a same-size
+        // buffer with garbage and assert the result is identical to a fresh
+        // one — a mode that ever left a byte unwritten would leak the stale
+        // 0xAB through and fail here.
+        let nus = vec![f32::NAN, 0.0, 1.5, 10.25, 63.75, f32::NAN, 17.0];
+        for &p in ALL_PALETTES {
+            for &m in ALL_MODES {
+                let mut dirty = vec![0xAB_u8; nus.len() * 4];
+                colorize_into(&nus, p, m, MAX_ITER, &mut dirty);
+                let fresh = colorize(&nus, p, m, MAX_ITER);
+                assert_eq!(dirty, fresh, "{p:?}/{m:?}: stale bytes leaked through");
+            }
+        }
+    }
 
     #[test]
     fn colorize_output_length_is_four_times_input_for_every_combo() {
