@@ -192,7 +192,7 @@ const measureLogicalSize = (): { width: number; height: number } => {
 // sync ritual into one path, so the next state writer (URL hydration,
 // bookmarks, a reset-view button) is a single `store.set` with no lockstep to
 // remember.
-// Hydrate the boot view from the URL hash (O1, #91): a shared / bookmarked
+// Resolve a URL hash into a coherent view (O1, #91): a shared / bookmarked
 // link — or a PWA relaunch that restores the last URL — lands on that exact
 // frame instead of always opening on the hardcoded seahorse. `parse` is
 // tolerant, so any field the hash omits or mangles falls back to the constant
@@ -201,9 +201,13 @@ const measureLogicalSize = (): { width: number; height: number } => {
 // snapped to a real slider stop (a stale count would otherwise throw in the
 // `Controls` constructor), and an incoherent (field, normalisation) pair is
 // replaced with the field's default — the same rule `Controls` enforces — so
-// `current`, the form, and the first frame all agree. `re`/`im` are finite and
-// `zoom` is finite & > 0 by `parse`'s contract, exactly what the `Viewport`
-// constructor validates, so it never throws on hydrated input.
+// `current`, the form, and the rendered frame always agree. `re`/`im` are
+// finite and `zoom` is finite & > 0 by `parse`'s contract, exactly what the
+// `Viewport` constructor validates, so it never throws on resolved input.
+//
+// Render scale is NOT carried in the hash (it's a device quality knob, not
+// part of the shared view), so the caller passes the scale to preserve: the
+// boot default at startup, the live value when re-resolving on a `hashchange`.
 const DEFAULT_VIEW: ViewState = {
   re: CENTER_RE,
   im: CENTER_IM,
@@ -216,25 +220,32 @@ const DEFAULT_VIEW: ViewState = {
   cRe: INITIAL_C_RE,
   cIm: INITIAL_C_IM,
 }
-const hydrated: ViewState = { ...DEFAULT_VIEW, ...(parse(window.location.hash) ?? {}) }
-const hydratedNormalisation = isModeValidForField(hydrated.field, hydrated.normalisation)
-  ? hydrated.normalisation
-  : defaultModeForField(hydrated.field)
+const resolveView = (
+  hash: string,
+  renderScale: number,
+): { view: ViewState; settings: Settings } => {
+  const view: ViewState = { ...DEFAULT_VIEW, ...(parse(hash) ?? {}) }
+  const settings: Settings = {
+    maxIter: nearestMaxIterStop(view.maxIter),
+    renderScale,
+    palette: view.palette,
+    normalisation: isModeValidForField(view.field, view.normalisation)
+      ? view.normalisation
+      : defaultModeForField(view.field),
+    field: view.field,
+    mode: view.mode,
+    cRe: view.cRe,
+    cIm: view.cIm,
+  }
+  return { view, settings }
+}
 
+const booted = resolveView(window.location.hash, INITIAL_RENDER_SCALE)
 const boot = measureLogicalSize()
 const store = createViewportStore(
-  new Viewport(hydrated.re, hydrated.im, hydrated.zoom, boot.width, boot.height),
+  new Viewport(booted.view.re, booted.view.im, booted.view.zoom, boot.width, boot.height),
 )
-let current: Settings = {
-  maxIter: nearestMaxIterStop(hydrated.maxIter),
-  renderScale: INITIAL_RENDER_SCALE,
-  palette: hydrated.palette,
-  normalisation: hydratedNormalisation,
-  field: hydrated.field,
-  mode: hydrated.mode,
-  cRe: hydrated.cRe,
-  cIm: hydrated.cIm,
-}
+let current: Settings = booted.settings
 
 // Tune the console's accent to the active palette so the controls read as an
 // instrument keyed to what it's rendering (the `--accent` CSS custom property
@@ -621,4 +632,25 @@ controls = new Controls(controlsForm, current, (rawNext) => {
   // branches, none of which touch the store.
   applySettings(rawNext)
   syncView()
+})
+
+// Apply a permalink edited in place (O1, #91). The boot read of `location.hash`
+// is one-shot; a hash changed in an already-open tab — a pasted permalink, a
+// back/forward step, a clicked `#`-link — fires `hashchange` *without*
+// reloading the document, so without this the new view would be silently
+// ignored (and overwritten by the next commit). Our own `replaceState` writes
+// never fire `hashchange`, so this can't echo or loop. Render scale is
+// preserved (it isn't in the hash); the resolved settings are mirrored into
+// the form via `applySettings`, and the framing is applied through the store —
+// whose subscription rerenders and re-syncs the readout/URL. The store write
+// re-uses the current logical dimensions, and its `syncView` is a no-op write
+// when the resolved hash already matches the bar (it only canonicalises a
+// partial hash).
+window.addEventListener('hashchange', () => {
+  const { view, settings } = resolveView(window.location.hash, current.renderScale)
+  current = settings
+  controls.applySettings(settings)
+  applyAccent(settings.palette)
+  const live = store.get()
+  store.set(new Viewport(view.re, view.im, view.zoom, live.width(), live.height()), 'hashchange')
 })
