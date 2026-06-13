@@ -140,6 +140,15 @@ export interface Settings {
   readonly orbit: boolean
 }
 
+/**
+ * Derive the settings for picking a Julia constant (the c-picker, O2 #92):
+ * switch to Julia mode with `c = (cRe, cIm)`, preserving every other setting.
+ * Pure, so the click handler that wires it stays trivially testable.
+ */
+export function pickJuliaSettings(current: Settings, cRe: number, cIm: number): Settings {
+  return { ...current, mode: 'julia', cRe, cIm }
+}
+
 export class Controls {
   private readonly maxIterRange: HTMLInputElement
   private readonly maxIterReadout: HTMLOutputElement
