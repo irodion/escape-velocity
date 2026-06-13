@@ -136,6 +136,8 @@ export interface Settings {
   readonly mode: FractalMode
   readonly cRe: number
   readonly cIm: number
+  /** Whether the orbit visualizer overlay is enabled (E1, #94). */
+  readonly orbit: boolean
 }
 
 export class Controls {
@@ -148,6 +150,7 @@ export class Controls {
   private readonly modeSelect: HTMLSelectElement
   private readonly cReInput: HTMLInputElement
   private readonly cImInput: HTMLInputElement
+  private readonly orbitCheckbox: HTMLInputElement
   private readonly onChange: (settings: Settings) => void
 
   constructor(form: HTMLFormElement, initial: Settings, onChange: (settings: Settings) => void) {
@@ -159,6 +162,7 @@ export class Controls {
     const modeSelect = form.elements.namedItem('mode')
     const cReInput = form.elements.namedItem('c-re')
     const cImInput = form.elements.namedItem('c-im')
+    const orbitCheckbox = form.elements.namedItem('orbit')
     if (!(maxIterRange instanceof HTMLInputElement) || maxIterRange.type !== 'range') {
       throw new Error('Controls: form is missing an <input type="range" name="max-iter">')
     }
@@ -186,6 +190,9 @@ export class Controls {
     }
     if (!(cImInput instanceof HTMLInputElement)) {
       throw new Error('Controls: form is missing an <input name="c-im">')
+    }
+    if (!(orbitCheckbox instanceof HTMLInputElement) || orbitCheckbox.type !== 'checkbox') {
+      throw new Error('Controls: form is missing an <input type="checkbox" name="orbit">')
     }
 
     // The slider is index-addressed: its value is a position in
@@ -242,6 +249,7 @@ export class Controls {
     if (Number.isNaN(cImInput.valueAsNumber)) {
       throw new Error(`Controls: initial.cIm=${initial.cIm} is not a finite number`)
     }
+    orbitCheckbox.checked = initial.orbit
 
     this.maxIterRange = maxIterRange
     this.maxIterReadout = maxIterReadout
@@ -252,6 +260,7 @@ export class Controls {
     this.modeSelect = modeSelect
     this.cReInput = cReInput
     this.cImInput = cImInput
+    this.orbitCheckbox = orbitCheckbox
     this.onChange = onChange
     // The c inputs are visual-state only — they always hold their last
     // committed value even in Mandelbrot mode (which simply ignores
@@ -301,6 +310,10 @@ export class Controls {
     })
     cReInput.addEventListener('change', () => this.emit())
     cImInput.addEventListener('change', () => this.emit())
+    // The orbit overlay is a pure presentation toggle (no recompute), but it
+    // still emits a snapshot so the dispatcher can enable/disable the overlay
+    // and persist the toggle to the URL like every other setting.
+    orbitCheckbox.addEventListener('change', () => this.emit())
   }
 
   // Translate the slider index back to the iteration count it stands for.
@@ -351,6 +364,7 @@ export class Controls {
       // matches the rendered parameter.
       cRe: this.cReInput.valueAsNumber,
       cIm: this.cImInput.valueAsNumber,
+      orbit: this.orbitCheckbox.checked,
     })
   }
 
@@ -390,6 +404,7 @@ export class Controls {
     this.modeSelect.value = settings.mode
     this.setCInputsEnabled(settings.mode === 'julia')
     this.setCValues(settings.cRe, settings.cIm)
+    this.orbitCheckbox.checked = settings.orbit
   }
 
   /**

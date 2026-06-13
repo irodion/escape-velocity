@@ -29,6 +29,8 @@ export interface ViewState {
   readonly field: FieldName
   readonly cRe: number
   readonly cIm: number
+  /** Whether the orbit visualizer overlay is enabled (E1, #94). */
+  readonly orbit: boolean
 }
 
 // Short, stable hash keys — the persistence contract. Independent of the
@@ -45,6 +47,7 @@ const KEY = {
   field: 'field',
   cRe: 'cre',
   cIm: 'cim',
+  orbit: 'orb',
 } as const
 
 // Allow-lists for the enum-valued fields — `parse` accepts a value only if it
@@ -98,6 +101,7 @@ export function serialize(state: ViewState): string {
   params.set(KEY.field, state.field)
   params.set(KEY.cRe, String(state.cRe))
   params.set(KEY.cIm, String(state.cIm))
+  params.set(KEY.orbit, state.orbit ? '1' : '0')
   return `#${params.toString()}`
 }
 
@@ -131,6 +135,14 @@ export function parse(hash: string): Partial<ViewState> | null {
     const raw = params.get(key)
     return raw !== null && (allowed as readonly string[]).includes(raw) ? (raw as T) : undefined
   }
+  // A persisted boolean: `'1'`/`'0'` only — anything else (missing, junk) drops
+  // so the caller falls back to the default, same tolerance as the enums.
+  const bool = (key: string): boolean | undefined => {
+    const raw = params.get(key)
+    if (raw === '1') return true
+    if (raw === '0') return false
+    return undefined
+  }
 
   const re = num(KEY.re)
   const im = num(KEY.im)
@@ -142,6 +154,7 @@ export function parse(hash: string): Partial<ViewState> | null {
   const field = oneOf(KEY.field, FIELDS)
   const cRe = num(KEY.cRe)
   const cIm = num(KEY.cIm)
+  const orbit = bool(KEY.orbit)
 
   if (re !== undefined) out.re = re
   if (im !== undefined) out.im = im
@@ -153,6 +166,7 @@ export function parse(hash: string): Partial<ViewState> | null {
   if (field !== undefined) out.field = field
   if (cRe !== undefined) out.cRe = cRe
   if (cIm !== undefined) out.cIm = cIm
+  if (orbit !== undefined) out.orbit = orbit
 
   return Object.keys(out).length === 0 ? null : (out as Partial<ViewState>)
 }
