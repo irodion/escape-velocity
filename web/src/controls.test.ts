@@ -279,7 +279,7 @@ describe('Controls', () => {
     )
   })
 
-  it('populates all eight controls from `initial` and fires nothing during construction', () => {
+  it('populates all nine controls from `initial` and fires nothing during construction', () => {
     new Controls(form, INITIAL, onChange)
     // The slider carries the *index* of 256 in the stop table; its readout
     // shows the count. The constructor also drives the range bounds.
@@ -294,6 +294,7 @@ describe('Controls', () => {
     expect(selectByName(form, 'mode').value).toBe('mandelbrot')
     expect(inputByName(form, 'c-re').valueAsNumber).toBe(-0.7)
     expect(inputByName(form, 'c-im').valueAsNumber).toBe(0.27015)
+    expect(inputByName(form, 'orbit').checked).toBe(INITIAL.orbit)
     expect(onChange).not.toHaveBeenCalled()
   })
 

@@ -321,7 +321,11 @@ export class OrbitOverlay {
     ctx.stroke()
     ctx.clip()
 
-    // The |z| = 2 escape circle, for reference (the orbit crosses it on escape).
+    // The classic |z| = 2 circle: the textbook Mandelbrot escape radius, drawn
+    // as a pedagogical reference — NOT the renderer's numerical bailout, which
+    // is the much larger |z| > 256 (BAILOUT_SQR = 65536). A diverging orbit
+    // passes beyond radius 2 on its way out, but a bounded orbit can also wander
+    // outside it without escaping, so reaching it does not imply escape.
     ctx.beginPath()
     ctx.ellipse(mapX(0), mapY(0), 2 * scale, 2 * scale, 0, 0, TAU)
     ctx.strokeStyle = `rgba(${rgb}, 0.18)`
