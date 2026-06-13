@@ -86,7 +86,7 @@ jobs:
       - name: Build WASM artifact (nightly + build-std for WASM threads, Slice 7B)
         run: rustup run nightly-2025-11-15 wasm-pack build crates/fractal-wasm --target web --out-dir ../../web/wasm --release
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10.30.1
 
