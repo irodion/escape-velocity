@@ -443,13 +443,22 @@ const renderCoords = (state: ViewState): void => {
 }
 
 // Update the readout synchronously (cheap, and the user wants instant feedback)
-// and schedule the history write. The write is debounced and skipped when the
-// hash is unchanged, so a burst of commits — or a refit that doesn't move the
-// framing — collapses to at most one `replaceState` (which browsers rate-limit)
-// shortly after the view settles.
-const syncView = (): void => {
+// and, when `persist`, schedule the history write. The write is debounced and
+// skipped when the hash is unchanged, so a burst of commits collapses to at
+// most one `replaceState` (which browsers rate-limit) shortly after the view
+// settles.
+//
+// `persist` is false for a `refit`: a window/canvas resize changes only the
+// buffer's width/height, which are deliberately excluded from `ViewState`
+// (they describe the device, not the view — see view-state.ts), so the
+// serialized framing is identical before and after. Writing anyway would dirty
+// a first-time visitor's clean URL on a mere resize — turning `#`-less into a
+// full permalink without them ever moving the view. We still re-render the
+// readout (harmless; the centre/zoom are unchanged) but leave the URL alone.
+const syncView = (persist = true): void => {
   const state = currentViewState()
   renderCoords(state)
+  if (!persist) return
   const hash = serialize(state)
   if (urlWriteTimer !== undefined) {
     clearTimeout(urlWriteTimer)
@@ -472,10 +481,11 @@ renderCoords(currentViewState())
 // iteration buffer by definition, so this routes through `render` (which
 // refreshes the cache too), never `recolorize`. Subscribing here is the *only*
 // thing that turns a `store.set` into pixels, so a future viewport writer needs
-// no render call of its own.
-store.subscribe(() => {
+// no render call of its own. A `refit` (resize) re-renders without persisting
+// to the URL — it never changes the serialized view (see `syncView`).
+store.subscribe((_viewport, source) => {
   rerender()
-  syncView()
+  syncView(source !== 'refit')
 })
 
 // The controller needs no binding: it wires its own canvas listeners and

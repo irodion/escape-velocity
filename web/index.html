@@ -665,22 +665,27 @@
       <!-- Coordinate instrument (O1 + drawer consolidation): every piece of the
            image's complex-plane state in one cluster. main.ts writes the view
            centre cells (re/im/zoom) on every commit; the `c` row holds the
-           editable Julia seed (controls.ts enables/disables it by mode). The
-           visible cells are aria-hidden — the off-screen #coords mirror carries
-           the whole readout as one aria-live="polite" string so a screen reader
-           announces the settled view once, never mid-gesture. -->
+           editable Julia seed (controls.ts enables/disables it by mode).
+
+           The three read-only cells are individually aria-hidden — the
+           off-screen #coords mirror carries them as one aria-live="polite"
+           string so a screen reader announces the settled view once, never
+           mid-gesture. The `c` row is deliberately NOT hidden: its inputs are
+           focusable in Julia mode, and a focusable control inside an
+           aria-hidden subtree is an accessibility trap (its label is dropped
+           from the tree). It exposes its own labelled inputs instead. -->
       <section class="coords" aria-labelledby="coords-legend">
         <h2 class="coords__legend" id="coords-legend">Coordinates</h2>
-        <dl class="coords__grid" aria-hidden="true">
-          <div class="coord">
+        <dl class="coords__grid">
+          <div class="coord" aria-hidden="true">
             <dt class="coord__key">re</dt>
             <dd class="coord__val" data-coord="re">—</dd>
           </div>
-          <div class="coord">
+          <div class="coord" aria-hidden="true">
             <dt class="coord__key">im</dt>
             <dd class="coord__val" data-coord="im">—</dd>
           </div>
-          <div class="coord">
+          <div class="coord" aria-hidden="true">
             <dt class="coord__key">zoom</dt>
             <dd class="coord__val" data-coord="zoom">—</dd>
           </div>
