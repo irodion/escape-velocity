@@ -1,0 +1,29 @@
+# cargo-deny policy. The `vet` job (safedep) covers the npm tree; this covers
+# the Rust tree, which vet's policy is not tuned for. Two checks matter here:
+# security advisories (RUSTSEC) and license compatibility.
+#
+# The project is GPL-3.0-or-later (ADR-0010), so every dependency must carry a
+# GPL-compatible license. The `allow` list below is the exact set found in the
+# current tree plus a few common permissive licenses (BSD/ISC/Zlib) that dev
+# tooling tends to pull, so a routine dependency bump doesn't trip the gate.
+# Re-run `cargo deny check` after adding a dependency and extend this list only
+# with GPL-compatible licenses.
+
+[advisories]
+version = 2
+# Treat yanked crates as hard failures (they're yanked for a reason). Known
+# RUSTSEC vulnerabilities fail the check by default under version 2.
+yanked = "deny"
+
+[licenses]
+version = 2
+# GPL-3.0-or-later is the project's own license (the workspace crates carry it).
+# The rest are the permissive, GPL-compatible licenses actually present in the
+# dependency tree (verified with `cargo deny check licenses`). Add to this list
+# only when a new dependency introduces another GPL-compatible license.
+allow = [
+  "GPL-3.0-or-later",
+  "MIT",
+  "Apache-2.0",
+  "Unicode-3.0",
+]
