@@ -540,6 +540,20 @@ const orbitOverlay = new OrbitOverlay(
   () => controlsForm.classList.contains('open'),
 )
 
+// Whether the controls drawer was open at the *start* of the current press.
+// The drawer's light-dismiss (drawer.ts) closes the drawer on the canvas
+// `mouseup`, which runs in the target phase — before the InputController's
+// document-level `mouseup` delivers the click below — so by then the live
+// `.open` class already reads closed. Capturing the state at `mousedown`
+// (which only arms the dismiss, never closes it) lets the c-picker treat a
+// dismiss Alt-click as a dismiss, not a pick. Neither the drawer's nor the
+// controller's own `mousedown` listener mutates `.open`, so registration order
+// here is irrelevant.
+let drawerOpenAtPress = false
+canvas.addEventListener('mousedown', () => {
+  drawerOpenAtPress = controlsForm.classList.contains('open')
+})
+
 // The controller needs no binding: it wires its own canvas listeners and
 // subscribes to the store in its constructor, and main.ts now reaches the
 // viewport through the store rather than through the controller.
@@ -556,13 +570,10 @@ new InputController(
   //    point and switches to Julia (O2, #92).
   //  - any other click seeds/pins the orbit at that point (E1, #94).
   (cssX, cssY, modifiers) => {
-    // Mirror the overlay's drawer-open guard: a click that lands while the
-    // drawer is open is a light-dismiss, not a c-pick.
-    if (
-      modifiers.altKey &&
-      current.mode === 'mandelbrot' &&
-      !controlsForm.classList.contains('open')
-    ) {
+    // A click that *began* while the drawer was open is a light-dismiss, not a
+    // c-pick (the live `.open` class can't be used — the dismiss already
+    // cleared it on the canvas `mouseup`; see `drawerOpenAtPress`).
+    if (modifiers.altKey && current.mode === 'mandelbrot' && !drawerOpenAtPress) {
       const view = viewGeometryFromStore(store, canvas)
       if (view !== null) {
         const { re, im } = cssToComplex(cssX, cssY, view)
