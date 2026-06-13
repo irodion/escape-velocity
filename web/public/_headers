@@ -14,7 +14,26 @@
 # Every asset is same-origin (self-hosted since Slice 0, watch-list #1), so
 # COEP: require-corp has no cross-origin subresource to reject; CORP is added
 # belt-and-braces.
+# Strict Content-Security-Policy + hardening headers. The app is fully
+# same-origin (self-hosted since Slice 0), so the policy is tight where it
+# matters: `script-src` admits only same-origin scripts plus the
+# `'wasm-unsafe-eval'` the WebAssembly compiler requires — no `'unsafe-inline'`
+# script vector. `worker-src 'self'` admits the ES-module render worker and the
+# rayon thread workers. `img-src ... data:` covers the data-URI manifest icons.
+# `base-uri 'none'` and `frame-ancestors 'none'` block base-tag injection and
+# clickjacking.
+#
+# `style-src` keeps `'unsafe-inline'` because the entire UI stylesheet is an
+# inline `<style>` block in index.html (the framework-free, inline-CSS design of
+# ADR-0003; `--accent` is also rewritten at runtime). A strict `style-src 'self'`
+# would block it and ship an unstyled page. CSS injection is a far weaker vector
+# than script injection, which stays locked down. `font-src ... data:` admits the
+# self-hosted @fontsource webfonts, which Vite inlines as `data:` URIs. The
+# pwa-config guard test asserts this CSP survives here.
 /*
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Embedder-Policy: require-corp
   Cross-Origin-Resource-Policy: same-origin
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; img-src 'self' data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer

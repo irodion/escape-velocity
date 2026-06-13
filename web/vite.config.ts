@@ -67,6 +67,20 @@ const crossOriginIsolationHeaders = {
   'Cross-Origin-Embedder-Policy': 'require-corp',
 }
 
+// Strict CSP + hardening headers, mirroring production's `public/_headers` so
+// `pnpm preview` exercises the exact policy the deployed site enforces. Kept
+// OFF the dev server below: Vite HMR injects inline scripts and uses `eval`,
+// which this policy forbids — dev would break. `style-src` keeps
+// `'unsafe-inline'` for the inline UI stylesheet (ADR-0003); script-src stays
+// strict. Keep this CSP string identical to the one in `public/_headers` (the
+// guard test asserts the production copy).
+const securityHardeningHeaders = {
+  'Content-Security-Policy':
+    "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; img-src 'self' data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+}
+
 // wasm-bindgen-rayon's `workerHelpers` *dynamically* imports the wasm glue
 // (each spawned thread worker re-instantiates the module against the shared
 // memory), while the main thread and the render worker import that same glue
@@ -113,7 +127,7 @@ export default defineConfig({
     headers: crossOriginIsolationHeaders,
   },
   preview: {
-    headers: crossOriginIsolationHeaders,
+    headers: { ...crossOriginIsolationHeaders, ...securityHardeningHeaders },
   },
   // Emit workers as ES modules. The render worker (Slice 6) is constructed
   // with `{ type: 'module' }` and uses top-level `await`; the rayon thread
