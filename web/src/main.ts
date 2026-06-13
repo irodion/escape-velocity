@@ -24,6 +24,7 @@ import {
   type Settings,
 } from './controls.js'
 import { mountDrawer } from './drawer.js'
+import { buildFilename, exportCurrentFrame, exportSupersampled } from './export-png.js'
 import { showFatal } from './fatal.js'
 import { defaultModeForField, isModeValidForField } from './field-modes.js'
 import { InputController } from './input.js'
@@ -48,6 +49,7 @@ import {
   type ViewState,
 } from './view-state.js'
 import { createViewportStore } from './viewport-store.js'
+import type { RenderRequest } from './worker/protocol.js'
 
 // PWA install + update lifecycle (Slice 8B). The controller (a deep, tested
 // state machine) is fed the real platform adapters here: the SW registrar is
@@ -134,6 +136,17 @@ if (!(controlsForm instanceof HTMLFormElement)) {
 const controlsToggle = document.getElementById('controls-toggle')
 if (!(controlsToggle instanceof HTMLButtonElement)) {
   throw new Error('button#controls-toggle not found in index.html')
+}
+// PNG export controls (O2, #92). Actions, not form state — wired directly
+// below rather than through Controls, so a save never emits a settings
+// snapshot or triggers a rerender.
+const exportPngButton = document.getElementById('export-png')
+if (!(exportPngButton instanceof HTMLButtonElement)) {
+  throw new Error('button#export-png not found in index.html')
+}
+const exportPng2xButton = document.getElementById('export-png-2x')
+if (!(exportPng2xButton instanceof HTMLButtonElement)) {
+  throw new Error('button#export-png-2x not found in index.html')
 }
 // The off-screen aria-live mirror (one string for screen readers) and the
 // three visible value cells of the coordinate instrument. main.ts owns the
@@ -743,3 +756,62 @@ window.addEventListener('hashchange', () => {
   const live = store.get()
   store.set(new Viewport(view.re, view.im, view.zoom, live.width(), live.height()), 'hashchange')
 })
+
+// PNG export (O2, #92). The 1× path saves the settled frame already on the
+// canvas; the 2× path renders one off-screen supersampled frame on a dedicated
+// one-shot worker (see export-png.ts). The 2× supersample factor — twice the
+// logical viewport size, independent of the on-screen Resolution knob — rides
+// the same `computeBufferDims` machinery as every render, so the pixel budget
+// (`MAX_RENDER_PIXELS`) still clamps a huge window's export.
+const EXPORT_SUPERSAMPLE = 2
+const buildExportRequest = (): RenderRequest => {
+  const viewport = store.get()
+  const { width, height, scale } = computeBufferDims(
+    viewport.width(),
+    viewport.height(),
+    EXPORT_SUPERSAMPLE,
+    MAX_RENDER_PIXELS,
+  )
+  return {
+    kind: 'render',
+    epoch: 0, // a one-shot worker; epoch coalescing does not apply
+    width,
+    height,
+    centerRe: viewport.center_re(),
+    centerIm: viewport.center_im(),
+    zoom: viewport.zoom() * scale,
+    maxIter: current.maxIter,
+    palette: paletteEnum(current.palette),
+    mode: modeEnum(current.normalisation),
+    fractalKind: kindEnum(current.mode),
+    cRe: current.cRe,
+    cIm: current.cIm,
+    field: fieldEnum(current.field),
+  }
+}
+
+// Serialise exports so a slow 2× render can't overlap a second click (or a 1×
+// save), and reflect the busy state by disabling both buttons.
+let exporting = false
+const runExport = async (supersample: boolean): Promise<void> => {
+  if (exporting) return
+  exporting = true
+  exportPngButton.disabled = true
+  exportPng2xButton.disabled = true
+  try {
+    const filename = buildFilename(currentViewState())
+    if (supersample) {
+      await exportSupersampled(buildExportRequest(), filename)
+    } else {
+      await exportCurrentFrame(canvas, filename)
+    }
+  } catch (error) {
+    console.error('PNG export failed:', error)
+  } finally {
+    exporting = false
+    exportPngButton.disabled = false
+    exportPng2xButton.disabled = false
+  }
+}
+exportPngButton.addEventListener('click', () => void runExport(false))
+exportPng2xButton.addEventListener('click', () => void runExport(true))
