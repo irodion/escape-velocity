@@ -47,12 +47,16 @@ export const PAN_DEADZONE_PX = 0.5
  *
  * ## Drag semantics
  *
- * On mousedown the controller snapshots the canvas pixels via
- * `getImageData`. Each mousemove paints that snapshot back into the
- * canvas buffer at the current drag offset — no recompute, just a
- * shift of an already-rendered image. The canvas DOM element itself
- * never moves. On mouseup, one `pan_by_pixels` call produces the
- * final viewport and one `onChange` call hands it off.
+ * On mousedown the controller snapshots the canvas into a cached
+ * offscreen canvas via `drawImage` (a GPU-path blit, not a CPU pixel
+ * readback). Each mousemove blits that snapshot back into the canvas
+ * buffer at the current drag offset, again via `drawImage` — no
+ * recompute, just a shift of an already-rendered image. `drawImage`
+ * stays on the GPU and is ~an order of magnitude cheaper than the
+ * `putImageData` it replaced (#82), which wrote the full ~10 MB pixel
+ * buffer on the main thread every mousemove. The canvas DOM element
+ * itself never moves. On mouseup, one `pan_by_pixels` call produces
+ * the final viewport and one `onChange` call hands it off.
  *
  * ## Two pixel spaces
  *
@@ -121,6 +125,26 @@ export class InputController {
   // once the Preview has scaled the canvas, re-reading it would feed
   // drifting, scaled cursor coordinates into the zoom — see `handleWheel`.
   private scrubRect: DOMRect | null = null
+  // Reusable offscreen canvas holding the drag snapshot. Cached across
+  // gestures so a pan never allocates a fresh buffer; `captureSnapshot`
+  // only resizes it when the render buffer's dimensions change.
+  private snapshotCanvas: HTMLCanvasElement | null = null
+
+  // Blit the current canvas into the cached offscreen buffer and return
+  // it, sizing the buffer to match. Returns null if the offscreen 2D
+  // context is unavailable (mousedown then bails, as it does for a null
+  // main context). The full-surface `drawImage` at (0,0) overwrites the
+  // whole buffer, so no clear is needed even when the buffer is reused.
+  private captureSnapshot(): HTMLCanvasElement | null {
+    const off = this.snapshotCanvas ?? document.createElement('canvas')
+    this.snapshotCanvas = off
+    if (off.width !== this.canvas.width) off.width = this.canvas.width
+    if (off.height !== this.canvas.height) off.height = this.canvas.height
+    const offCtx = off.getContext('2d')
+    if (offCtx === null) return null
+    offCtx.drawImage(this.canvas, 0, 0)
+    return off
+  }
 
   private readonly handleMouseDown = (event: MouseEvent): void => {
     // Only the primary (left) button starts a pan. Right- and
@@ -139,6 +163,8 @@ export class InputController {
     // means the snapshot/measurement below read an untransformed canvas (a
     // live transform would scale the pan delta).
     this.clearZoomPreview()
+    const snapshot = this.captureSnapshot()
+    if (snapshot === null) return
     // Do NOT discard in-flight work here. A plain click (mousedown + mouseup
     // with no move — e.g. the drawer's light-dismiss click) must leave an
     // in-flight deep render untouched. The discard is deferred to the first
@@ -147,7 +173,7 @@ export class InputController {
     this.dragState = {
       startClientX: event.clientX,
       startClientY: event.clientY,
-      snapshot: ctx.getImageData(0, 0, this.canvas.width, this.canvas.height),
+      snapshot,
       invalidated: false,
     }
     this.canvas.classList.add('dragging')
@@ -178,12 +204,12 @@ export class InputController {
 
     // Fill black for the edges exposed by the drag — this matches the
     // Mandelbrot "outside the set" colour, so the strips look like
-    // part of the fractal rather than blank canvas. `putImageData`
-    // overwrites pixels (it doesn't blend), so the snapshot fully
-    // covers the centre.
+    // part of the fractal rather than blank canvas. `drawImage` of the
+    // opaque snapshot fully covers the centre, so the black only shows
+    // through at the shifted-in edges.
     ctx.fillStyle = 'black'
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height)
-    ctx.putImageData(this.dragState.snapshot, dxInternal, dyInternal)
+    ctx.drawImage(this.dragState.snapshot, dxInternal, dyInternal)
   }
 
   private readonly handleMouseUp = (event: MouseEvent): void => {
@@ -365,7 +391,9 @@ export class InputController {
 interface DragState {
   readonly startClientX: number
   readonly startClientY: number
-  readonly snapshot: ImageData
+  // The drag snapshot, held as an offscreen canvas so each mousemove can
+  // re-blit it with `drawImage` (GPU path) rather than `putImageData` (#82).
+  readonly snapshot: HTMLCanvasElement
   // Whether the deferred in-flight-render discard has fired for this drag.
   // Starts false on mousedown; set true on the first real mousemove so the
   // discard runs once, when an actual drag begins (B3, #74).

@@ -55,26 +55,24 @@ function setRect(
 }
 
 // Minimal 2D context stub. jsdom does not implement canvas painting,
-// so `canvas.getContext('2d')` returns null by default. The
-// InputController calls `getImageData` on mousedown and
-// `fillRect` / `putImageData` on mousemove — these three are the only
-// canvas-API touchpoints, so the stub only needs to spy on them.
-function makeCtxStub(snapshot: ImageData): {
+// so `canvas.getContext('2d')` returns null by default. After #82 the
+// InputController's only canvas-API touchpoints are `drawImage` (to
+// snapshot the canvas into the offscreen buffer on mousedown, and to
+// blit it back on mousemove) and `fillRect` (the black edge fill on
+// mousemove), so the stub only needs to spy on those two.
+function makeCtxStub(): {
   ctx: CanvasRenderingContext2D
-  getImageData: ReturnType<typeof vi.fn>
-  putImageData: ReturnType<typeof vi.fn>
+  drawImage: ReturnType<typeof vi.fn>
   fillRect: ReturnType<typeof vi.fn>
 } {
-  const getImageData = vi.fn().mockReturnValue(snapshot)
-  const putImageData = vi.fn()
+  const drawImage = vi.fn()
   const fillRect = vi.fn()
   const ctx = {
-    getImageData,
-    putImageData,
+    drawImage,
     fillRect,
     fillStyle: '',
   } as unknown as CanvasRenderingContext2D
-  return { ctx, getImageData, putImageData, fillRect }
+  return { ctx, drawImage, fillRect }
 }
 
 // Construct a controller wired to a real `ViewportStore` seeded with the
@@ -105,8 +103,8 @@ describe('InputController', () => {
   let canvas: HTMLCanvasElement
   let onChange: ReturnType<typeof vi.fn<(viewport: Viewport) => void>>
   let viewport: ReturnType<typeof makeViewportDouble>
-  let snapshot: ImageData
   let ctxStub: ReturnType<typeof makeCtxStub>
+  let offscreenCtxStub: ReturnType<typeof makeCtxStub>
 
   beforeEach(() => {
     // Wheel zoom defers its recompute to a debounced Settle, so the wheel
@@ -120,14 +118,21 @@ describe('InputController', () => {
     canvas.height = 600
     document.body.appendChild(canvas)
     setRect(canvas, { width: 800, height: 600 })
-    snapshot = {
-      data: new Uint8ClampedArray(800 * 600 * 4),
-      width: 800,
-      height: 600,
-      colorSpace: 'srgb',
-    } as ImageData
-    ctxStub = makeCtxStub(snapshot)
-    vi.spyOn(canvas, 'getContext').mockReturnValue(ctxStub.ctx)
+    ctxStub = makeCtxStub()
+    // The controller snapshots into a separate offscreen canvas created via
+    // `document.createElement`. `getContext` is inherited from the prototype
+    // (not an own property of either element), so a single prototype spy
+    // serves both; it routes by instance — the on-screen `canvas` gets
+    // `ctxStub`, any other canvas (the offscreen buffer) gets
+    // `offscreenCtxStub`. Keeping the two stubs distinct lets the
+    // snapshot-capture `drawImage` (offscreen) be asserted apart from the
+    // paint `drawImage` (on-screen).
+    offscreenCtxStub = makeCtxStub()
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (
+      this: HTMLCanvasElement,
+    ) {
+      return this === canvas ? ctxStub.ctx : offscreenCtxStub.ctx
+    })
     onChange = vi.fn<(viewport: Viewport) => void>()
     viewport = makeViewportDouble()
   })
@@ -223,22 +228,24 @@ describe('InputController', () => {
     mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
-    expect(ctxStub.getImageData).toHaveBeenCalledWith(0, 0, 800, 600)
+    // Snapshot is a `drawImage` blit of the on-screen canvas into the
+    // offscreen buffer (GPU path), not a `getImageData` readback (#82).
+    expect(offscreenCtxStub.drawImage).toHaveBeenCalledWith(canvas, 0, 0)
 
     document.dispatchEvent(
       new MouseEvent('mousemove', { clientX: 130, clientY: 70, bubbles: true }),
     )
     // dx=30, dy=20; rect matches internal so no scaling. Each mousemove
-    // re-paints the full canvas (fillRect black, then putImageData at
-    // offset) — no CSS transform applied.
+    // re-paints the full canvas (fillRect black, then drawImage of the
+    // offscreen snapshot at the offset) — no CSS transform applied.
     expect(ctxStub.fillRect).toHaveBeenLastCalledWith(0, 0, 800, 600)
-    expect(ctxStub.putImageData).toHaveBeenLastCalledWith(snapshot, 30, 20)
+    expect(ctxStub.drawImage).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), 30, 20)
     expect(canvas.style.transform).toBe('')
 
     document.dispatchEvent(
       new MouseEvent('mousemove', { clientX: 175, clientY: 100, bubbles: true }),
     )
-    expect(ctxStub.putImageData).toHaveBeenLastCalledWith(snapshot, 75, 50)
+    expect(ctxStub.drawImage).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), 75, 50)
 
     document.dispatchEvent(new MouseEvent('mouseup', { clientX: 175, clientY: 100, bubbles: true }))
     // No transform was ever applied; nothing to clear.
@@ -256,7 +263,7 @@ describe('InputController', () => {
       new MouseEvent('mousemove', { clientX: 150, clientY: 80, bubbles: true }),
     )
     // 50 CSS px × (800/400) = 100 internal px; 30 CSS × (600/300) = 60.
-    expect(ctxStub.putImageData).toHaveBeenLastCalledWith(snapshot, 100, 60)
+    expect(ctxStub.drawImage).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), 100, 60)
 
     document.dispatchEvent(new MouseEvent('mouseup', { clientX: 150, clientY: 80, bubbles: true }))
     expect(viewport.pan_by_pixels).toHaveBeenCalledWith(100, 60)
@@ -625,7 +632,7 @@ describe('InputController', () => {
     canvas.dispatchEvent(
       new MouseEvent('mousedown', { button: 1, clientX: 50, clientY: 50, bubbles: true }),
     )
-    expect(ctxStub.getImageData).not.toHaveBeenCalled()
+    expect(offscreenCtxStub.drawImage).not.toHaveBeenCalled()
     expect(canvas.classList.contains('dragging')).toBe(false)
 
     document.dispatchEvent(new MouseEvent('mousemove', { clientX: 80, clientY: 70, bubbles: true }))
@@ -663,7 +670,7 @@ describe('InputController', () => {
     expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
     expect(onChange).not.toHaveBeenCalled()
     expect(canvas.classList.contains('dragging')).toBe(false)
-    expect(ctxStub.putImageData).not.toHaveBeenCalled()
+    expect(ctxStub.drawImage).not.toHaveBeenCalled()
   })
 
   it('a non-gesture store write redirects subsequent wheel events to the new viewport without firing onChange', () => {
