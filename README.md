@@ -162,6 +162,30 @@ pnpm build         # vite build
 pnpm fmt           # biome auto-fix (local convenience, not in CI)
 ```
 
+## Releases
+
+Two version identifiers serve two audiences:
+
+- **Build identifier** — every build inlines its git short SHA
+  (`__APP_VERSION__`, via Vite's `define`). It is logged at boot
+  (`Escape Velocity · build <sha>`) and shown in the service-worker update
+  toast, so a live tab can always be correlated with a commit — the practical
+  need for a continuously-deployed PWA.
+- **Release tag** — behavior-changing merges get an annotated `vX.Y.Z` tag.
+  GitHub generates the release notes from the merged PR titles, which the
+  per-slice PR discipline makes nearly free; there is no hand-curated
+  CHANGELOG. The workspace `version` in `Cargo.toml` and `web/package.json`
+  tracks the latest tag.
+
+Cut a release after the behaviour-changing PR merges:
+
+```sh
+git checkout main && git pull
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+# then: GitHub → Releases → Draft → choose the tag → "Generate release notes"
+```
+
 ## Contributing
 
 The project is GPL-3.0 ([ADR-0010](docs/decisions/0010-gpl-3-license.md)) —

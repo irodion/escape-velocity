@@ -208,6 +208,12 @@ try {
   throw error
 }
 
+// Version signal (O2, #92): announce which build is running. For a
+// continuously-deployed PWA this is the one reliable way to correlate a live
+// tab with a commit when debugging. `__APP_VERSION__` is inlined at build time
+// (see vite.config.ts).
+console.info(`Escape Velocity · build ${__APP_VERSION__}`)
+
 // The viewport's logical dimensions: the canvas's CSS box, rounded and
 // floored to ≥ 1 so a pre-layout or `display:none` canvas can't feed a
 // zero dimension to the WASM seam. Re-read after every layout change
