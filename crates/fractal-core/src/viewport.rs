@@ -597,3 +597,167 @@ mod tests {
         assert!((after.im - before.im).abs() <= tolerance);
     }
 }
+
+#[cfg(test)]
+mod prop_tests {
+    //! Property-based companions to the example tests above. Each one
+    //! generalises an invariant the hand-written tests assert at fixed points
+    //! over a randomised space of viewports, pixels, and zoom factors.
+
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Magnitude-scaled approximate equality for f64 geometry. Complex-plane
+    /// coordinates here range from O(1) near the origin up to ~70 at the
+    /// min-zoom floor with a wide buffer, so a relative epsilon keeps the
+    /// bound meaningful across the whole space rather than failing on large
+    /// values or passing trivially on small ones.
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() <= 1e-9 * (1.0 + a.abs().max(b.abs()))
+    }
+
+    /// Centre anywhere in the canonical viewing region.
+    fn center() -> impl Strategy<Value = Complex64> {
+        (-2.0_f64..2.0, -2.0_f64..2.0).prop_map(|(re, im)| Complex64::new(re, im))
+    }
+
+    /// Zoom across the full supported range, `[MIN_ZOOM, MAX_ZOOM]` (the
+    /// ADR-0006 f64 ceiling). A linear range samples high zooms heavily,
+    /// which is exactly where the well-conditioned invariants below must
+    /// still hold.
+    fn zoom() -> impl Strategy<Value = f64> {
+        MIN_ZOOM..MAX_ZOOM
+    }
+
+    /// Zoom bounded well below the f64 ceiling. The pixel↔complex round-trip
+    /// and the zoom-then-unzoom test invert the per-pixel scale, which is
+    /// ill-conditioned once the scale approaches the f64 mantissa step near
+    /// `MAX_ZOOM` (the very degradation ADR-0006 documents). `1e6` keeps the
+    /// inverse comfortably within precision — matching the deepest zoom the
+    /// example-based cursor-invariance test exercises.
+    fn moderate_zoom() -> impl Strategy<Value = f64> {
+        MIN_ZOOM..1e6
+    }
+
+    /// Buffer dimensions from a 1px degenerate case up to 4K-class.
+    fn dims() -> impl Strategy<Value = (u32, u32)> {
+        (1_u32..=4096, 1_u32..=4096)
+    }
+
+    proptest! {
+        /// ADR-0011: `pixel_scale` depends only on `zoom` (keyed to the fixed
+        /// `REFERENCE_WIDTH`), so it matches the reference formula exactly, is
+        /// identical across any two buffer sizes, and survives `with_resolution`
+        /// unchanged.
+        #[test]
+        fn pixel_scale_is_resolution_independent(
+            c in center(), z in zoom(), (w, h) in dims(), (w2, h2) in dims(),
+        ) {
+            let vp = Viewport::new(c, z, w, h);
+            prop_assert_eq!(vp.pixel_scale(), (BASE_RE_SPAN / REFERENCE_WIDTH) / z);
+            prop_assert_eq!(vp.pixel_scale(), Viewport::new(c, z, w2, h2).pixel_scale());
+            prop_assert_eq!(vp.with_resolution(w2, h2).pixel_scale(), vp.pixel_scale());
+        }
+
+        /// Pixels are square in the complex plane: the per-pixel step is the
+        /// same magnitude along both axes, at any zoom and aspect ratio.
+        #[test]
+        fn pixels_are_square(c in center(), z in zoom(), (w, h) in dims()) {
+            let vp = Viewport::new(c, z, w, h);
+            let dx = vp.pixel_to_complex_f(1.0, 0.0).re - vp.pixel_to_complex_f(0.0, 0.0).re;
+            let dy = vp.pixel_to_complex_f(0.0, 0.0).im - vp.pixel_to_complex_f(0.0, 1.0).im;
+            prop_assert!(close(dx, dy));
+        }
+
+        /// `pixel_to_complex_f` round-trips through its analytic inverse (there
+        /// is no public `complex_to_pixel`, so the inverse is derived inline
+        /// from the same scale/midpoint formula).
+        #[test]
+        fn pixel_complex_round_trips(
+            c in center(), z in moderate_zoom(), (w, h) in dims(),
+            fx in 0.0_f64..1.0, fy in 0.0_f64..1.0,
+        ) {
+            let vp = Viewport::new(c, z, w, h);
+            let (px, py) = (fx * f64::from(w), fy * f64::from(h));
+            let scale = vp.pixel_scale();
+            let mid_x = f64::from(w - 1) / 2.0;
+            let mid_y = f64::from(h - 1) / 2.0;
+            let pt = vp.pixel_to_complex_f(px, py);
+            let px_back = (pt.re - c.re) / scale + mid_x;
+            let py_back = mid_y - (pt.im - c.im) / scale;
+            // Recovering a pixel divides by `scale`, so the centre's f64
+            // rounding (~eps·|center|) is amplified by 1/scale — the ADR-0006
+            // precision limit, not slop. Bound the pixel-space error by that
+            // conditioning term plus a small relative slack.
+            let tol_x = 1e-9 * (1.0 + px.abs()) + 8.0 * f64::EPSILON * (1.0 + c.re.abs()) / scale;
+            let tol_y = 1e-9 * (1.0 + py.abs()) + 8.0 * f64::EPSILON * (1.0 + c.im.abs()) / scale;
+            prop_assert!((px_back - px).abs() <= tol_x, "x drift: {} vs {}", px_back, px);
+            prop_assert!((py_back - py).abs() <= tol_y, "y drift: {} vs {}", py_back, py);
+        }
+
+        /// The load-bearing pan contract: after `pan_by_pixels(dx, dy)`, the
+        /// world point under pixel `(p + dx, q + dy)` is the point that was
+        /// under `(p, q)` before the pan.
+        #[test]
+        fn pan_shifts_image_consistently(
+            c in center(), z in zoom(), (w, h) in dims(),
+            dx in -5000.0_f64..5000.0, dy in -5000.0_f64..5000.0,
+            fp in 0.0_f64..1.0, fq in 0.0_f64..1.0,
+        ) {
+            let vp = Viewport::new(c, z, w, h);
+            let (p, q) = (fp * f64::from(w), fq * f64::from(h));
+            let before = vp.pixel_to_complex_f(p, q);
+            let after = vp.pan_by_pixels(dx, dy).pixel_to_complex_f(p + dx, q + dy);
+            prop_assert!(close(after.re, before.re));
+            prop_assert!(close(after.im, before.im));
+        }
+
+        /// Panning then un-panning by the same displacement restores the centre
+        /// and leaves zoom/dimensions untouched.
+        #[test]
+        fn pan_then_unpan_is_identity(
+            c in center(), z in zoom(), (w, h) in dims(),
+            dx in -5000.0_f64..5000.0, dy in -5000.0_f64..5000.0,
+        ) {
+            let vp = Viewport::new(c, z, w, h);
+            let round = vp.pan_by_pixels(dx, dy).pan_by_pixels(-dx, -dy);
+            prop_assert!(close(round.center.re, c.re));
+            prop_assert!(close(round.center.im, c.im));
+            prop_assert_eq!(round.zoom, vp.zoom);
+            prop_assert_eq!((round.width, round.height), (w, h));
+        }
+
+        /// Cursor-invariant zoom: the world point under the cursor is unchanged
+        /// by `zoom_around` — including at the clamp boundary, where the algebra
+        /// computes the post-clamp centre.
+        #[test]
+        fn zoom_keeps_point_under_cursor_invariant(
+            c in center(), z in zoom(), (w, h) in dims(),
+            factor in 0.1_f64..10.0, fx in 0.0_f64..1.0, fy in 0.0_f64..1.0,
+        ) {
+            let vp = Viewport::new(c, z, w, h);
+            let (px, py) = (fx * f64::from(w), fy * f64::from(h));
+            let before = vp.pixel_to_complex_f(px, py);
+            let after = vp.zoom_around(px, py, factor).pixel_to_complex_f(px, py);
+            prop_assert!(close(after.re, before.re));
+            prop_assert!(close(after.im, before.im));
+        }
+
+        /// Zooming in then out by the reciprocal factor restores the viewport,
+        /// provided neither step hits a clamp (filtered via `prop_assume!`).
+        #[test]
+        fn zoom_then_unzoom_returns_to_original(
+            c in center(), z in moderate_zoom(), (w, h) in dims(),
+            factor in 0.2_f64..5.0, fx in 0.0_f64..1.0, fy in 0.0_f64..1.0,
+        ) {
+            let stepped = z * factor;
+            prop_assume!((MIN_ZOOM..=MAX_ZOOM).contains(&stepped));
+            let vp = Viewport::new(c, z, w, h);
+            let (px, py) = (fx * f64::from(w), fy * f64::from(h));
+            let round = vp.zoom_around(px, py, factor).zoom_around(px, py, 1.0 / factor);
+            prop_assert!(close(round.zoom, z));
+            prop_assert!(close(round.center.re, c.re));
+            prop_assert!(close(round.center.im, c.im));
+        }
+    }
+}

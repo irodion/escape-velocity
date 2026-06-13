@@ -50,6 +50,26 @@ describe('isolation-survival guard', () => {
     expect(root['Cross-Origin-Resource-Policy']).toBe('same-origin')
   })
 
+  it('enforces a strict CSP and hardening headers (with the WASM-required eval concession)', () => {
+    // A regression here would silently weaken the deployed site's headers.
+    // `'wasm-unsafe-eval'` must survive: without it the WebAssembly compiler is
+    // blocked and the app fails to boot. `worker-src 'self'` must admit the
+    // render + rayon thread workers.
+    const root = headers['/*']
+    const csp = root['Content-Security-Policy']
+    expect(csp).toBeDefined()
+    expect(csp).toContain("default-src 'self'")
+    expect(csp).toContain("script-src 'self' 'wasm-unsafe-eval'")
+    expect(csp).toContain("worker-src 'self'")
+    // Self-hosted webfonts are inlined as data: URIs; without this the
+    // console typography silently falls back to system fonts.
+    expect(csp).toContain("font-src 'self' data:")
+    expect(csp).toContain("base-uri 'none'")
+    expect(csp).toContain("frame-ancestors 'none'")
+    expect(root['X-Content-Type-Options']).toBe('nosniff')
+    expect(root['Referrer-Policy']).toBe('no-referrer')
+  })
+
   it('precaches the .wasm (globs include wasm) so an offline deep render does not 404', () => {
     expect(pwaWorkbox.globPatterns?.some((p) => p.includes('wasm'))).toBe(true)
   })
