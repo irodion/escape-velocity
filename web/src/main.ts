@@ -27,6 +27,7 @@ import { mountDrawer } from './drawer.js'
 import { showFatal } from './fatal.js'
 import { defaultModeForField, isModeValidForField } from './field-modes.js'
 import { InputController } from './input.js'
+import { OrbitOverlay } from './orbit.js'
 import { mountProgress } from './progress.js'
 import { createPwaLifecycle } from './pwa-lifecycle.js'
 import { mountPwaUi } from './pwa-ui.js'
@@ -97,6 +98,7 @@ const INITIAL_FIELD: FieldName = 'escape-time'
 const INITIAL_MODE: FractalMode = 'mandelbrot'
 const INITIAL_C_RE = -0.7
 const INITIAL_C_IM = 0.27015
+const INITIAL_ORBIT = false
 const CENTER_RE = -0.7435
 const CENTER_IM = 0.1314
 const ZOOM = 200.0
@@ -118,6 +120,12 @@ if (!(canvas instanceof HTMLCanvasElement)) {
 const ctx = canvas.getContext('2d')
 if (ctx === null) {
   throw new Error('failed to acquire 2d canvas context')
+}
+// The orbit visualizer's transparent overlay canvas (E1, #94), stacked over
+// `#fractal` inside `.stage` so its pixel box matches.
+const orbitCanvas = document.getElementById('orbit')
+if (!(orbitCanvas instanceof HTMLCanvasElement)) {
+  throw new Error('canvas#orbit not found in index.html')
 }
 const controlsForm = document.getElementById('controls')
 if (!(controlsForm instanceof HTMLFormElement)) {
@@ -237,6 +245,7 @@ const DEFAULT_VIEW: ViewState = {
   field: INITIAL_FIELD,
   cRe: INITIAL_C_RE,
   cIm: INITIAL_C_IM,
+  orbit: INITIAL_ORBIT,
 }
 const resolveView = (
   hash: string,
@@ -254,6 +263,7 @@ const resolveView = (
     mode: view.mode,
     cRe: view.cRe,
     cIm: view.cIm,
+    orbit: view.orbit,
   }
   return { view, settings }
 }
@@ -431,6 +441,7 @@ const currentViewState = (): ViewState => {
     field: current.field,
     cRe: current.cRe,
     cIm: current.cIm,
+    orbit: current.orbit,
   }
 }
 
@@ -488,6 +499,26 @@ store.subscribe((_viewport, source) => {
   syncView(source !== 'refit')
 })
 
+// Orbit visualizer (E1, #94). A presentation-only overlay: it reads the
+// authoritative viewport from the store (subscribing for re-projection on every
+// commit) and is fed the compute parameters by `applySettings`/`hashchange`
+// below. Constructed before the InputController so its `pin` is in scope for the
+// controller's click callback. The drawer-open guard makes a light-dismiss
+// click (and `Escape`) defer to the drawer rather than pin/un-pin.
+const orbitOverlay = new OrbitOverlay(
+  orbitCanvas,
+  canvas,
+  store,
+  {
+    mode: current.mode,
+    cRe: current.cRe,
+    cIm: current.cIm,
+    maxIter: current.maxIter,
+    enabled: current.orbit,
+  },
+  () => controlsForm.classList.contains('open'),
+)
+
 // The controller needs no binding: it wires its own canvas listeners and
 // subscribes to the store in its constructor, and main.ts now reaches the
 // viewport through the store rather than through the controller.
@@ -498,6 +529,9 @@ new InputController(
   // premature Settle's frame can't paint mid-scrub and clear the Preview
   // transform out from under the gesture (ADR-0012).
   discardInFlight,
+  // A plain click (no drag) seeds/pins the orbit at that point. Reuses the
+  // controller's canonical click-vs-pan classification (the deadzone branch).
+  (cssX, cssY) => orbitOverlay.pin(cssX, cssY),
 )
 
 // Fit-to-window: re-fit the viewport whenever the canvas's measured box
@@ -581,6 +615,20 @@ const applySettings = (rawNext: Settings): void => {
     controls.setCValues(cRe, cIm)
   }
   const next: Settings = { ...rawNext, cRe, cIm }
+
+  // Feed the orbit overlay the live compute parameters *before* any branch
+  // below writes the store: branch 1's `mode-reset` set notifies synchronously,
+  // and the overlay must already have cleared its pin (mode change flips the
+  // seed's meaning) by the time its store subscription fires. This also
+  // enables/disables the overlay and updates the shown orbit for a c/maxIter
+  // change — none of which touch the fractal render path.
+  orbitOverlay.sync({
+    mode: next.mode,
+    cRe,
+    cIm,
+    maxIter: next.maxIter,
+    enabled: next.orbit,
+  })
 
   // Branch 1: fractal-family change. Reset the viewport to the
   // canonical "starting frame" for the new family so the user lands
@@ -683,6 +731,15 @@ window.addEventListener('hashchange', () => {
   current = settings
   controls.applySettings(settings)
   applyAccent(settings.palette)
+  // Mirror the resolved compute params into the overlay before the store write,
+  // same ordering rationale as the dispatcher's `sync` above.
+  orbitOverlay.sync({
+    mode: settings.mode,
+    cRe: settings.cRe,
+    cIm: settings.cIm,
+    maxIter: settings.maxIter,
+    enabled: settings.orbit,
+  })
   const live = store.get()
   store.set(new Viewport(view.re, view.im, view.zoom, live.width(), live.height()), 'hashchange')
 })

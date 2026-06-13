@@ -26,6 +26,7 @@ const INITIAL: Settings = {
   mode: 'mandelbrot',
   cRe: -0.7,
   cIm: 0.27015,
+  orbit: true,
 }
 
 // Build the same form layout the production index.html ships. Slices
@@ -115,6 +116,10 @@ function buildForm(): HTMLFormElement {
       c.im:
       <input type="number" name="c-im" step="0.0001" value="0.27015" disabled />
     </label>
+    <label>
+      Orbit:
+      <input type="checkbox" name="orbit" checked />
+    </label>
   `
   document.body.appendChild(form)
   return form
@@ -176,6 +181,7 @@ describe('Controls', () => {
         mode: 'julia',
         cRe: -0.512,
         cIm: 0.61,
+        orbit: true,
       })
 
       expect(onChange).not.toHaveBeenCalled()
@@ -432,6 +438,23 @@ describe('Controls', () => {
     modeSelect.dispatchEvent(new Event('change', { bubbles: true }))
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledWith({ ...INITIAL, mode: 'julia' })
+  })
+
+  it('fires onChange once with orbit:false when the Orbit checkbox is unticked', () => {
+    new Controls(form, INITIAL, onChange)
+    const orbit = inputByName(form, 'orbit')
+    orbit.checked = false
+    orbit.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith({ ...INITIAL, orbit: false })
+  })
+
+  it('applySettings reflects the orbit flag into the checkbox without emitting', () => {
+    const controls = new Controls(form, INITIAL, onChange)
+    onChange.mockClear()
+    controls.applySettings({ ...INITIAL, orbit: false })
+    expect(inputByName(form, 'orbit').checked).toBe(false)
+    expect(onChange).not.toHaveBeenCalled()
   })
 
   it('un-disables both c inputs when mode flips mandelbrot → julia', () => {

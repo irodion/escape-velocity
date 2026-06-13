@@ -13,6 +13,7 @@ const SAMPLE: ViewState = {
   field: 'escape-time',
   cRe: -0.7,
   cIm: 0.27015,
+  orbit: true,
 }
 
 describe('serialize / parse', () => {
@@ -93,6 +94,15 @@ describe('parse tolerance', () => {
     expect(parse('#pal=kahol-lavan')?.palette).toBe('kahol-lavan')
     expect(parse('#norm=logarithmic')?.normalisation).toBe('logarithmic')
     expect(parse('#kind=julia')?.mode).toBe('julia')
+  })
+
+  it('parses the orbit toggle as a strict 1/0 boolean, dropping anything else', () => {
+    expect(parse('#orb=1')).toEqual({ orbit: true })
+    expect(parse('#orb=0')).toEqual({ orbit: false })
+    // Junk / truthy-looking strings are not 1|0, so the field drops out and the
+    // caller falls back to the default (orbit on).
+    expect(parse('#orb=true')).toBeNull()
+    expect(parse('#orb=2')).toBeNull()
   })
 
   it('parses a partial hash into just the fields present', () => {

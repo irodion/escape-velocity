@@ -257,6 +257,11 @@ export class InputController {
     // identical render — the exact waste B3 (#74) describes. Bail before the
     // commit. (Cleanup above already ran, so the drag is fully torn down.)
     if (Math.abs(dxInternal) < PAN_DEADZONE_PX && Math.abs(dyInternal) < PAN_DEADZONE_PX) {
+      // This was a click, not a pan — hand the CSS-pixel position to the click
+      // consumer (the orbit visualizer, E1 #94). Reuses this canonical
+      // click-vs-pan classification rather than a separate `click` listener
+      // re-deriving its own threshold.
+      this.onClick(event.clientX - rect.left, event.clientY - rect.top)
       return
     }
 
@@ -364,6 +369,11 @@ export class InputController {
     // (rather than importing the render client) to keep this controller
     // presentation-free. Defaults to a no-op for tests that don't wire it.
     private readonly onInvalidate: () => void = () => {},
+    // Called on a plain click (mousedown + mouseup within the pan deadzone)
+    // with the click's CSS-pixel position relative to the canvas. Drives the
+    // orbit visualizer's pin (E1, #94); a no-op by default, so the controller
+    // stays presentation-free and existing tests need no wiring.
+    private readonly onClick: (cssX: number, cssY: number) => void = () => {},
   ) {
     this.currentViewport = store.get()
     // Any viewport write the controller did *not* author (a refit, a
