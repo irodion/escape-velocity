@@ -188,6 +188,23 @@
       }
       .console-head .sub b { color: var(--accent); font-weight: 500; }
 
+      /* ── coordinate readout (O1) ──
+         A read-only strip under the header showing where the view sits in the
+         complex plane (re / im / zoom), updated on every commit by main.ts.
+         Tabular figures so the digits don't jitter as they tick; the same
+         dim instrument ink as `.sub`, with the labels dimmer still so the
+         numbers read first. Sits in normal flow under the head, above the
+         first control row. */
+      .console-head + .coords {
+        margin: -1.2rem 0 1.4rem;
+        font-family: var(--font-mono);
+        font-variant-numeric: tabular-nums;
+        font-size: 0.62rem;
+        letter-spacing: 0.04em;
+        color: var(--ink);
+        white-space: nowrap;
+      }
+
       /* ── a control row ──
          A tiny uppercase label stacked over a borderless native control, with
          a hairline beneath: the form reads as a stack of instrument readouts
@@ -573,6 +590,11 @@
         <span class="mark">Escape&nbsp;Velocity</span>
         <span class="sub">z<b>²</b>+c</span>
       </div>
+      <!-- Live coordinate readout (O1): main.ts writes the re/im/zoom of the
+           current view here on every commit. Starts blank; populated before
+           the first frame. aria-live="polite" so the value is announced when
+           it settles, never mid-gesture. -->
+      <div id="coords" class="coords" aria-live="polite"></div>
       <label class="field field--range">
         <span class="field__label">
           Iterations

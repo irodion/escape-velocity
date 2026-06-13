@@ -104,6 +104,23 @@ export const MAX_ITER_STOPS: readonly number[] = [
   1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192,
 ]
 
+/**
+ * Snap an arbitrary iteration count to the nearest `MAX_ITER_STOPS` member.
+ *
+ * The `Controls` constructor *throws* on a `maxIter` that isn't exactly a stop
+ * (the slider is index-addressed). That fail-fast is right for an in-code
+ * programmer constant, but fatal for *external* input — a persisted or shared
+ * URL (O1, #91) can carry a stale `1000` from before the slider existed, or a
+ * value from a future stop table. Hydration runs the foreign number through
+ * here first so the form always boots on a real stop instead of killing every
+ * control. Lives beside the table it depends on so the two can't drift.
+ */
+export function nearestMaxIterStop(value: number): number {
+  return MAX_ITER_STOPS.reduce((best, stop) =>
+    Math.abs(stop - value) < Math.abs(best - value) ? stop : best,
+  )
+}
+
 export interface Settings {
   readonly maxIter: number
   /**
