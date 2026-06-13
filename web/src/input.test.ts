@@ -260,6 +260,24 @@ describe('InputController', () => {
     expect(canvas.classList.contains('dragging')).toBe(false)
   })
 
+  it('a plain click neither discards in-flight work nor commits a pan (B3, #74)', () => {
+    // The drawer's light-dismiss is a true click on the canvas: mousedown then
+    // mouseup at the same point, no mousemove. It must leave an in-flight deep
+    // render untouched (no `onInvalidate`) and never restart it with an
+    // identical viewport (no `onChange` / no `pan_by_pixels`) — it is a pure
+    // visual no-op. The drag is still torn down.
+    const onInvalidate = vi.fn()
+    new InputController(canvas, viewport as unknown as Viewport, onChange, onInvalidate)
+
+    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 120, clientY: 80, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 120, clientY: 80, bubbles: true }))
+
+    expect(onInvalidate).not.toHaveBeenCalled()
+    expect(onChange).not.toHaveBeenCalled()
+    expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
+    expect(canvas.classList.contains('dragging')).toBe(false)
+  })
+
   it('previews instantly on a wheel notch and defers a single onChange to the Settle', () => {
     const zoomed = makeZoomResult(0.8)
     viewport.zoom_around.mockReturnValue(zoomed)
@@ -427,15 +445,23 @@ describe('InputController', () => {
     expect(onChange).not.toHaveBeenCalled()
 
     // Pan starts before the Settle fires: no render is issued here (firing the
-    // zoom's Settle would paint an intermediate frame mid-drag); any in-flight
-    // render is discarded so it can't clobber the pan snapshot. The wheel
-    // notch already discarded once (B2), so the mousedown brings the total to
-    // two.
+    // zoom's Settle would paint an intermediate frame mid-drag). The mousedown
+    // no longer discards in-flight work — that is deferred to the first real
+    // mousemove (B3, #74) — so the count still reflects only the wheel notch's
+    // own discard (B2).
     canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
     expect(onChange).not.toHaveBeenCalled()
-    expect(onInvalidate).toHaveBeenCalledTimes(2)
+    expect(onInvalidate).toHaveBeenCalledTimes(1)
     // The cancelled Settle can't fire later either.
     vi.advanceTimersByTime(WHEEL_SETTLE_MS)
+    expect(onChange).not.toHaveBeenCalled()
+
+    // The drag actually begins: the first mousemove discards any in-flight
+    // render so it can't clobber the pan snapshot (bringing the total to two).
+    document.dispatchEvent(
+      new MouseEvent('mousemove', { clientX: 115, clientY: 60, bubbles: true }),
+    )
+    expect(onInvalidate).toHaveBeenCalledTimes(2)
     expect(onChange).not.toHaveBeenCalled()
 
     // Mouseup issues the single render: the zoomed viewport, panned. The pan
