@@ -1,4 +1,5 @@
 import type { Viewport } from '../wasm/fractal_wasm.js'
+import type { ViewportStore } from './viewport-store.js'
 import {
   applyZoomNotch,
   beginZoomPreview,
@@ -24,10 +25,25 @@ export const PAN_DEADZONE_PX = 0.5
  * Wires pointer events on a canvas into pan/zoom calls on a viewport.
  *
  * The controller is deliberately presentation-free: it never calls
- * `render` directly, only emits viewport changes through the
- * `onChange` callback. Slice 6 swaps the dispatch target from
- * "render synchronously" to "post to Worker" without touching this
- * file.
+ * `render` directly, only writes committed viewports into the shared
+ * `ViewportStore` (A2, #85), whose subscribers trigger the render. Slice 6
+ * swaps the dispatch target from "render synchronously" to "post to Worker"
+ * without touching this file.
+ *
+ * ## Viewport ownership
+ *
+ * The authoritative viewport lives in the `ViewportStore`. The controller
+ * reads it at gesture start and writes the result back with source
+ * `'gesture'` on commit (pan mouseup, wheel Settle). It also subscribes to
+ * the store: any write from *another* source (a refit, a mode-reset, a
+ * future URL hydrator) refreshes its working copy and tears down a live
+ * wheel Preview — the second job the old `setViewport` method carried.
+ *
+ * During an active wheel scrub the controller's working `currentViewport`
+ * runs *ahead* of the store: per ADR-0012 each notch advances the Preview
+ * without a recompute, so the store is not written until the Settle. A pan
+ * begun mid-scrub therefore reads the accumulated zoom from `currentViewport`
+ * (not the store) and carries it into the pan with no extra render.
  *
  * ## Drag semantics
  *
@@ -189,16 +205,18 @@ export class InputController {
     const dxCss = event.clientX - startClientX
     const dyCss = event.clientY - startClientY
     // Pan from `currentViewport`, not the drag-start snapshot. They are
-    // the same object for a drag with no concurrent resize, but a
-    // debounced `refitToCanvas` (ResizeObserver) can fire mid-drag and
-    // `setViewport` a viewport at new dimensions. `with_resolution`
-    // preserves center and zoom, so `currentViewport` still depicts the
-    // same framing the dragged snapshot shows — only its width/height
-    // are refreshed to the live box. Panning from the stale snapshot
-    // instead would commit its old dimensions, reverting the refit: the
-    // buffer would be computed for the old size and CSS-stretched onto
-    // the new box (non-square pixels), and since the box hasn't changed
-    // again the ResizeObserver never re-fires to correct it.
+    // the same object for a drag with no concurrent resize, but a debounced
+    // `refitToCanvas` (ResizeObserver) can fire mid-drag and `set` a viewport
+    // at new dimensions — which our store subscription has already mirrored
+    // into `currentViewport`. `with_resolution` preserves center and zoom, so
+    // `currentViewport` still depicts the same framing the dragged snapshot
+    // shows — only its width/height are refreshed to the live box. Panning
+    // from the stale snapshot instead would commit its old dimensions,
+    // reverting the refit: the buffer would be computed for the old size and
+    // CSS-stretched onto the new box (non-square pixels), and since the box
+    // hasn't changed again the ResizeObserver never re-fires to correct it.
+    // (With the store as the single owner this B1 desync is now structurally
+    // hard to reintroduce: gestures always read live state.)
     //
     // The deltas scale by the viewport's logical grid (not the render
     // buffer) so a pan moves the same complex-plane distance regardless
@@ -218,7 +236,7 @@ export class InputController {
 
     const next = base.pan_by_pixels(dxInternal, dyInternal)
     this.currentViewport = next
-    this.onChange(next)
+    this.store.set(next, 'gesture')
   }
 
   private readonly handleWheel = (event: WheelEvent): void => {
@@ -278,23 +296,25 @@ export class InputController {
   }
 
   /**
-   * Commit the accumulated wheel zoom: fire one `onChange` for the final
-   * viewport. The fresh frame's paint clears the Preview transform
-   * (`render-client`), so `zoomPreview` is intentionally kept here — a
-   * notch arriving before that paint continues the same matrix.
+   * Commit the accumulated wheel zoom: `set` the store once (source
+   * `'gesture'`) for the final viewport, which triggers the recompute. The
+   * fresh frame's paint clears the Preview transform (`render-client`), so
+   * `zoomPreview` is intentionally kept here — a notch arriving before that
+   * paint continues the same matrix. The store subscription skips this
+   * `'gesture'` write, so it does not tear the kept Preview down.
    */
   private readonly settleZoom = (): void => {
     this.settleTimer = undefined
     if (this.zoomPreview === null) return
-    this.onChange(this.zoomPreview.viewport)
+    this.store.set(this.zoomPreview.viewport, 'gesture')
   }
 
   /**
    * Tear down any wheel Preview: cancel a pending Settle, drop the
-   * accumulator and cached rect, and clear the CSS transform. Fires **no**
-   * `onChange` — the accumulated zoom already rides in `currentViewport`
+   * accumulator and cached rect, and clear the CSS transform. Writes **no**
+   * store update — the accumulated zoom already rides in `currentViewport`
    * (advanced per notch), so a caller (a starting pan, or an external
-   * `setViewport`) carries it forward without an extra render. Clearing the
+   * store write) carries it forward without an extra render. Clearing the
    * transform also lets a starting pan read an untransformed
    * `getBoundingClientRect` (a live transform would scale the pan delta).
    */
@@ -312,40 +332,33 @@ export class InputController {
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
-    initialViewport: Viewport,
-    private readonly onChange: (viewport: Viewport) => void,
+    private readonly store: ViewportStore,
     // Called while a wheel Preview is active to discard any in-flight
     // render so it can't paint stale pixels mid-scrub (ADR-0012). Injected
     // (rather than importing the render client) to keep this controller
     // presentation-free. Defaults to a no-op for tests that don't wire it.
     private readonly onInvalidate: () => void = () => {},
   ) {
-    this.currentViewport = initialViewport
+    this.currentViewport = store.get()
+    // Any viewport write the controller did *not* author (a refit, a
+    // mode-reset, a future URL hydrator) supersedes whatever the controller
+    // holds and any in-progress wheel scrub: mirror the new viewport into the
+    // working copy and tear down a live Preview — including its CSS transform,
+    // so the next scrub measures an untransformed canvas rather than the
+    // still-scaled box (a wheel event landing before the writer's render
+    // paints would otherwise anchor the new zoom to the wrong box). Self
+    // (`'gesture'`) writes are skipped: `currentViewport` already holds them,
+    // and the Settle deliberately keeps its Preview alive across the commit.
+    store.subscribe((viewport, source) => {
+      if (source === 'gesture') return
+      this.clearZoomPreview()
+      this.currentViewport = viewport
+    })
     canvas.addEventListener('mousedown', this.handleMouseDown)
     // `passive: false` is required for `preventDefault()` to take
     // effect on wheel — modern browsers default wheel listeners to
     // passive, which silently no-ops `preventDefault`.
     canvas.addEventListener('wheel', this.handleWheel, { passive: false })
-  }
-
-  /**
-   * Overwrite the controller's viewport. The next pan/zoom event will
-   * derive its result from this viewport instead of the previous one.
-   *
-   * Slice 3 calls this after a resolution change so the controller
-   * sees the resized viewport without rebuilding listener wiring. No
-   * `onChange` fires — the caller already has the new viewport in
-   * hand and is responsible for triggering the render.
-   *
-   * An external viewport supersedes any in-progress wheel scrub: a pending
-   * Settle is cancelled and the Preview torn down — including its CSS
-   * transform, so the next scrub measures an untransformed canvas rather
-   * than the still-scaled box (otherwise a wheel event landing before the
-   * caller's render paints would anchor the new zoom to the wrong box).
-   */
-  setViewport(viewport: Viewport): void {
-    this.clearZoomPreview()
-    this.currentViewport = viewport
   }
 }
 
