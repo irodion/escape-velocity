@@ -35,6 +35,16 @@ import type {
   RenderResponse,
 } from './worker/protocol.js'
 
+// Hard ceiling on a single export render before we give up and free the UI.
+// Generous: the export boots a fresh WASM instance + thread pool and then runs
+// one full (possibly deep, 2× supersampled) frame — far slower than the warm
+// on-screen pipeline. The point is not to bound a slow-but-progressing render
+// but to recover from a worker that never settles (a stuck boot — the same
+// failure the live client guards with its own boot watchdog — or a worker that
+// dies without posting a terminal message), which would otherwise leave the
+// export buttons disabled forever with no way to retry.
+const EXPORT_TIMEOUT_MS = 60_000
+
 /**
  * Build a download filename embedding the shareable permalink (O1, #91), so a
  * saved PNG carries the exact view that produced it. The permalink's `=`/`&`
@@ -103,6 +113,20 @@ export async function exportRenderedFrame(request: RenderRequest, filename: stri
   const worker = new Worker(new URL('./worker/worker.ts', import.meta.url), { type: 'module' })
   try {
     const response = await new Promise<RenderResponse>((resolve, reject) => {
+      // Every terminal path clears this so the timer never outlives the Promise;
+      // the timeout itself rejects, which (via the `finally` below) terminates
+      // the worker and lets `runExport` re-enable the buttons.
+      const timer = setTimeout(() => {
+        reject(new Error(`export render timed out after ${EXPORT_TIMEOUT_MS / 1000}s`))
+      }, EXPORT_TIMEOUT_MS)
+      const settleResolve = (value: RenderResponse): void => {
+        clearTimeout(timer)
+        resolve(value)
+      }
+      const settleReject = (error: Error): void => {
+        clearTimeout(timer)
+        reject(error)
+      }
       worker.onmessage = (
         event: MessageEvent<Ready | RenderResponse | RenderError | Aborted>,
       ): void => {
@@ -114,22 +138,22 @@ export async function exportRenderedFrame(request: RenderRequest, filename: stri
             worker.postMessage(request)
             return
           case 'response':
-            resolve(msg)
+            settleResolve(msg)
             return
           case 'error':
-            reject(new Error(`export render failed: ${msg.message}`))
+            settleReject(new Error(`export render failed: ${msg.message}`))
             return
           case 'aborted':
             // No newer request exists on a one-shot worker, so this is
             // unexpected — surface it rather than hanging.
-            reject(new Error('export render was aborted'))
+            settleReject(new Error('export render was aborted'))
             return
           // `progress` heartbeats are ignored — a one-shot export shows no bar.
         }
       }
       worker.onerror = (event: ErrorEvent): void => {
         event.preventDefault()
-        reject(new Error(event.message || 'export render worker failed to start'))
+        settleReject(new Error(event.message || 'export render worker failed to start'))
       }
     })
     const blob = await rgbaToPngBlob(response.rgba, response.width, response.height)
