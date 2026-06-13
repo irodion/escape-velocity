@@ -1,0 +1,34 @@
+# Dependabot keeps the three dependency ecosystems fresh on a weekly cadence,
+# grouping minor/patch bumps into a single PR per ecosystem to keep review noise
+# low. Major bumps still arrive as individual PRs (they may need code changes).
+#
+# Deliberate version pins NOT managed here: the WASM toolchain pins
+# (`nightly-2025-11-15`, `wasm-pack@0.15.0`) live in CI step strings and
+# `web/package.json`'s `wasm:build` script, not in a dependency manifest, so
+# Dependabot never touches them. Re-pin those manually on a periodic ritual
+# (see the explanatory comment in `.github/workflows/ci.yml`).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: "/web"
+    schedule:
+      interval: weekly
+    groups:
+      npm-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions-minor-patch:
+        update-types: [minor, patch]

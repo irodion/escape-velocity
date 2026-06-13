@@ -1,8 +1,14 @@
 name: CI
 
 on:
+  # `push` validates the merge commit that lands on `main` (a form CI never
+  # saw on the PR branch) and warms a main-branch `rust-cache` that future PR
+  # branches inherit. `workflow_dispatch` allows a manual re-run.
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -35,6 +41,14 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
+
+      - name: cargo-deny (advisories + licenses)
+        # RUSTSEC advisories and GPL-compatible license enforcement for the
+        # Rust tree (policy in deny.toml); the `vet` job covers npm. Scoped to
+        # the two checks deny.toml configures.
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
+        with:
+          command: check advisories licenses
 
   web:
     name: Web
@@ -90,13 +104,16 @@ jobs:
         working-directory: web
         run: pnpm lint
 
+      # The WASM artifact is already built explicitly above, so use the
+      # `:only` script variants to skip the wasm:build the chained
+      # `typecheck`/`test` scripts would otherwise re-run (twice).
       - name: TypeScript check
         working-directory: web
-        run: pnpm typecheck
+        run: pnpm typecheck:only
 
       - name: Vitest
         working-directory: web
-        run: pnpm test
+        run: pnpm test:only
 
       - name: Build
         working-directory: web
