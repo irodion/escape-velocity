@@ -1,6 +1,24 @@
+import { execSync } from 'node:child_process'
 import { defineConfig, type Plugin } from 'vite'
 import { VitePWA } from 'vite-plugin-pwa'
 import { pwaManifest, pwaWorkbox } from './src/pwa-config'
+
+// Build identifier for the version signal (O2, #92): the git short SHA, with a
+// `-dirty` suffix when the working tree has uncommitted changes. Inlined into
+// the bundle via `define` below so a deployed build can name itself (boot log +
+// update toast) — practical for a continuously-deployed PWA where neither user
+// nor developer can otherwise tell which build is live. Wrapped in try/catch so
+// a git-less or shallow checkout (some CI) still builds, falling back to
+// 'unknown' rather than failing the build.
+function resolveBuildVersion(): string {
+  try {
+    const sha = execSync('git rev-parse --short HEAD', { encoding: 'utf8' }).trim()
+    const dirty = execSync('git status --porcelain', { encoding: 'utf8' }).trim() !== ''
+    return dirty ? `${sha}-dirty` : sha
+  } catch {
+    return 'unknown'
+  }
+}
 
 // Patch wasm-bindgen-rayon's generated `workerHelpers` snippet for two
 // Vite-specific problems. Runs in BOTH dev and build (fix #1 is a dev-only
@@ -97,6 +115,12 @@ const isExpectedGlueDynamicImportWarning = (code: string | undefined, message: s
   code === 'INEFFECTIVE_DYNAMIC_IMPORT' && message.includes('fractal_wasm.js')
 
 export default defineConfig({
+  // Inline the build identifier (O2, #92) as a compile-time constant. `define`
+  // does a literal text substitution, so the value must be JSON-stringified;
+  // `src/vite-env.d.ts` declares the global so TypeScript sees it.
+  define: {
+    __APP_VERSION__: JSON.stringify(resolveBuildVersion()),
+  },
   // The render worker is the context that actually calls `startWorkers`
   // (worker.ts → initThreadPool), so the patch must apply to the worker build
   // and to dev (where the top-level plugins transform worker modules); the

@@ -84,6 +84,9 @@ describe('pwa-ui presenter', () => {
     fake.set({ needRefresh: true })
     expect(toastEl().hidden).toBe(false)
     expect(toastEl().textContent).toContain('New version available')
+    // The running build's identifier (O2, #92) rides the same message; Vite's
+    // `define` inlines `__APP_VERSION__` in the test build too.
+    expect(toastEl().textContent).toContain(`build ${__APP_VERSION__}`)
     buttonByText(toastEl(), 'Reload').click()
     expect(fake.applyUpdate).toHaveBeenCalledOnce()
   })
