@@ -292,6 +292,48 @@ fn fill_distance_estimate(
     }
 }
 
+/// Opaque-black RGBA — the colour every mode paints for a non-finite scalar
+/// (the NaN inside-set sentinel and any ±Inf). Hoisted so the per-pixel
+/// closures share one constant.
+const BLACK: [u8; 4] = [0, 0, 0, 255];
+
+/// Resolution of the per-`colorize` palette lookup table (P5, #81): 1024
+/// gradient samples over `t ∈ [0, 1]`. Finer than the 8-bit output channel
+/// — each of the 256 output levels spans ~4 LUT slots — so quantising a
+/// sample to its nearest slot is visually indistinguishable from a direct
+/// [`Palette::sample`], while replacing that per-pixel call (a 15-arm
+/// `repr()` dispatch plus a stop-table scan, or three `cos` evaluations)
+/// with a single array index.
+const LUT_LEN: usize = 1024;
+
+/// A palette baked into a flat `[r, g, b]` table, sampled once per
+/// [`colorize_into`] call and then indexed per pixel. The endpoints are
+/// exact (`lut[0] == sample(0.0)`, `lut[LUT_LEN - 1] == sample(1.0)`), so
+/// every mode's `t = 0` / `t = 1` boundary colour is unchanged; only
+/// mid-gradient values move, by at most the quantisation of `t` into
+/// `LUT_LEN` slots (sub-output-resolution — see [`LUT_LEN`]).
+struct ColorLut([[u8; 3]; LUT_LEN]);
+
+impl ColorLut {
+    fn build(palette: Palette) -> Self {
+        let mut lut = [[0u8; 3]; LUT_LEN];
+        for (i, slot) in lut.iter_mut().enumerate() {
+            *slot = palette.sample(i as f32 / (LUT_LEN - 1) as f32);
+        }
+        Self(lut)
+    }
+
+    /// Look up the colour at `t`, which every call site has already mapped
+    /// into `[0, 1]`. The `min` is a float-fuzz guard: a `t` a hair above
+    /// 1.0 would index `LUT_LEN` and panic, so clamp the index, not `t`.
+    #[inline]
+    fn lookup(&self, t: f32) -> [u8; 4] {
+        let idx = ((t * (LUT_LEN - 1) as f32) as usize).min(LUT_LEN - 1);
+        let [r, g, b] = self.0[idx];
+        [r, g, b, 255]
+    }
+}
+
 /// Convert smooth-iteration counts to RGBA8 pixels.
 ///
 /// Output buffer length is `4 * nus.len()`, in RGBA order. Alpha is
@@ -318,11 +360,20 @@ pub fn colorize(nus: &[f32], palette: Palette, mode: NormalizationMode, max_iter
 }
 
 /// Colorize **into `out`**, reusing its existing capacity — the allocation-free
-/// core of [`colorize`]. `out` is cleared (keeping its backing allocation) and
-/// reserved to the exact RGBA size, so the per-pixel `extend_from_slice` in each
-/// mode never reallocates. The WASM layer hands in a persistent thread-local
-/// buffer so a frame's colorize doesn't allocate a fresh `4·N`-byte `Vec` each
-/// time (P4, #80).
+/// core of [`colorize`]. `out` is cleared and resized to the exact RGBA length
+/// (reusing its backing allocation), then each mode writes every pixel in place.
+/// The WASM layer hands in a persistent thread-local buffer so a frame's
+/// colorize doesn't allocate a fresh `4·N`-byte `Vec` each time (P4, #80).
+///
+/// The palette is baked into a [`ColorLut`] once here (not re-dispatched per
+/// pixel), and the per-pixel work fans out across a `rayon` parallel iterator
+/// (P5, #81): `out` is split into 4-byte pixel chunks by `par_chunks_exact_mut`,
+/// zipped with `nus`, and each chunk filled independently. `par_chunks_exact_mut`
+/// is an *indexed* parallel iterator, so the zip stays pixel-aligned and the
+/// output is order-preserving — parallelism is invisible in the bytes. Natively
+/// this uses rayon's OS-thread pool; in the browser the worker's
+/// `wasm-bindgen-rayon` pool (Slice 7C) backs the same `par_iter`, the same pool
+/// `compute` already uses.
 pub fn colorize_into(
     nus: &[f32],
     palette: Palette,
@@ -331,24 +382,25 @@ pub fn colorize_into(
     out: &mut Vec<u8>,
 ) {
     out.clear();
-    out.reserve(nus.len() * 4);
+    out.resize(nus.len() * 4, 0);
+    let lut = ColorLut::build(palette);
     match mode {
-        NormalizationMode::Cycled => colorize_cycled(nus, palette, out),
-        NormalizationMode::Histogram => colorize_histogram(nus, palette, max_iter, out),
-        NormalizationMode::Linear => colorize_global(nus, palette, |s| s, out),
-        NormalizationMode::SquareRoot => colorize_global(nus, palette, f32::sqrt, out),
+        NormalizationMode::Cycled => colorize_cycled(nus, palette.period(), &lut, out),
+        NormalizationMode::Histogram => colorize_histogram(nus, &lut, max_iter, out),
+        NormalizationMode::Linear => colorize_global(nus, &lut, |s| s, out),
+        NormalizationMode::SquareRoot => colorize_global(nus, &lut, f32::sqrt, out),
         NormalizationMode::Logarithmic => {
             // ln(1 + s·(e − 1)) maps [0, 1] → [0, 1] (s = 1 gives
             // ln(e) = 1) with no division, expanding the low end so
             // small-`nu` escapers spread across the palette.
             colorize_global(
                 nus,
-                palette,
+                &lut,
                 |s| (1.0 + s * (std::f32::consts::E - 1.0)).ln(),
                 out,
             )
         }
-        NormalizationMode::Clamped => colorize_clamped(nus, palette, out),
+        NormalizationMode::Clamped => colorize_clamped(nus, &lut, out),
     }
 }
 
@@ -370,32 +422,33 @@ pub fn colorize_into(
 /// opaque black, symmetric with every other mode. Negative scalars (not
 /// expected from a distance, but cheap to guard) clamp to the palette
 /// start.
-fn colorize_clamped(nus: &[f32], palette: Palette, out: &mut Vec<u8>) {
-    for &d in nus {
-        if !d.is_finite() {
-            out.extend_from_slice(&[0, 0, 0, 255]);
-            continue;
-        }
-        let t = (d / CLAMPED_DISTANCE_K).clamp(0.0, 1.0);
-        let [r, g, b] = palette.sample(t);
-        out.extend_from_slice(&[r, g, b, 255]);
-    }
+fn colorize_clamped(nus: &[f32], lut: &ColorLut, out: &mut [u8]) {
+    nus.par_iter()
+        .zip(out.par_chunks_exact_mut(4))
+        .for_each(|(&d, px)| {
+            let rgba = if d.is_finite() {
+                lut.lookup((d / CLAMPED_DISTANCE_K).clamp(0.0, 1.0))
+            } else {
+                BLACK
+            };
+            px.copy_from_slice(&rgba);
+        });
 }
 
-fn colorize_cycled(nus: &[f32], palette: Palette, out: &mut Vec<u8>) {
-    let period = palette.period();
-    for &nu in nus {
-        // Treat any non-finite `nu` (NaN inside-set sentinel and the
-        // theoretical ±Inf escapees alike) as opaque black so the
-        // mode-dispatch behaviour is symmetric with Histogram pass 1.
-        if !nu.is_finite() {
-            out.extend_from_slice(&[0, 0, 0, 255]);
-            continue;
-        }
-        let t = (nu / period).rem_euclid(1.0);
-        let [r, g, b] = palette.sample(t);
-        out.extend_from_slice(&[r, g, b, 255]);
-    }
+fn colorize_cycled(nus: &[f32], period: f32, lut: &ColorLut, out: &mut [u8]) {
+    nus.par_iter()
+        .zip(out.par_chunks_exact_mut(4))
+        .for_each(|(&nu, px)| {
+            // Treat any non-finite `nu` (NaN inside-set sentinel and the
+            // theoretical ±Inf escapees alike) as opaque black so the
+            // mode-dispatch behaviour is symmetric with Histogram pass 1.
+            let rgba = if nu.is_finite() {
+                lut.lookup((nu / period).rem_euclid(1.0))
+            } else {
+                BLACK
+            };
+            px.copy_from_slice(&rgba);
+        });
 }
 
 /// The "global" normalisation family: rescale each finite `nu` against
@@ -408,43 +461,53 @@ fn colorize_cycled(nus: &[f32], palette: Palette, out: &mut Vec<u8>) {
 /// at all is entirely black — there is no range to normalise against.
 /// A degenerate `min == max` frame maps every pixel to `s = 0` (the
 /// palette's start) rather than dividing by zero.
-fn colorize_global(nus: &[f32], palette: Palette, transfer: fn(f32) -> f32, out: &mut Vec<u8>) {
-    // Pass 1 — frame extent over finite values only.
-    let mut min = f32::INFINITY;
-    let mut max = f32::NEG_INFINITY;
-    for &nu in nus {
-        if nu.is_finite() {
-            min = min.min(nu);
-            max = max.max(nu);
-        }
-    }
+fn colorize_global(nus: &[f32], lut: &ColorLut, transfer: fn(f32) -> f32, out: &mut [u8]) {
+    // Pass 1 — frame extent over finite values only. `min`/`max` are
+    // commutative and associative over finite inputs, so the parallel
+    // reduce lands the exact same extent as a serial scan regardless of how
+    // rayon splits the work — no order-dependent drift.
+    let (min, max) = nus
+        .par_iter()
+        .filter(|nu| nu.is_finite())
+        .fold(
+            || (f32::INFINITY, f32::NEG_INFINITY),
+            |(mn, mx), &nu| (mn.min(nu), mx.max(nu)),
+        )
+        .reduce(
+            || (f32::INFINITY, f32::NEG_INFINITY),
+            |(amn, amx), (bmn, bmx)| (amn.min(bmn), amx.max(bmx)),
+        );
 
     // `min` stays +∞ iff no finite value was seen — every pixel is
     // inside the set (or non-finite). Symmetric with histogram's
     // all-NaN short-circuit.
     if !min.is_finite() {
-        for _ in nus {
-            out.extend_from_slice(&[0, 0, 0, 255]);
-        }
+        out.par_chunks_exact_mut(4)
+            .for_each(|px| px.copy_from_slice(&BLACK));
         return;
     }
 
     let range = max - min;
     // Pass 2 — rescale, curve, sample.
-    for &nu in nus {
-        if !nu.is_finite() {
-            out.extend_from_slice(&[0, 0, 0, 255]);
-            continue;
-        }
-        let s = if range > 0.0 { (nu - min) / range } else { 0.0 };
-        let t = transfer(s).clamp(0.0, 1.0);
-        let [r, g, b] = palette.sample(t);
-        out.extend_from_slice(&[r, g, b, 255]);
-    }
+    nus.par_iter()
+        .zip(out.par_chunks_exact_mut(4))
+        .for_each(|(&nu, px)| {
+            let rgba = if nu.is_finite() {
+                let s = if range > 0.0 { (nu - min) / range } else { 0.0 };
+                lut.lookup(transfer(s).clamp(0.0, 1.0))
+            } else {
+                BLACK
+            };
+            px.copy_from_slice(&rgba);
+        });
 }
 
-fn colorize_histogram(nus: &[f32], palette: Palette, max_iter: u32, out: &mut Vec<u8>) {
-    // Pass 1 — count escapers per integer bin. `nu` is bounded above
+fn colorize_histogram(nus: &[f32], lut: &ColorLut, max_iter: u32, out: &mut [u8]) {
+    // Pass 1 — count escapers per integer bin. Left serial: it is a
+    // memory-bound increment over a shared `bins` vector (parallelising
+    // would need per-thread bins plus a merge, allocating `bin_count` u32s
+    // per worker for a loop that is already cheap next to the palette
+    // sampling pass 2 now does via the LUT). `nu` is bounded above
     // by `max_iter` (the loop exits earlier with NaN otherwise) and
     // bounded below by `i + 1 − log₂(log₂(BAILOUT_SQR)/2)`, which can
     // dip negative for first-iteration escapers far from the set —
@@ -470,9 +533,8 @@ fn colorize_histogram(nus: &[f32], palette: Palette, max_iter: u32, out: &mut Ve
     if total == 0 {
         // All-NaN (or all-non-finite) input — every pixel is inside
         // the set, no escape statistics to equalise.
-        for _ in nus {
-            out.extend_from_slice(&[0, 0, 0, 255]);
-        }
+        out.par_chunks_exact_mut(4)
+            .for_each(|px| px.copy_from_slice(&BLACK));
         return;
     }
 
@@ -490,27 +552,28 @@ fn colorize_histogram(nus: &[f32], palette: Palette, max_iter: u32, out: &mut Ve
     // pass 1 — keeping the two passes consistent forecloses a
     // latent asymmetry where ±Inf would skip the bin count yet
     // still land at a clamped colour.
-    for &nu in nus {
-        if !nu.is_finite() {
-            out.extend_from_slice(&[0, 0, 0, 255]);
-            continue;
-        }
-        let k_signed = nu.floor() as i64;
-        let k = k_signed.clamp(0, last_idx as i64) as usize;
-        let frac = (nu - k as f32).clamp(0.0, 1.0);
-        let cdf_k = bins[k] as f32 / total_f;
-        let cdf_kp1 = if k + 1 < bin_count {
-            bins[k + 1] as f32 / total_f
-        } else {
-            // cdf[max_iter + 1] is defined as 1.0 (the PRD sentinel).
-            // bins[max_iter] already equals total → cdf[max_iter] = 1.0,
-            // so this branch is only entered when `k == max_iter`.
-            1.0
-        };
-        let t = cdf_k + (cdf_kp1 - cdf_k) * frac;
-        let [r, g, b] = palette.sample(t);
-        out.extend_from_slice(&[r, g, b, 255]);
-    }
+    nus.par_iter()
+        .zip(out.par_chunks_exact_mut(4))
+        .for_each(|(&nu, px)| {
+            let rgba = if nu.is_finite() {
+                let k_signed = nu.floor() as i64;
+                let k = k_signed.clamp(0, last_idx as i64) as usize;
+                let frac = (nu - k as f32).clamp(0.0, 1.0);
+                let cdf_k = bins[k] as f32 / total_f;
+                let cdf_kp1 = if k + 1 < bin_count {
+                    bins[k + 1] as f32 / total_f
+                } else {
+                    // cdf[max_iter + 1] is defined as 1.0 (the PRD sentinel).
+                    // bins[max_iter] already equals total → cdf[max_iter] = 1.0,
+                    // so this branch is only entered when `k == max_iter`.
+                    1.0
+                };
+                lut.lookup(cdf_k + (cdf_kp1 - cdf_k) * frac)
+            } else {
+                BLACK
+            };
+            px.copy_from_slice(&rgba);
+        });
 }
 
 #[cfg(test)]
@@ -1452,6 +1515,55 @@ mod tests {
             );
             prev = red;
         }
+    }
+
+    // --- Palette LUT (P5, #81) -----------------------------------------
+
+    #[test]
+    fn lut_endpoints_are_bit_exact_against_direct_sampling() {
+        // The LUT's first and last slots are sampled at exactly t = 0 and
+        // t = 1, so every mode's boundary colour (palette start / end) is
+        // unchanged — this is what keeps the endpoint-exact tests
+        // (`clamped_maps_zero_distance_to_palette_start`,
+        // `global_modes_map_frame_extent_to_palette_endpoints`, …) valid.
+        for &p in ALL_PALETTES {
+            let lut = ColorLut::build(p);
+            assert_eq!(lut.lookup(0.0), rgba_of(p.sample(0.0)), "{p:?} start");
+            assert_eq!(lut.lookup(1.0), rgba_of(p.sample(1.0)), "{p:?} end");
+        }
+    }
+
+    #[test]
+    fn lut_tracks_direct_sampling_within_one_level() {
+        // The LUT trades bit-identity for speed: 1024 slots over [0, 1] is
+        // finer than the 8-bit output, so a lookup tracks a direct
+        // `palette.sample(t)` to within a couple of channel levels — the
+        // residual is the per-slot `t` quantisation (1/1023) times the
+        // palette's local gradient, which peaks at the steep Turbo/Rainbow
+        // stop boundaries. Two levels out of 255 (<0.8%) is sub-perceptual;
+        // a transposed or mis-indexed LUT would drift by tens. Sweep t
+        // densely across every palette and bound the per-channel error.
+        const MAX_LUT_DRIFT: i32 = 2;
+        for &p in ALL_PALETTES {
+            let lut = ColorLut::build(p);
+            for i in 0..=20000 {
+                let t = i as f32 / 20000.0;
+                let direct = p.sample(t);
+                let via_lut = lut.lookup(t);
+                for ch in 0..3 {
+                    let drift = (direct[ch] as i32 - via_lut[ch] as i32).abs();
+                    assert!(
+                        drift <= MAX_LUT_DRIFT,
+                        "{p:?} at t={t}: channel {ch} drifted {drift} (> {MAX_LUT_DRIFT})",
+                    );
+                }
+                assert_eq!(via_lut[3], 255, "{p:?}: LUT alpha must be opaque");
+            }
+        }
+    }
+
+    fn rgba_of(rgb: [u8; 3]) -> [u8; 4] {
+        [rgb[0], rgb[1], rgb[2], 255]
     }
 
     #[test]
