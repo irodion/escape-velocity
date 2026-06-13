@@ -164,13 +164,30 @@ const signed = (value: number, digits: number): string =>
   `${value < 0 ? MINUS : '+'}${Math.abs(value).toFixed(digits)}`
 
 /**
- * Format the live coordinate readout, e.g. `re −0.74350 · im +0.13140 · zoom
- * 2.0e2`. Pure (no DOM) so it is unit-testable; the caller writes the result
- * into the readout element. `re`/`im` carry an explicit sign and five
- * decimals; `zoom` uses one-significant-decimal scientific notation (dropping
- * the `+` exponent sign) to stay compact across the whole 1×–1e13 range.
+ * Format one axis of the centre (`re` or `im`) for the coordinate readout:
+ * an explicit sign (typographic minus) and five decimals, e.g. `−0.74350`.
+ * Pure so the layout can render each axis in its own cell.
+ */
+export function formatAxis(value: number): string {
+  return signed(value, 5)
+}
+
+/**
+ * Format the magnification for the coordinate readout: one-significant-decimal
+ * scientific notation with the `+` exponent sign dropped, e.g. `2.0e2`. Stays
+ * compact across the whole 1×–1e13 range.
+ */
+export function formatZoom(zoom: number): string {
+  return zoom.toExponential(1).replace('e+', 'e')
+}
+
+/**
+ * Compose the three axes into a single line, e.g. `re −0.74350 · im +0.13140 ·
+ * zoom 2.0e2`. The visible readout now renders each axis in its own cell (see
+ * `index.html`'s `.coords` block); this single string feeds the off-screen
+ * `aria-live` region so a screen reader announces the settled view as one
+ * utterance rather than three.
  */
 export function formatCoords(re: number, im: number, zoom: number): string {
-  const z = zoom.toExponential(1).replace('e+', 'e')
-  return `re ${signed(re, 5)} · im ${signed(im, 5)} · zoom ${z}`
+  return `re ${formatAxis(re)} · im ${formatAxis(im)} · zoom ${formatZoom(zoom)}`
 }

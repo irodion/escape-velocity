@@ -77,9 +77,19 @@ export function mountDrawer(
   // Move focus to follow the panel: into the first control on open so
   // keyboard users land in the drawer, back to the toggle on close so focus
   // is never stranded on an inert element.
+  //
+  // Prefer the first control *row* (`.field`) over the leading coordinate
+  // readout: the readout's editable `c` is the first focusable in DOM order,
+  // but it's a secondary readout-style field and is `disabled` in Mandelbrot
+  // mode (focusing it would silently no-op, stranding the keyboard user
+  // outside the drawer). Falling back to any control keeps callers with no
+  // `.field` rows working.
   const handoffFocus = (): void => {
     if (isOpen) {
-      drawer.querySelector<HTMLElement>('select, input, button')?.focus()
+      const target =
+        drawer.querySelector<HTMLElement>('.field select, .field input, .field button') ??
+        drawer.querySelector<HTMLElement>('select, input, button')
+      target?.focus()
     } else {
       toggle.focus()
     }

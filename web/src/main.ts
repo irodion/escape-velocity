@@ -38,7 +38,14 @@ import {
   setFatalHandler,
   setProgressReporter,
 } from './render-client.js'
-import { formatCoords, parse, serialize, type ViewState } from './view-state.js'
+import {
+  formatAxis,
+  formatCoords,
+  formatZoom,
+  parse,
+  serialize,
+  type ViewState,
+} from './view-state.js'
 import { createViewportStore } from './viewport-store.js'
 
 // PWA install + update lifecycle (Slice 8B). The controller (a deep, tested
@@ -120,10 +127,21 @@ const controlsToggle = document.getElementById('controls-toggle')
 if (!(controlsToggle instanceof HTMLButtonElement)) {
   throw new Error('button#controls-toggle not found in index.html')
 }
+// The off-screen aria-live mirror (one string for screen readers) and the
+// three visible value cells of the coordinate instrument. main.ts owns the
+// view centre (re/im/zoom); the editable `c` cells are driven by Controls.
 const coordsReadout = document.getElementById('coords')
 if (!(coordsReadout instanceof HTMLElement)) {
   throw new Error('#coords not found in index.html')
 }
+const coordCell = (axis: 're' | 'im' | 'zoom'): HTMLElement => {
+  const el = document.querySelector(`.coord__val[data-coord="${axis}"]`)
+  if (!(el instanceof HTMLElement)) {
+    throw new Error(`.coord__val[data-coord="${axis}"] not found in index.html`)
+  }
+  return el
+}
+const coordCells = { re: coordCell('re'), im: coordCell('im'), zoom: coordCell('zoom') }
 
 // Collapsible drawer (Slice 4): the controls panel is closed by default and
 // the ☰ button toggles it. Fixed-positioned (index.html), so this is purely
@@ -417,6 +435,10 @@ const currentViewState = (): ViewState => {
 }
 
 const renderCoords = (state: ViewState): void => {
+  coordCells.re.textContent = formatAxis(state.re)
+  coordCells.im.textContent = formatAxis(state.im)
+  coordCells.zoom.textContent = formatZoom(state.zoom)
+  // The off-screen mirror announces all three axes as a single utterance.
   coordsReadout.textContent = formatCoords(state.re, state.im, state.zoom)
 }
 

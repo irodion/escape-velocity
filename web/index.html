@@ -188,20 +188,117 @@
       }
       .console-head .sub b { color: var(--accent); font-weight: 500; }
 
-      /* ── coordinate readout (O1) ──
-         A read-only strip under the header showing where the view sits in the
-         complex plane (re / im / zoom), updated on every commit by main.ts.
-         Tabular figures so the digits don't jitter as they tick; the same
-         dim instrument ink as `.sub`, with the labels dimmer still so the
-         numbers read first. Sits in normal flow under the head, above the
-         first control row. */
-      .console-head + .coords {
-        margin: -1.2rem 0 1.4rem;
-        font-family: var(--font-mono);
+      /* ── coordinate instrument (O1 + drawer consolidation) ──
+         One readout cluster directly under the wordmark gathering ALL of the
+         image's complex-plane state in a single place: the view centre
+         (re / im / zoom, read-only, written on every commit by main.ts) and
+         the Julia seed `c` (editable; dim in Mandelbrot, lit in Julia). This
+         replaces the old split — a coords strip up here and a separate
+         "Constant · c" control at the foot of the form — so the panel reads as
+         one instrument rather than two scattered coordinate spots.
+
+         A two-column grid (key | value) keeps every value on a shared left
+         edge; tabular figures stop the digits jittering as they tick. */
+      .coords {
+        margin: -0.5rem 0 1.5rem;
+      }
+      .coords__legend {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        margin: 0 0 0.7rem;
+        font-family: var(--font-tech);
+        font-weight: 500;
+        font-size: 0.575rem;
+        letter-spacing: 0.24em;
+        text-transform: uppercase;
+        color: var(--ink-dim);
+        white-space: nowrap;
+      }
+      /* a hairline that runs out from the word to the panel edge */
+      .coords__legend::after {
+        content: "";
+        flex: 1 1 auto;
+        height: 1px;
+        background: var(--hair);
+      }
+      .coords__grid {
+        margin: 0;
+        display: grid;
+        gap: 0.3rem;
         font-variant-numeric: tabular-nums;
-        font-size: 0.62rem;
-        letter-spacing: 0.04em;
+      }
+      .coord {
+        display: grid;
+        grid-template-columns: 2.6rem 1fr;
+        align-items: baseline;
+        column-gap: 0.55rem;
+      }
+      .coord__key {
+        font-family: var(--font-tech);
+        font-weight: 500;
+        font-size: 0.59rem;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--ink-faint);
+      }
+      .coord__val {
+        margin: 0;
+        font-family: var(--font-mono);
+        font-size: 0.84rem;
+        letter-spacing: 0.01em;
         color: var(--ink);
+        white-space: nowrap;
+      }
+
+      /* The seed `c`, editable inline in the value column. The inputs size to
+         their own content (`field-sizing` where supported, a `ch` fallback
+         elsewhere) so the trailing `i` trails the digits instead of being
+         pushed to the panel's right edge — they read as a typeset c = a + b·i,
+         not a stretched form row. */
+      .coord--c .coord__val {
+        display: flex;
+        align-items: baseline;
+        gap: 0.32rem;
+      }
+      .coord--c .c-tok { color: var(--ink-dim); font-weight: 400; }
+      .coord--c input {
+        appearance: none;
+        -webkit-appearance: none;
+        width: 7ch;            /* fallback width for ~±0.xxxxx */
+        min-width: 3ch;
+        field-sizing: content; /* shrink/grow to the value (Chromium) */
+        margin: 0;
+        padding: 0;
+        font: inherit;
+        font-variant-numeric: tabular-nums;
+        color: var(--ink);
+        background: transparent;
+        border: none;
+        cursor: text;
+      }
+      .coord--c input:focus-visible { outline: none; color: var(--accent); }
+      .coord--c input::-webkit-outer-spin-button,
+      .coord--c input::-webkit-inner-spin-button { appearance: none; margin: 0; }
+      .coord--c input[type="number"] { -moz-appearance: textfield; }
+      .coord--c input:disabled { cursor: default; }
+      /* Mandelbrot mode: dim the whole `c` row (via :has) so the visitor reads
+         the seed as "off", not just the two fields. */
+      .coord--c:has(input:disabled) { opacity: 0.4; }
+
+      /* Off-screen mirror of the readout as one string, so a screen reader
+         announces the settled view as a single utterance (the visible cells
+         carry aria-hidden). */
+      .visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        padding: 0;
+        border: 0;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        clip-path: inset(50%);
         white-space: nowrap;
       }
 
@@ -249,11 +346,10 @@
         clip-path: polygon(8% 28%, 50% 70%, 92% 28%, 80% 18%, 50% 52%, 20% 18%);
       }
       .field:hover .field__control::after { background: var(--accent); }
-      .field--c .field__control::after { content: none; }
       .field__control--range::after { content: none; }   /* slider, no caret */
 
       /* The native control, stripped to a transparent readout. */
-      select, .field--c input {
+      select {
         appearance: none;
         -webkit-appearance: none;
         width: 100%;
@@ -270,36 +366,9 @@
         border-radius: 0;
         cursor: pointer;
       }
-      select:focus-visible, .field--c input:focus-visible { outline: none; color: var(--accent); }
+      select:focus-visible { outline: none; color: var(--accent); }
       /* Keep the native popup dark even where it can't be restyled. */
       select option { background: #0d1016; color: var(--ink); }
-
-      /* ── c.re / c.im as a single coordinate readout ── */
-      .field--c .c-row {
-        display: flex;
-        align-items: center;
-        gap: 0.35rem;
-        font-size: 1.02rem;
-      }
-      .field--c .c-tok { color: var(--ink-dim); font-weight: 400; }
-      .field--c input {
-        min-height: 2.2rem;
-        width: auto;
-        flex: 1 1 0;
-        padding: 0;
-        text-align: left;
-        font-variant-numeric: tabular-nums;
-        cursor: text;
-      }
-      /* Spinners off — this is a readout, not a stepper. */
-      .field--c input::-webkit-outer-spin-button,
-      .field--c input::-webkit-inner-spin-button { appearance: none; margin: 0; }
-      .field--c input[type="number"] { -moz-appearance: textfield; }
-      /* Mandelbrot-mode visual state: dim the disabled c inputs, and use
-         `:has()` to dim the whole coordinate strip so the visitor reads it as
-         "off" rather than just the fields. */
-      input[type="number"]:disabled { cursor: default; }
-      form#controls label.field--c:has(input:disabled) { opacity: 0.4; }
 
       /* ── Iterations as a log slider ──
          The value spans seven doublings (64–8192), so a linear stepper is
@@ -412,10 +481,12 @@
 
       /* ── one orchestrated load moment: staggered reveal of the rows on open ── */
       form#controls.open .console-head,
+      form#controls.open .coords,
       form#controls.open .field {
         animation: ev-rise 0.42s var(--ease) backwards;
       }
       form#controls.open .console-head { animation-delay: 0.02s; }
+      form#controls.open .coords { animation-delay: 0.05s; }
       form#controls.open .field:nth-of-type(1) { animation-delay: 0.06s; }
       form#controls.open .field:nth-of-type(2) { animation-delay: 0.1s; }
       form#controls.open .field:nth-of-type(3) { animation-delay: 0.14s; }
@@ -571,7 +642,8 @@
          reveal rules above it. */
       @media (prefers-reduced-motion: reduce) {
         form#controls, #controls-toggle { transition: none; }
-        form#controls.open .console-head, form#controls.open .field { animation: none; }
+        form#controls.open .console-head, form#controls.open .coords,
+        form#controls.open .field { animation: none; }
       }
     </style>
   </head>
@@ -590,11 +662,42 @@
         <span class="mark">Escape&nbsp;Velocity</span>
         <span class="sub">z<b>²</b>+c</span>
       </div>
-      <!-- Live coordinate readout (O1): main.ts writes the re/im/zoom of the
-           current view here on every commit. Starts blank; populated before
-           the first frame. aria-live="polite" so the value is announced when
-           it settles, never mid-gesture. -->
-      <div id="coords" class="coords" aria-live="polite"></div>
+      <!-- Coordinate instrument (O1 + drawer consolidation): every piece of the
+           image's complex-plane state in one cluster. main.ts writes the view
+           centre cells (re/im/zoom) on every commit; the `c` row holds the
+           editable Julia seed (controls.ts enables/disables it by mode). The
+           visible cells are aria-hidden — the off-screen #coords mirror carries
+           the whole readout as one aria-live="polite" string so a screen reader
+           announces the settled view once, never mid-gesture. -->
+      <section class="coords" aria-labelledby="coords-legend">
+        <h2 class="coords__legend" id="coords-legend">Coordinates</h2>
+        <dl class="coords__grid" aria-hidden="true">
+          <div class="coord">
+            <dt class="coord__key">re</dt>
+            <dd class="coord__val" data-coord="re">—</dd>
+          </div>
+          <div class="coord">
+            <dt class="coord__key">im</dt>
+            <dd class="coord__val" data-coord="im">—</dd>
+          </div>
+          <div class="coord">
+            <dt class="coord__key">zoom</dt>
+            <dd class="coord__val" data-coord="zoom">—</dd>
+          </div>
+          <div class="coord coord--c">
+            <dt class="coord__key">c</dt>
+            <dd class="coord__val">
+              <input type="number" name="c-re" step="0.0001" value="-0.7" disabled
+                aria-label="c real part" />
+              <span class="c-tok">+</span>
+              <input type="number" name="c-im" step="0.0001" value="0.27015" disabled
+                aria-label="c imaginary part" />
+              <span class="c-tok">i</span>
+            </dd>
+          </div>
+        </dl>
+        <p id="coords" class="visually-hidden" aria-live="polite"></p>
+      </section>
       <label class="field field--range">
         <span class="field__label">
           Iterations
@@ -668,18 +771,6 @@
             <option value="mandelbrot" selected>Mandelbrot</option>
             <option value="julia">Julia</option>
           </select>
-        </span>
-      </label>
-      <label class="field field--c">
-        <span class="field__label">Constant&nbsp;·&nbsp;c</span>
-        <span class="c-row">
-          <span class="c-tok">c =</span>
-          <input type="number" name="c-re" step="0.0001" value="-0.7" disabled
-            aria-label="c real part" />
-          <span class="c-tok">+</span>
-          <input type="number" name="c-im" step="0.0001" value="0.27015" disabled
-            aria-label="c imaginary part" />
-          <span class="c-tok">i</span>
         </span>
       </label>
     </form>
