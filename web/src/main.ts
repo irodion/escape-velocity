@@ -24,7 +24,7 @@ import {
   type Settings,
 } from './controls.js'
 import { mountDrawer } from './drawer.js'
-import { buildFilename, exportCurrentFrame, exportSupersampled } from './export-png.js'
+import { buildFilename, exportRenderedFrame } from './export-png.js'
 import { showFatal } from './fatal.js'
 import { defaultModeForField, isModeValidForField } from './field-modes.js'
 import { InputController } from './input.js'
@@ -757,19 +757,22 @@ window.addEventListener('hashchange', () => {
   store.set(new Viewport(view.re, view.im, view.zoom, live.width(), live.height()), 'hashchange')
 })
 
-// PNG export (O2, #92). The 1× path saves the settled frame already on the
-// canvas; the 2× path renders one off-screen supersampled frame on a dedicated
-// one-shot worker (see export-png.ts). The 2× supersample factor — twice the
-// logical viewport size, independent of the on-screen Resolution knob — rides
-// the same `computeBufferDims` machinery as every render, so the pixel budget
+// PNG export (O2, #92). Both buttons render the *requested* (latest committed)
+// state off-screen on a dedicated one-shot worker (see export-png.ts) rather
+// than grabbing the on-screen canvas, so the saved pixels always match the
+// permalink the filename embeds — even mid-render, when the canvas still shows
+// the previous frame. `multiplier` scales the on-screen Resolution knob:
+// `1` reproduces the on-screen frame faithfully; `2` supersamples for a sharper
+// export (twice the on-screen sample density). Both ride the same
+// `computeBufferDims` machinery as every render, so the pixel budget
 // (`MAX_RENDER_PIXELS`) still clamps a huge window's export.
 const EXPORT_SUPERSAMPLE = 2
-const buildExportRequest = (): RenderRequest => {
+const buildExportRequest = (multiplier: number): RenderRequest => {
   const viewport = store.get()
   const { width, height, scale } = computeBufferDims(
     viewport.width(),
     viewport.height(),
-    EXPORT_SUPERSAMPLE,
+    current.renderScale * multiplier,
     MAX_RENDER_PIXELS,
   )
   return {
@@ -790,21 +793,17 @@ const buildExportRequest = (): RenderRequest => {
   }
 }
 
-// Serialise exports so a slow 2× render can't overlap a second click (or a 1×
-// save), and reflect the busy state by disabling both buttons.
+// Serialise exports so a slow render can't overlap a second click, and reflect
+// the busy state by disabling both buttons. The filename is built from the same
+// `currentViewState()` the request renders, so the two always describe one frame.
 let exporting = false
-const runExport = async (supersample: boolean): Promise<void> => {
+const runExport = async (multiplier: number): Promise<void> => {
   if (exporting) return
   exporting = true
   exportPngButton.disabled = true
   exportPng2xButton.disabled = true
   try {
-    const filename = buildFilename(currentViewState())
-    if (supersample) {
-      await exportSupersampled(buildExportRequest(), filename)
-    } else {
-      await exportCurrentFrame(canvas, filename)
-    }
+    await exportRenderedFrame(buildExportRequest(multiplier), buildFilename(currentViewState()))
   } catch (error) {
     console.error('PNG export failed:', error)
   } finally {
@@ -813,5 +812,5 @@ const runExport = async (supersample: boolean): Promise<void> => {
     exportPng2xButton.disabled = false
   }
 }
-exportPngButton.addEventListener('click', () => void runExport(false))
-exportPng2xButton.addEventListener('click', () => void runExport(true))
+exportPngButton.addEventListener('click', () => void runExport(1))
+exportPng2xButton.addEventListener('click', () => void runExport(EXPORT_SUPERSAMPLE))

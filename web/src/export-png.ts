@@ -1,25 +1,28 @@
 /**
  * PNG export (O2, #92).
  *
- * Two paths share the `<a download>` blob plumbing:
+ * Both export buttons (`1×` at the on-screen resolution, `2×` supersampled)
+ * render the *requested* state off-screen via `exportRenderedFrame` rather than
+ * grabbing the on-screen canvas bitmap. Grabbing the canvas looked cheaper, but
+ * it is only correct when the canvas is already showing the latest committed
+ * view: during an in-flight render or recolorize the canvas still holds the
+ * *previous* frame while the live settings/viewport (and so the permalink the
+ * filename embeds) have already advanced — saving then would download stale
+ * pixels under a filename naming a different view. Rendering the requested state
+ * makes the pixels and the filename describe the same frame, always.
  *
- *  - **1×** (`exportCurrentFrame`) saves the settled frame already on the
- *    on-screen canvas — it is RGBA in a backing store, so a single
- *    `canvas.toBlob('image/png')` is the whole job; no recompute.
- *  - **2×** (`exportSupersampled`) renders one off-screen supersampled frame.
- *    It deliberately does NOT reuse the live `render-client` singleton: that
- *    client has a global epoch + a single in-flight slot (see its module doc;
- *    the factory refactor is #86), so dispatching an export render through it
- *    would supersede — and visually clobber — the frame the user is looking at.
- *    Instead a dedicated one-shot worker boots, renders exactly one request,
- *    and is terminated. The cost is a brief second WASM boot per export, which
- *    is fine for an explicit, infrequent action and keeps the live pipeline
- *    untouched.
+ * It deliberately does NOT reuse the live `render-client` singleton: that client
+ * has a global epoch + a single in-flight slot (see its module doc; the factory
+ * refactor is #86), so dispatching an export render through it would supersede —
+ * and visually clobber — the frame the user is looking at. Instead a dedicated
+ * one-shot worker boots, renders exactly one request, and is terminated. The
+ * cost is a brief second WASM boot per export, which is fine for an explicit,
+ * infrequent action and keeps the live pipeline untouched.
  *
- * The caller builds the supersampled `RenderRequest` (it owns the viewport +
- * the form→wasm enum mapping), reusing `computeBufferDims(…, 2, …)` so the 2×
- * buffer rides the same render-scale machinery — including the pixel-budget
- * clamp — as every on-screen render.
+ * The caller builds the `RenderRequest` (it owns the viewport + the form→wasm
+ * enum mapping), reusing `computeBufferDims` so the export buffer rides the same
+ * render-scale machinery — including the pixel-budget clamp — as every
+ * on-screen render.
  */
 
 import type { ViewState } from './view-state.js'
@@ -90,21 +93,12 @@ function rgbaToPngBlob(
   return canvasToPngBlob(canvas)
 }
 
-/** Save the settled on-screen frame as a 1× PNG. */
-export async function exportCurrentFrame(
-  canvas: HTMLCanvasElement,
-  filename: string,
-): Promise<void> {
-  const blob = await canvasToPngBlob(canvas)
-  downloadBlob(blob, filename)
-}
-
 /**
  * Render `request` on a dedicated one-shot worker and save the result as a PNG.
  * The worker boots its own WASM + thread pool, renders exactly one frame, and
  * is terminated in `finally` whether the render succeeds or fails.
  */
-export async function exportSupersampled(request: RenderRequest, filename: string): Promise<void> {
+export async function exportRenderedFrame(request: RenderRequest, filename: string): Promise<void> {
   // Same worker entry as the live pipeline — Vite bundles it as its own chunk.
   const worker = new Worker(new URL('./worker/worker.ts', import.meta.url), { type: 'module' })
   try {
