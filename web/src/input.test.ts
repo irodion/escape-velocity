@@ -312,6 +312,30 @@ describe('InputController', () => {
     expect(canvas.classList.contains('dragging')).toBe(false)
   })
 
+  it('threads the click position and modifier-key state to the click consumer (O2, #92)', () => {
+    // The deadzone click branch feeds the orbit pin (E1) and the Julia c-picker
+    // (O2): the picker needs the Alt-key flag to distinguish a c-pick from a
+    // plain orbit-pin click, so the controller reports it alongside the CSS
+    // position — staying presentation-free about what either means.
+    const onClick = vi.fn()
+    const store = createViewportStore(viewport as unknown as Viewport)
+    new InputController(canvas, store, undefined, onClick)
+
+    // A plain in-deadzone click: altKey false, CSS position relative to the box.
+    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 120, clientY: 80, bubbles: true }))
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 120, clientY: 80, bubbles: true }))
+    expect(onClick).toHaveBeenLastCalledWith(120, 80, { altKey: false })
+
+    // An Alt-click at a different point: altKey true.
+    canvas.dispatchEvent(
+      new MouseEvent('mousedown', { clientX: 200, clientY: 150, altKey: true, bubbles: true }),
+    )
+    document.dispatchEvent(
+      new MouseEvent('mouseup', { clientX: 200, clientY: 150, altKey: true, bubbles: true }),
+    )
+    expect(onClick).toHaveBeenLastCalledWith(200, 150, { altKey: true })
+  })
+
   it('previews instantly on a wheel notch and defers a single onChange to the Settle', () => {
     const zoomed = makeZoomResult(0.8)
     viewport.zoom_around.mockReturnValue(zoomed)

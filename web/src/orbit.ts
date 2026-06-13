@@ -35,6 +35,31 @@ interface Anchored {
 }
 
 /**
+ * Flatten the authoritative viewport plus a surface's CSS box into the
+ * `ViewGeometry` the projection helpers need. Returns null for a degenerate box
+ * (a `display:none` or pre-layout canvas), so callers can bail rather than feed
+ * NaN coordinates into `cssToComplex`. Shared by the orbit overlay and the Julia
+ * c-picker (O2, #92) so the two derive the cursor→complex mapping identically.
+ */
+export function viewGeometryFromStore(
+  store: ViewportStore,
+  surface: HTMLElement,
+): ViewGeometry | null {
+  const rect = surface.getBoundingClientRect()
+  if (rect.width <= 0 || rect.height <= 0) return null
+  const vp = store.get()
+  return {
+    centerRe: vp.center_re(),
+    centerIm: vp.center_im(),
+    zoom: vp.zoom(),
+    logicalW: vp.width(),
+    logicalH: vp.height(),
+    rectW: rect.width,
+    rectH: rect.height,
+  }
+}
+
+/**
  * The orbit visualizer overlay (E1, #94).
  *
  * With the feature enabled, hovering the fractal draws a compact, animated
@@ -221,18 +246,7 @@ export class OrbitOverlay {
   }
 
   private geometry(): ViewGeometry | null {
-    const rect = this.overlay.getBoundingClientRect()
-    if (rect.width <= 0 || rect.height <= 0) return null
-    const vp = this.store.get()
-    return {
-      centerRe: vp.center_re(),
-      centerIm: vp.center_im(),
-      zoom: vp.zoom(),
-      logicalW: vp.width(),
-      logicalH: vp.height(),
-      rectW: rect.width,
-      rectH: rect.height,
-    }
+    return viewGeometryFromStore(this.store, this.overlay)
   }
 
   private refreshAccent(): void {

@@ -21,6 +21,7 @@ import {
   type NormalisationName,
   nearestMaxIterStop,
   type PaletteName,
+  pickJuliaSettings,
   type Settings,
 } from './controls.js'
 import { mountDrawer } from './drawer.js'
@@ -28,7 +29,8 @@ import { buildFilename, exportRenderedFrame } from './export-png.js'
 import { showFatal } from './fatal.js'
 import { defaultModeForField, isModeValidForField } from './field-modes.js'
 import { InputController } from './input.js'
-import { OrbitOverlay } from './orbit.js'
+import { OrbitOverlay, viewGeometryFromStore } from './orbit.js'
+import { cssToComplex } from './orbit-math.js'
 import { mountProgress } from './progress.js'
 import { createPwaLifecycle } from './pwa-lifecycle.js'
 import { mountPwaUi } from './pwa-ui.js'
@@ -538,6 +540,20 @@ const orbitOverlay = new OrbitOverlay(
   () => controlsForm.classList.contains('open'),
 )
 
+// Whether the controls drawer was open at the *start* of the current press.
+// The drawer's light-dismiss (drawer.ts) closes the drawer on the canvas
+// `mouseup`, which runs in the target phase — before the InputController's
+// document-level `mouseup` delivers the click below — so by then the live
+// `.open` class already reads closed. Capturing the state at `mousedown`
+// (which only arms the dismiss, never closes it) lets the c-picker treat a
+// dismiss Alt-click as a dismiss, not a pick. Neither the drawer's nor the
+// controller's own `mousedown` listener mutates `.open`, so registration order
+// here is irrelevant.
+let drawerOpenAtPress = false
+canvas.addEventListener('mousedown', () => {
+  drawerOpenAtPress = controlsForm.classList.contains('open')
+})
+
 // The controller needs no binding: it wires its own canvas listeners and
 // subscribes to the store in its constructor, and main.ts now reaches the
 // viewport through the store rather than through the controller.
@@ -548,9 +564,38 @@ new InputController(
   // premature Settle's frame can't paint mid-scrub and clear the Preview
   // transform out from under the gesture (ADR-0012).
   discardInFlight,
-  // A plain click (no drag) seeds/pins the orbit at that point. Reuses the
-  // controller's canonical click-vs-pan classification (the deadzone branch).
-  (cssX, cssY) => orbitOverlay.pin(cssX, cssY),
+  // A click (no drag) routes by modifier, reusing the controller's canonical
+  // click-vs-pan classification (the deadzone branch):
+  //  - Alt-click in Mandelbrot mode picks the Julia constant at the clicked
+  //    point and switches to Julia (O2, #92).
+  //  - any other click seeds/pins the orbit at that point (E1, #94).
+  (cssX, cssY, modifiers) => {
+    // A click that *began* while the drawer was open is a light-dismiss, not a
+    // c-pick (the live `.open` class can't be used — the dismiss already
+    // cleared it on the canvas `mouseup`; see `drawerOpenAtPress`).
+    if (modifiers.altKey && current.mode === 'mandelbrot' && !drawerOpenAtPress) {
+      const view = viewGeometryFromStore(store, canvas)
+      if (view !== null) {
+        const { re, im } = cssToComplex(cssX, cssY, view)
+        const next = pickJuliaSettings(current, re, im)
+        // Mirror the picked settings into the form (no emit), then run the
+        // dispatcher exactly as the hashchange handler does: branch 1 (mode
+        // change) resets to the Julia default view and rerenders with the
+        // picked c, and `syncView` persists the new view to the URL.
+        controls.applySettings(next)
+        applySettings(next)
+        syncView()
+      }
+      return
+    }
+    // A click that began while the drawer was open is a light-dismiss, not an
+    // orbit pin either: `orbitOverlay.pin` guards on the *live* `.open` class,
+    // which the dismiss already cleared on the canvas `mouseup` before this
+    // document-level `mouseup` runs — so the same press-time flag must suppress
+    // the pin. The flag re-arms on the next `mousedown`, so no reset is needed.
+    if (drawerOpenAtPress) return
+    orbitOverlay.pin(cssX, cssY)
+  },
 )
 
 // Fit-to-window: re-fit the viewport whenever the canvas's measured box

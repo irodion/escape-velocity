@@ -6,6 +6,7 @@ import {
   MAX_ITER_STOPS,
   type NormalisationName,
   type PaletteName,
+  pickJuliaSettings,
   type Settings,
 } from './controls.js'
 
@@ -564,5 +565,27 @@ describe('Controls', () => {
     paletteSelect.dispatchEvent(new Event('change', { bubbles: true }))
     expect(onChange).toHaveBeenCalledTimes(2)
     expect(onChange).toHaveBeenLastCalledWith({ ...INITIAL, maxIter: 1024, palette: 'inferno' })
+  })
+})
+
+describe('pickJuliaSettings', () => {
+  it('switches to Julia with the picked c, preserving every other setting', () => {
+    const picked = pickJuliaSettings(INITIAL, -0.512, 0.521)
+    expect(picked).toEqual({ ...INITIAL, mode: 'julia', cRe: -0.512, cIm: 0.521 })
+  })
+
+  it('overrides a stale c even when already in Julia mode', () => {
+    const julia: Settings = { ...INITIAL, mode: 'julia', cRe: 0.1, cIm: 0.2 }
+    expect(pickJuliaSettings(julia, -0.8, 0.156)).toEqual({
+      ...julia,
+      cRe: -0.8,
+      cIm: 0.156,
+    })
+  })
+
+  it('does not mutate the input settings', () => {
+    const before = { ...INITIAL }
+    pickJuliaSettings(INITIAL, 1, 2)
+    expect(INITIAL).toEqual(before)
   })
 })
