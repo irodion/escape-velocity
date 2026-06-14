@@ -114,40 +114,58 @@ export function mountDrawer(
     }
   })
 
-  // Click-away: a deliberate click on the fractal dismisses an open drawer.
+  // Click-away: a deliberate click/tap on the fractal dismisses an open drawer.
   // We can't use a plain `click` listener — the canvas's pan also fires
   // `click` after a drag returns near its origin, and the browser's own
-  // click-distance tolerance isn't tunable. So we arm on `mousedown` and
-  // only dismiss if the pointer barely moved by `mouseup` (a pan travels
-  // farther; a wheel-zoom fires no mouse press), giving an explicit,
-  // testable click-vs-drag split. Mouse events (not pointer) match the
-  // canvas's existing pan wiring in `input.ts` — touch taps synthesise the
-  // same mousedown/mouseup pair. The drawer's own controls and the toggle
-  // sit in higher z-index layers, so clicks on them never reach here.
+  // click-distance tolerance isn't tunable. So we arm on `pointerdown` and
+  // only dismiss if the pointer barely moved by `pointerup` (a pan travels
+  // farther; a wheel-zoom fires no pointer press), giving an explicit,
+  // testable click-vs-drag split. Pointer events (not mouse) match the
+  // canvas's pan wiring in `input.ts` (U1, #88), so a touch tap dismisses the
+  // drawer just like a mouse click — no reliance on synthesised mouse events.
+  // The drawer's own controls and the toggle sit in higher z-index layers, so
+  // presses on them never reach here.
   //
   // Both this listener and `input.ts`'s pan see the same press: a true
   // click closes the drawer here and commits a zero-delta (no-op) pan
   // there; a drag leaves the drawer open and pans. They stay decoupled —
   // the drawer never learns about the viewport, the input layer never
   // learns about the drawer.
+  //
+  // Only a *single*-pointer tap dismisses. A second concurrent pointer means a
+  // multi-touch gesture — a pinch-zoom (U1, #88) — not a tap: arming is
+  // cancelled the moment a second finger lands, so lifting a pinch finger near
+  // where it started can never close the drawer mid-zoom.
   if (dismissSurface !== undefined) {
     let downX = 0
     let downY = 0
-    // Only a press that began on the fractal *while the drawer was open*
-    // can dismiss it. Re-checked on every press, so a release left dangling
-    // by a drag off-canvas (no `mouseup` on the surface) can't later fire a
-    // stray dismiss — the next press re-arms from the live state.
-    let armed = false
-    dismissSurface.addEventListener('mousedown', (event) => {
-      // Primary button only; a right/middle press belongs to the browser
-      // and shouldn't double as a dismiss.
-      armed = isOpen && event.button === 0
-      downX = event.clientX
-      downY = event.clientY
+    // The id of the pointer whose press armed the dismiss, or null when not
+    // armed. Only this pointer's release can dismiss, and only while it is the
+    // lone pointer on the surface. Pointers currently down are tracked so a
+    // second one can cancel the arming.
+    let armedPointerId: number | null = null
+    const activePointers = new Set<number>()
+    dismissSurface.addEventListener('pointerdown', (event) => {
+      // A second concurrent pointer cancels any armed dismiss — this press is
+      // part of a pinch, not a tap.
+      if (activePointers.size > 0) {
+        armedPointerId = null
+      } else {
+        // Primary button only; a right/middle press belongs to the browser
+        // and shouldn't double as a dismiss. Touch/pen report button 0. Only a
+        // press that began *while the drawer was open* can dismiss it.
+        armedPointerId = isOpen && event.button === 0 ? event.pointerId : null
+        downX = event.clientX
+        downY = event.clientY
+      }
+      activePointers.add(event.pointerId)
     })
-    dismissSurface.addEventListener('mouseup', (event) => {
-      if (!armed) return
-      armed = false
+    const release = (event: PointerEvent): void => {
+      activePointers.delete(event.pointerId)
+      // Only the armed pointer's release dismisses (a dangling release from a
+      // drag off-canvas, or a non-armed pinch finger, is ignored).
+      if (event.pointerId !== armedPointerId) return
+      armedPointerId = null
       const movedFar =
         Math.abs(event.clientX - downX) > CLICK_SLOP_PX ||
         Math.abs(event.clientY - downY) > CLICK_SLOP_PX
@@ -157,6 +175,14 @@ export function mountDrawer(
       // a keyboard focus that was sitting on a control inside it can't be
       // stranded there.
       handoffFocus()
+    }
+    dismissSurface.addEventListener('pointerup', release)
+    // A cancelled pointer (OS gesture steal / abort) is NOT a completed tap, so
+    // it must never dismiss — it only cleans up tracking, or a lingering id
+    // would mis-classify the next press as multi-touch.
+    dismissSurface.addEventListener('pointercancel', (event) => {
+      activePointers.delete(event.pointerId)
+      if (event.pointerId === armedPointerId) armedPointerId = null
     })
   }
 }

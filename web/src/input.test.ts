@@ -54,12 +54,32 @@ function setRect(
   } as DOMRect)
 }
 
+// Pointer-event factory. The controller speaks Pointer Events (U1, #88), so
+// every gesture is dispatched as a `PointerEvent` carrying a `pointerId`
+// (single-pointer gestures default to id 1; pinch tests pass two ids) and a
+// `button` (0 = primary; touch/pen always report 0). jsdom implements the
+// `PointerEvent` constructor (inheriting clientX/clientY/altKey/button from
+// MouseEvent) but *not* `setPointerCapture` — the controller optional-chains
+// that call, so no stub is needed here.
+function pe(
+  type: string,
+  init: {
+    clientX?: number
+    clientY?: number
+    pointerId?: number
+    button?: number
+    altKey?: boolean
+  },
+): PointerEvent {
+  return new PointerEvent(type, { bubbles: true, pointerId: 1, button: 0, ...init })
+}
+
 // Minimal 2D context stub. jsdom does not implement canvas painting,
-// so `canvas.getContext('2d')` returns null by default. After #82 the
-// InputController's only canvas-API touchpoints are `drawImage` (to
-// snapshot the canvas into the offscreen buffer on mousedown, and to
-// blit it back on mousemove) and `fillRect` (the black edge fill on
-// mousemove), so the stub only needs to spy on those two.
+// so `canvas.getContext('2d')` returns null by default. The controller's
+// canvas-API touchpoints are `drawImage` (to snapshot the canvas into the
+// offscreen buffer on pointerdown, to blit it back on pointermove, and to
+// restore it on a pan→pinch switch) and `fillRect` (the black edge fill), so
+// the stub only needs to spy on those two.
 function makeCtxStub(): {
   ctx: CanvasRenderingContext2D
   drawImage: ReturnType<typeof vi.fn>
@@ -108,7 +128,7 @@ describe('InputController', () => {
 
   beforeEach(() => {
     // Wheel zoom defers its recompute to a debounced Settle, so the wheel
-    // tests drive the clock with fake timers. Pan tests use no timers and
+    // tests drive the clock with fake timers. Pan/pinch tests use no timers and
     // are unaffected.
     vi.useFakeTimers()
     canvas = document.createElement('canvas')
@@ -143,21 +163,17 @@ describe('InputController', () => {
     vi.useRealTimers()
   })
 
-  it('emits exactly one onChange on mouseup, none during mousemove', () => {
+  it('emits exactly one onChange on pointerup, none during pointermove', () => {
     const panned = { sentinel: 'panned' } as unknown as Viewport
     viewport.pan_by_pixels.mockReturnValue(panned)
     mount(canvas, viewport, onChange)
 
-    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
-    document.dispatchEvent(
-      new MouseEvent('mousemove', { clientX: 130, clientY: 70, bubbles: true }),
-    )
-    document.dispatchEvent(
-      new MouseEvent('mousemove', { clientX: 150, clientY: 90, bubbles: true }),
-    )
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
+    canvas.dispatchEvent(pe('pointermove', { clientX: 130, clientY: 70 }))
+    canvas.dispatchEvent(pe('pointermove', { clientX: 150, clientY: 90 }))
     expect(onChange).not.toHaveBeenCalled()
 
-    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 150, clientY: 90, bubbles: true }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 150, clientY: 90 }))
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledWith(panned)
     // dx = 150 - 100 = 50, dy = 90 - 50 = 40. Rect matches internal,
@@ -181,8 +197,8 @@ describe('InputController', () => {
     viewport.pan_by_pixels.mockReturnValue(panned)
     mount(canvas, viewport, onChange)
 
-    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
-    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 150, clientY: 90, bubbles: true }))
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 150, clientY: 90 }))
     // dx = 50, dy = 40 CSS; logical mapping (800/800, 600/600) leaves
     // them unchanged. Buffer mapping would have produced (100, 80).
     expect(viewport.pan_by_pixels).toHaveBeenCalledWith(50, 40)
@@ -192,7 +208,7 @@ describe('InputController', () => {
     // B1 regression. A debounced `refitToCanvas` (ResizeObserver) can fire
     // mid-drag and `store.set` a viewport at new dimensions —
     // `with_resolution` preserves center/zoom but updates width/height to
-    // the live box. `handleMouseUp` must commit the pan from that live
+    // the live box. `endDrag` must commit the pan from that live
     // viewport, not the drag-start snapshot: panning from the snapshot
     // would re-commit the *old* dimensions, reverting the refit and
     // leaving the buffer CSS-stretched onto the new box (non-square
@@ -204,7 +220,7 @@ describe('InputController', () => {
     refitted.pan_by_pixels.mockReturnValue(refitPanned)
     const { store } = mount(canvas, viewport, onChange)
 
-    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
     // Resize lands mid-drag: the canvas box grows and the viewport is
     // refitted to 1000×700 via a non-gesture store write — the controller's
     // subscription mirrors it into its working viewport. The CSS box now
@@ -212,7 +228,7 @@ describe('InputController', () => {
     store.set(refitted as unknown as Viewport, 'refit')
     setRect(canvas, { width: 1000, height: 700 })
 
-    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 150, clientY: 90, bubbles: true }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 150, clientY: 90 }))
 
     // dx=50, dy=40 CSS; scaled by the live grid (1000/1000, 700/700) → 50,40.
     // The pan must run on the refitted viewport, never the stale snapshot.
@@ -223,31 +239,27 @@ describe('InputController', () => {
     expect(onChange).toHaveBeenCalledWith(refitPanned)
   })
 
-  it('snapshots the canvas on mousedown and paints it at the drag offset on mousemove', () => {
+  it('snapshots the canvas on pointerdown and paints it at the drag offset on pointermove', () => {
     viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
     mount(canvas, viewport, onChange)
 
-    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
     // Snapshot is a `drawImage` blit of the on-screen canvas into the
     // offscreen buffer (GPU path), not a `getImageData` readback (#82).
     expect(offscreenCtxStub.drawImage).toHaveBeenCalledWith(canvas, 0, 0)
 
-    document.dispatchEvent(
-      new MouseEvent('mousemove', { clientX: 130, clientY: 70, bubbles: true }),
-    )
-    // dx=30, dy=20; rect matches internal so no scaling. Each mousemove
+    canvas.dispatchEvent(pe('pointermove', { clientX: 130, clientY: 70 }))
+    // dx=30, dy=20; rect matches internal so no scaling. Each pointermove
     // re-paints the full canvas (fillRect black, then drawImage of the
     // offscreen snapshot at the offset) — no CSS transform applied.
     expect(ctxStub.fillRect).toHaveBeenLastCalledWith(0, 0, 800, 600)
     expect(ctxStub.drawImage).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), 30, 20)
     expect(canvas.style.transform).toBe('')
 
-    document.dispatchEvent(
-      new MouseEvent('mousemove', { clientX: 175, clientY: 100, bubbles: true }),
-    )
+    canvas.dispatchEvent(pe('pointermove', { clientX: 175, clientY: 100 }))
     expect(ctxStub.drawImage).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), 75, 50)
 
-    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 175, clientY: 100, bubbles: true }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 175, clientY: 100 }))
     // No transform was ever applied; nothing to clear.
     expect(canvas.style.transform).toBe('')
   })
@@ -258,53 +270,50 @@ describe('InputController', () => {
     setRect(canvas, { left: 0, top: 0, width: 400, height: 300 })
     mount(canvas, viewport, onChange)
 
-    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
-    document.dispatchEvent(
-      new MouseEvent('mousemove', { clientX: 150, clientY: 80, bubbles: true }),
-    )
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
+    canvas.dispatchEvent(pe('pointermove', { clientX: 150, clientY: 80 }))
     // 50 CSS px × (800/400) = 100 internal px; 30 CSS × (600/300) = 60.
     expect(ctxStub.drawImage).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), 100, 60)
 
-    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 150, clientY: 80, bubbles: true }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 150, clientY: 80 }))
     expect(viewport.pan_by_pixels).toHaveBeenCalledWith(100, 60)
   })
 
-  it('completes the drag when mouseup is dispatched on document outside the canvas', () => {
+  it('completes the drag when pointerup fires with coordinates outside the canvas', () => {
+    // `setPointerCapture` routes the whole gesture to the canvas even when the
+    // pointer leaves the box, so a release far outside still reaches the
+    // controller's canvas-level listener.
     viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
     mount(canvas, viewport, onChange)
 
-    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
-    // Coordinates far outside the canvas — document still routes the
-    // mouseup to the controller because the listener is on `document`.
-    document.dispatchEvent(
-      new MouseEvent('mouseup', { clientX: 5000, clientY: 5000, bubbles: true }),
-    )
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 5000, clientY: 5000 }))
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(viewport.pan_by_pixels).toHaveBeenCalledTimes(1)
   })
 
-  it('toggles the dragging class on mousedown / mouseup', () => {
+  it('toggles the dragging class on pointerdown / pointerup', () => {
     viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
     mount(canvas, viewport, onChange)
 
     expect(canvas.classList.contains('dragging')).toBe(false)
-    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, clientY: 0, bubbles: true }))
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 0, clientY: 0 }))
     expect(canvas.classList.contains('dragging')).toBe(true)
-    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 0, clientY: 0, bubbles: true }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 0, clientY: 0 }))
     expect(canvas.classList.contains('dragging')).toBe(false)
   })
 
-  it('a plain click neither discards in-flight work nor commits a pan (B3, #74)', () => {
-    // The drawer's light-dismiss is a true click on the canvas: mousedown then
-    // mouseup at the same point, no mousemove. It must leave an in-flight deep
-    // render untouched (no `onInvalidate`) and never restart it with an
+  it('a plain tap neither discards in-flight work nor commits a pan (B3, #74)', () => {
+    // The drawer's light-dismiss is a true tap on the canvas: pointerdown then
+    // pointerup at the same point, no pointermove. It must leave an in-flight
+    // deep render untouched (no `onInvalidate`) and never restart it with an
     // identical viewport (no `onChange` / no `pan_by_pixels`) — it is a pure
     // visual no-op. The drag is still torn down.
     const onInvalidate = vi.fn()
     mount(canvas, viewport, onChange, onInvalidate)
 
-    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 120, clientY: 80, bubbles: true }))
-    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 120, clientY: 80, bubbles: true }))
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 120, clientY: 80 }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 120, clientY: 80 }))
 
     expect(onInvalidate).not.toHaveBeenCalled()
     expect(onChange).not.toHaveBeenCalled()
@@ -312,7 +321,7 @@ describe('InputController', () => {
     expect(canvas.classList.contains('dragging')).toBe(false)
   })
 
-  it('threads the click position and modifier-key state to the click consumer (O2, #92)', () => {
+  it('threads the tap position and modifier-key state to the click consumer (O2, #92)', () => {
     // The deadzone click branch feeds the orbit pin (E1) and the Julia c-picker
     // (O2): the picker needs the Alt-key flag to distinguish a c-pick from a
     // plain orbit-pin click, so the controller reports it alongside the CSS
@@ -321,19 +330,157 @@ describe('InputController', () => {
     const store = createViewportStore(viewport as unknown as Viewport)
     new InputController(canvas, store, undefined, onClick)
 
-    // A plain in-deadzone click: altKey false, CSS position relative to the box.
-    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 120, clientY: 80, bubbles: true }))
-    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 120, clientY: 80, bubbles: true }))
+    // A plain in-deadzone tap: altKey false, CSS position relative to the box.
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 120, clientY: 80 }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 120, clientY: 80 }))
     expect(onClick).toHaveBeenLastCalledWith(120, 80, { altKey: false })
 
-    // An Alt-click at a different point: altKey true.
-    canvas.dispatchEvent(
-      new MouseEvent('mousedown', { clientX: 200, clientY: 150, altKey: true, bubbles: true }),
-    )
-    document.dispatchEvent(
-      new MouseEvent('mouseup', { clientX: 200, clientY: 150, altKey: true, bubbles: true }),
-    )
+    // An Alt-tap at a different point: altKey true (read from the up event).
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 200, clientY: 150, altKey: true }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 200, clientY: 150, altKey: true }))
     expect(onClick).toHaveBeenLastCalledWith(200, 150, { altKey: true })
+  })
+
+  it('pinches: two pointers zoom around the midpoint, Settling once when a finger lifts', () => {
+    // Two-finger pinch (U1, #88). The change in inter-pointer distance between
+    // moves is the zoom factor, anchored at the midpoint, fed through the same
+    // `applyZoomNotch`/`zoom_around` path the wheel uses. The store is written
+    // once, on the finger lift (a pinch Settles immediately — no debounce).
+    const zoomed = makeZoomResult(2)
+    viewport.zoom_around.mockReturnValue(zoomed)
+    mount(canvas, viewport, onChange)
+
+    // First finger down (pan begins), then second finger down (switch to pinch
+    // — initial inter-pointer distance 100).
+    canvas.dispatchEvent(pe('pointerdown', { pointerId: 1, clientX: 100, clientY: 100 }))
+    canvas.dispatchEvent(pe('pointerdown', { pointerId: 2, clientX: 200, clientY: 100 }))
+    expect(onChange).not.toHaveBeenCalled()
+
+    // Spread the fingers to distance 200: factor = 200/100 = 2, midpoint
+    // (200, 100) → logical grid (200, 100) at render scale 1.
+    canvas.dispatchEvent(pe('pointermove', { pointerId: 2, clientX: 300, clientY: 100 }))
+    expect(viewport.zoom_around).toHaveBeenCalledTimes(1)
+    expect(viewport.zoom_around).toHaveBeenCalledWith(200, 100, 2)
+    // The Preview transform is applied instantly; no recompute yet.
+    expect(canvas.style.transform).not.toBe('')
+    expect(onChange).not.toHaveBeenCalled()
+
+    // Lifting one finger Settles the pinch exactly once.
+    canvas.dispatchEvent(pe('pointerup', { pointerId: 2, clientX: 300, clientY: 100 }))
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith(zoomed)
+
+    // The leftover finger lifting does not resume a pan / fire a second commit.
+    canvas.dispatchEvent(pe('pointerup', { pointerId: 1, clientX: 100, clientY: 100 }))
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
+  })
+
+  it('pan→pinch transition restores the un-panned buffer and zooms from the live viewport', () => {
+    // A real pinch starts as a one-finger pan for a few ms. When the second
+    // finger lands, the partial pan (which never committed) is undone by
+    // re-blitting the snapshot at the origin, and the pinch begins from
+    // `currentViewport` — so `zoom_around` runs on the original viewport.
+    const onInvalidate = vi.fn()
+    viewport.zoom_around.mockReturnValue(makeZoomResult(2))
+    mount(canvas, viewport, onChange, onInvalidate)
+
+    canvas.dispatchEvent(pe('pointerdown', { pointerId: 1, clientX: 100, clientY: 100 }))
+    // A pan drag paints the snapshot shifted by (50, 50).
+    canvas.dispatchEvent(pe('pointermove', { pointerId: 1, clientX: 150, clientY: 150 }))
+    expect(ctxStub.drawImage).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), 50, 50)
+    expect(canvas.classList.contains('dragging')).toBe(true)
+
+    // Second finger lands: the buffer is restored (snapshot re-blitted at the
+    // origin) and the drag torn down.
+    canvas.dispatchEvent(pe('pointerdown', { pointerId: 2, clientX: 300, clientY: 100 }))
+    expect(ctxStub.drawImage).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), 0, 0)
+    expect(canvas.classList.contains('dragging')).toBe(false)
+    // The pinch discards in-flight work as it begins (like a wheel notch).
+    expect(onInvalidate).toHaveBeenCalled()
+
+    // The pinch zooms from the original viewport, never a panned one.
+    canvas.dispatchEvent(pe('pointermove', { pointerId: 2, clientX: 400, clientY: 100 }))
+    expect(viewport.zoom_around).toHaveBeenCalledTimes(1)
+    expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
+  })
+
+  it('Settles when a pinch-pair finger lifts even while a third finger is down', () => {
+    // With a third finger also down, the total active-pointer count stays ≥ 2
+    // after one of the pinch pair lifts. Keying the Settle on the *pair* (not
+    // the total count) avoids leaving `pinch` referencing a removed pointer,
+    // which would freeze every later move at distance 0.
+    const zoomed = makeZoomResult(2)
+    viewport.zoom_around.mockReturnValue(zoomed)
+    mount(canvas, viewport, onChange)
+
+    // Two fingers begin the pinch; a third finger lands (tracked but inert).
+    canvas.dispatchEvent(pe('pointerdown', { pointerId: 1, clientX: 100, clientY: 100 }))
+    canvas.dispatchEvent(pe('pointerdown', { pointerId: 2, clientX: 200, clientY: 100 }))
+    canvas.dispatchEvent(pe('pointerdown', { pointerId: 3, clientX: 150, clientY: 300 }))
+    canvas.dispatchEvent(pe('pointermove', { pointerId: 2, clientX: 300, clientY: 100 }))
+    expect(viewport.zoom_around).toHaveBeenCalledTimes(1)
+    expect(onChange).not.toHaveBeenCalled()
+
+    // A pinch-pair pointer (id 1) lifts while id 2 and id 3 remain down: count
+    // is still 2, but the gesture must Settle, not freeze.
+    canvas.dispatchEvent(pe('pointerup', { pointerId: 1, clientX: 100, clientY: 100 }))
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith(zoomed)
+  })
+
+  it('ignores a finger re-landing before the Settle frame paints (post-pinch lockout)', () => {
+    // After a pinch Settles, the leftover finger stays down and the Preview
+    // transform lingers until the fresh frame paints. A second finger landing
+    // in that window must NOT begin a new pinch (it would measure a transformed
+    // box and re-base the Preview wrongly). New gestures resume only once every
+    // finger has lifted.
+    const first = makeZoomResult(2)
+    viewport.zoom_around.mockReturnValue(first)
+    mount(canvas, viewport, onChange)
+
+    // A full pinch that Settles when finger 2 lifts; finger 1 stays down.
+    canvas.dispatchEvent(pe('pointerdown', { pointerId: 1, clientX: 100, clientY: 100 }))
+    canvas.dispatchEvent(pe('pointerdown', { pointerId: 2, clientX: 200, clientY: 100 }))
+    canvas.dispatchEvent(pe('pointermove', { pointerId: 2, clientX: 300, clientY: 100 }))
+    canvas.dispatchEvent(pe('pointerup', { pointerId: 2, clientX: 300, clientY: 100 }))
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(viewport.zoom_around).toHaveBeenCalledTimes(1)
+
+    // A finger re-lands while finger 1 is still down: locked out — no new pinch.
+    canvas.dispatchEvent(pe('pointerdown', { pointerId: 3, clientX: 220, clientY: 100 }))
+    canvas.dispatchEvent(pe('pointermove', { pointerId: 3, clientX: 320, clientY: 100 }))
+    expect(viewport.zoom_around).toHaveBeenCalledTimes(1) // no second pinch began
+
+    // All fingers lift, then a fresh pinch is allowed again. It zooms from the
+    // post-Settle `currentViewport` (`first`), so it advances `first.zoom_around`
+    // — proof the lockout lifted and a new gesture began.
+    canvas.dispatchEvent(pe('pointerup', { pointerId: 1, clientX: 100, clientY: 100 }))
+    canvas.dispatchEvent(pe('pointerup', { pointerId: 3, clientX: 320, clientY: 100 }))
+    first.zoom_around.mockReturnValue(makeZoomResult(2))
+    canvas.dispatchEvent(pe('pointerdown', { pointerId: 4, clientX: 100, clientY: 100 }))
+    canvas.dispatchEvent(pe('pointerdown', { pointerId: 5, clientX: 200, clientY: 100 }))
+    canvas.dispatchEvent(pe('pointermove', { pointerId: 5, clientX: 300, clientY: 100 }))
+    expect(first.zoom_around).toHaveBeenCalledTimes(1) // lockout lifted, new pinch began
+  })
+
+  it('pointercancel during a pinch tears it down and Settles', () => {
+    // The OS can steal a gesture (a system edge-swipe, etc.), firing
+    // `pointercancel`. The controller treats it like `pointerup`: it commits
+    // what the Preview already showed rather than leaving a dangling transform
+    // or an ahead-of-store viewport.
+    const zoomed = makeZoomResult(2)
+    viewport.zoom_around.mockReturnValue(zoomed)
+    mount(canvas, viewport, onChange)
+
+    canvas.dispatchEvent(pe('pointerdown', { pointerId: 1, clientX: 100, clientY: 100 }))
+    canvas.dispatchEvent(pe('pointerdown', { pointerId: 2, clientX: 200, clientY: 100 }))
+    canvas.dispatchEvent(pe('pointermove', { pointerId: 2, clientX: 300, clientY: 100 }))
+    expect(canvas.style.transform).not.toBe('')
+
+    canvas.dispatchEvent(pe('pointercancel', { pointerId: 2, clientX: 300, clientY: 100 }))
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith(zoomed)
   })
 
   it('previews instantly on a wheel notch and defers a single onChange to the Settle', () => {
@@ -503,28 +650,26 @@ describe('InputController', () => {
     expect(onChange).not.toHaveBeenCalled()
 
     // Pan starts before the Settle fires: no render is issued here (firing the
-    // zoom's Settle would paint an intermediate frame mid-drag). The mousedown
+    // zoom's Settle would paint an intermediate frame mid-drag). The pointerdown
     // no longer discards in-flight work — that is deferred to the first real
-    // mousemove (B3, #74) — so the count still reflects only the wheel notch's
+    // pointermove (B3, #74) — so the count still reflects only the wheel notch's
     // own discard (B2).
-    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
     expect(onChange).not.toHaveBeenCalled()
     expect(onInvalidate).toHaveBeenCalledTimes(1)
     // The cancelled Settle can't fire later either.
     vi.advanceTimersByTime(WHEEL_SETTLE_MS)
     expect(onChange).not.toHaveBeenCalled()
 
-    // The drag actually begins: the first mousemove discards any in-flight
+    // The drag actually begins: the first pointermove discards any in-flight
     // render so it can't clobber the pan snapshot (bringing the total to two).
-    document.dispatchEvent(
-      new MouseEvent('mousemove', { clientX: 115, clientY: 60, bubbles: true }),
-    )
+    canvas.dispatchEvent(pe('pointermove', { clientX: 115, clientY: 60 }))
     expect(onInvalidate).toHaveBeenCalledTimes(2)
     expect(onChange).not.toHaveBeenCalled()
 
-    // Mouseup issues the single render: the zoomed viewport, panned. The pan
+    // Pointerup issues the single render: the zoomed viewport, panned. The pan
     // operates on the accumulated zoom carried in `currentViewport`.
-    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 130, clientY: 70, bubbles: true }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 130, clientY: 70 }))
     expect(zoomed.pan_by_pixels).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledWith(panned)
@@ -582,8 +727,8 @@ describe('InputController', () => {
     expect(canvas.style.transform).not.toBe('')
 
     // A pan starting before the fresh frame paints must clear the transform,
-    // or the pan delta on mouseup would be scaled by the live transform.
-    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 50, bubbles: true }))
+    // or the pan delta on pointerup would be scaled by the live transform.
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
     expect(canvas.style.transform).toBe('')
   })
 
@@ -644,23 +789,20 @@ describe('InputController', () => {
     expect(viewport.zoom_around).toHaveBeenCalledWith(100, 50, 1.25 ** (-(1 * 800) / 100))
   })
 
-  it('ignores non-primary mouse buttons on mousedown', () => {
+  it('ignores non-primary pointer buttons on the first pointerdown', () => {
     mount(canvas, viewport, onChange)
 
     // Right-click (button 2) and middle-click (button 1) should not
-    // start a drag. No snapshot, no class toggle, no document
-    // listeners (so a later mousemove/mouseup is also a no-op).
-    canvas.dispatchEvent(
-      new MouseEvent('mousedown', { button: 2, clientX: 50, clientY: 50, bubbles: true }),
-    )
-    canvas.dispatchEvent(
-      new MouseEvent('mousedown', { button: 1, clientX: 50, clientY: 50, bubbles: true }),
-    )
+    // start a gesture as the first pointer. No snapshot, no class toggle,
+    // and the pointer is not tracked (so a later pointermove/pointerup is
+    // also a no-op).
+    canvas.dispatchEvent(pe('pointerdown', { button: 2, clientX: 50, clientY: 50 }))
+    canvas.dispatchEvent(pe('pointerdown', { button: 1, clientX: 50, clientY: 50 }))
     expect(offscreenCtxStub.drawImage).not.toHaveBeenCalled()
     expect(canvas.classList.contains('dragging')).toBe(false)
 
-    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 80, clientY: 70, bubbles: true }))
-    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 80, clientY: 70, bubbles: true }))
+    canvas.dispatchEvent(pe('pointermove', { clientX: 80, clientY: 70 }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 80, clientY: 70 }))
     expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
     expect(onChange).not.toHaveBeenCalled()
   })
@@ -686,11 +828,11 @@ describe('InputController', () => {
     expect(viewport.zoom_around).not.toHaveBeenCalled()
 
     // Drag on a 0×0 canvas: cleanup still happens (class removed,
-    // dragState reset implicitly via second mousedown not crashing),
+    // dragState reset implicitly via second pointerdown not crashing),
     // but no pan_by_pixels / onChange.
-    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 0, clientY: 0, bubbles: true }))
-    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 30, clientY: 20, bubbles: true }))
-    document.dispatchEvent(new MouseEvent('mouseup', { clientX: 30, clientY: 20, bubbles: true }))
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 0, clientY: 0 }))
+    canvas.dispatchEvent(pe('pointermove', { clientX: 30, clientY: 20 }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 30, clientY: 20 }))
     expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
     expect(onChange).not.toHaveBeenCalled()
     expect(canvas.classList.contains('dragging')).toBe(false)

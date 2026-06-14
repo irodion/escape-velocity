@@ -82,6 +82,11 @@
         width: 100%;
         height: 100%;
         display: block;
+        /* The canvas owns all of its gestures (U1, #88): without this the
+           browser claims one-finger drags for page scroll and two-finger
+           pinches for page zoom, so the InputController's Pointer Events never
+           see them. `none` hands every touch to us — pan, pinch, and tap. */
+        touch-action: none;
         /* Anchor the wheel-zoom Preview transform at the top-left so the
            `zoom-preview` affine (p ↦ scale·p + t) holds exactly. */
         transform-origin: 0 0;
