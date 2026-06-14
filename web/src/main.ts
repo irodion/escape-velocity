@@ -542,15 +542,14 @@ const orbitOverlay = new OrbitOverlay(
 
 // Whether the controls drawer was open at the *start* of the current press.
 // The drawer's light-dismiss (drawer.ts) closes the drawer on the canvas
-// `mouseup`, which runs in the target phase — before the InputController's
-// document-level `mouseup` delivers the click below — so by then the live
-// `.open` class already reads closed. Capturing the state at `mousedown`
-// (which only arms the dismiss, never closes it) lets the c-picker treat a
-// dismiss Alt-click as a dismiss, not a pick. Neither the drawer's nor the
-// controller's own `mousedown` listener mutates `.open`, so registration order
-// here is irrelevant.
+// `pointerup`, which runs before the InputController's `pointerup` delivers the
+// click below — so by then the live `.open` class already reads closed.
+// Capturing the state at `pointerdown` (which only arms the dismiss, never
+// closes it) lets the c-picker treat a dismiss Alt-click as a dismiss, not a
+// pick. Neither the drawer's nor the controller's own `pointerdown` listener
+// mutates `.open`, so registration order here is irrelevant.
 let drawerOpenAtPress = false
-canvas.addEventListener('mousedown', () => {
+canvas.addEventListener('pointerdown', () => {
   drawerOpenAtPress = controlsForm.classList.contains('open')
 })
 
@@ -572,7 +571,7 @@ new InputController(
   (cssX, cssY, modifiers) => {
     // A click that *began* while the drawer was open is a light-dismiss, not a
     // c-pick (the live `.open` class can't be used — the dismiss already
-    // cleared it on the canvas `mouseup`; see `drawerOpenAtPress`).
+    // cleared it on the canvas `pointerup`; see `drawerOpenAtPress`).
     if (modifiers.altKey && current.mode === 'mandelbrot' && !drawerOpenAtPress) {
       const view = viewGeometryFromStore(store, canvas)
       if (view !== null) {
@@ -590,9 +589,9 @@ new InputController(
     }
     // A click that began while the drawer was open is a light-dismiss, not an
     // orbit pin either: `orbitOverlay.pin` guards on the *live* `.open` class,
-    // which the dismiss already cleared on the canvas `mouseup` before this
-    // document-level `mouseup` runs — so the same press-time flag must suppress
-    // the pin. The flag re-arms on the next `mousedown`, so no reset is needed.
+    // which the dismiss already cleared on the canvas `pointerup` before this
+    // controller's `pointerup` runs — so the same press-time flag must suppress
+    // the pin. The flag re-arms on the next `pointerdown`, so no reset is needed.
     if (drawerOpenAtPress) return
     orbitOverlay.pin(cssX, cssY)
   },

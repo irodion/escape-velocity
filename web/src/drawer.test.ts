@@ -23,17 +23,19 @@ function setup(): {
 }
 
 // Press-then-release on the surface, separated by a CSS-pixel distance. A
-// small distance reads as a click; a large one as a pan-drag.
+// small distance reads as a click/tap; a large one as a pan-drag. The drawer
+// arms on `pointerdown` and dismisses on `pointerup` (U1, #88), so a touch tap
+// dismisses it exactly like a mouse click.
 function clickSurface(
   surface: HTMLElement,
   opts: { fromX?: number; fromY?: number; toX?: number; toY?: number; button?: number } = {},
 ): void {
   const { fromX = 100, fromY = 100, toX = fromX, toY = fromY, button = 0 } = opts
   surface.dispatchEvent(
-    new MouseEvent('mousedown', { clientX: fromX, clientY: fromY, button, bubbles: true }),
+    new PointerEvent('pointerdown', { clientX: fromX, clientY: fromY, button, bubbles: true }),
   )
   surface.dispatchEvent(
-    new MouseEvent('mouseup', { clientX: toX, clientY: toY, button, bubbles: true }),
+    new PointerEvent('pointerup', { clientX: toX, clientY: toY, button, bubbles: true }),
   )
 }
 
@@ -146,6 +148,52 @@ describe('mountDrawer', () => {
     const { drawer, toggle, surface } = setup()
     toggle.click()
     clickSurface(surface, { button: 2 })
+    expect(drawer.classList.contains('open')).toBe(true)
+  })
+
+  it('does not dismiss on pointercancel (an aborted gesture is not a tap)', () => {
+    // `pointercancel` means the browser/OS stole or aborted the gesture, not
+    // that the user completed a tap — so even a cancelled in-slop press must
+    // leave the drawer open.
+    const { drawer, toggle, surface } = setup()
+    toggle.click()
+    expect(drawer.classList.contains('open')).toBe(true)
+
+    surface.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerId: 1, clientX: 100, clientY: 100, bubbles: true }),
+    )
+    surface.dispatchEvent(
+      new PointerEvent('pointercancel', {
+        pointerId: 1,
+        clientX: 100,
+        clientY: 100,
+        bubbles: true,
+      }),
+    )
+    expect(drawer.classList.contains('open')).toBe(true)
+  })
+
+  it('stays open on a two-finger pinch even if a finger lifts near where it landed', () => {
+    // A pinch-zoom (U1, #88) is a multi-touch gesture, not a tap: the second
+    // finger landing cancels the armed dismiss, so lifting either finger close
+    // to its start point must NOT close the drawer.
+    const { drawer, toggle, surface } = setup()
+    toggle.click()
+    expect(drawer.classList.contains('open')).toBe(true)
+
+    surface.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerId: 1, clientX: 100, clientY: 100, bubbles: true }),
+    )
+    surface.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerId: 2, clientX: 200, clientY: 100, bubbles: true }),
+    )
+    // Both fingers lift roughly where they landed (a pinch that barely moved).
+    surface.dispatchEvent(
+      new PointerEvent('pointerup', { pointerId: 2, clientX: 201, clientY: 101, bubbles: true }),
+    )
+    surface.dispatchEvent(
+      new PointerEvent('pointerup', { pointerId: 1, clientX: 101, clientY: 99, bubbles: true }),
+    )
     expect(drawer.classList.contains('open')).toBe(true)
   })
 })
