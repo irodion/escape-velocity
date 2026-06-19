@@ -469,40 +469,96 @@
       /* Keep the native popup dark even where it can't be restyled. */
       select option { background: #0d1016; color: var(--ink); }
 
-      /* ── Orbit toggle (E1, #94) ──
-         A square checkbox in the instrument skin: hairline box that fills with
-         the live accent and shows a clipped tick when on. The wrapper caret is
-         a <select> affordance, so suppress it for this row. */
-      .field--check .field__control::after { content: none; }
-      .field--check input[type="checkbox"] {
+      /* ── Presentation toggles: Orbit (E1, #94) + Inspect (E2, #95) ──
+         Two binary switches share one instrument row instead of stacking on a
+         line each. The control is a rectangular *rocker* switch, not a pill:
+         the skin's only rounding is --r (near-square, "instrument not card"),
+         so a fully-round toggle would read as foreign. A hairline track holds a
+         near-square knob that slides left→right; flipping on fills the track
+         with the live --accent and flips the knob to the page ground so it
+         reads on accent — the same accent-fill / ground-mark logic the readout
+         selects and the old tick used. The inputs stay real checkboxes
+         (switch-styled by CSS only), so controls.ts binds them unchanged. */
+      .toggles {
+        display: flex;
+        justify-content: space-between;
+        align-items: stretch;
+        gap: 1rem;
+        border-bottom: 1px solid var(--hair);
+      }
+      /* The full label is the hit target, so the row's vertical rhythm lives
+         here (not on the container) — clicking anywhere in the row height
+         toggles, matching the touch area the stacked .field rows had. */
+      .toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.7rem;
+        margin: 0;
+        padding: 0.7rem 0 0.65rem;
+        min-height: 2.6rem;
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+      }
+      /* The row label, borrowing the field label's tech-mono voice but inline. */
+      .toggle__name {
+        font-family: var(--font-tech);
+        font-weight: 500;
+        font-size: 0.595rem;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: var(--ink-dim);
+        transition: color 0.15s var(--ease);
+      }
+      .toggle:hover .toggle__name { color: var(--ink); }
+      /* Label tracks the switch state/focus the way fields light their label. */
+      .toggle:focus-within .toggle__name,
+      .toggle:has(input:checked) .toggle__name { color: var(--accent); }
+
+      .toggle input[type="checkbox"] {
         appearance: none;
         -webkit-appearance: none;
         position: relative;
-        width: 1.3rem;
-        height: 1.3rem;
-        margin: 0.35rem 0;
+        flex: 0 0 auto;
+        width: 2.3rem;
+        height: 1.25rem;
+        margin: 0;
         border: 1px solid var(--ink-faint);
         border-radius: var(--r);
         background: transparent;
         cursor: pointer;
         transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
       }
-      .field--check:hover input[type="checkbox"] { border-color: var(--accent); }
-      .field--check input[type="checkbox"]:checked {
+      /* The knob: a near-square slug parked at the track's left lip. */
+      .toggle input[type="checkbox"]::after {
+        content: "";
+        position: absolute;
+        top: 50%;
+        left: 2px;
+        width: 0.78rem;
+        height: 0.78rem;
+        translate: 0 -50%;
+        border-radius: 2px;
+        background: var(--ink-faint);
+        transition: translate 0.18s var(--ease), background 0.15s var(--ease);
+      }
+      .toggle:hover input[type="checkbox"] { border-color: var(--accent); }
+      .toggle:hover input[type="checkbox"]::after { background: var(--ink-dim); }
+      .toggle input[type="checkbox"]:checked {
         border-color: var(--accent);
         background: var(--accent);
       }
-      .field--check input[type="checkbox"]:checked::after {
-        content: "";
-        position: absolute;
-        inset: 22%;
-        background: #05070b;       /* the page ground, so the tick reads on accent */
-        clip-path: polygon(13.5% 48%, 0 61%, 38% 100%, 100% 26%, 86.5% 13%, 38% 73%);
+      .toggle input[type="checkbox"]:checked::after {
+        /* slide to the track's right lip: width − knob − (2px lip × 2 + 2px) */
+        translate: calc(2.3rem - 0.78rem - 6px) -50%;
+        background: #05070b;       /* page ground, so the knob reads on accent */
       }
-      .field--check input[type="checkbox"]:focus-visible {
+      .toggle input[type="checkbox"]:focus-visible {
         outline: none;
         border-color: var(--accent);
         box-shadow: 0 0 0 2px var(--accent-dim);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .toggle input[type="checkbox"]::after { transition: background 0.15s var(--ease); }
       }
 
       /* ── Iterations as a log slider ──
@@ -956,26 +1012,25 @@
           </select>
         </span>
       </label>
-      <!-- Orbit visualizer toggle (E1, #94). Off by default; tick it, then
-           hover the canvas to trace a point's iteration orbit and click to pin
-           it. Persisted in the URL hash like the other view settings. -->
-      <label class="field field--check">
-        <span class="field__label">Orbit</span>
-        <span class="field__control">
+      <!-- Presentation toggles, sharing one row.
+           Orbit (E1, #94): hover the canvas to trace a point's iteration orbit,
+             click to pin it. Persisted in the URL hash like the view settings.
+           Inspect (E2, #95): hover to read the pixel under the cursor — its
+             coordinate, raw Field value, normalised t, and painted colour. A
+             view-only tool, so unlike Orbit it is not persisted in the hash.
+           Both stay native checkboxes — switch-styled by CSS only, so the
+           browser keeps the checked state in the a11y tree and controls.ts
+           binds them by name unchanged. -->
+      <div class="toggles">
+        <label class="toggle">
+          <span class="toggle__name">Orbit</span>
           <input type="checkbox" name="orbit" />
-        </span>
-      </label>
-      <!-- Pixel inspector toggle (E2, #95). Off by default; tick it, then hover
-           the canvas to read the pixel under the cursor — its coordinate, raw
-           Field value, where it lands after normalisation (t), and the painted
-           colour. A view-only inspection tool, so unlike Orbit it is not
-           persisted in the URL hash. -->
-      <label class="field field--check">
-        <span class="field__label">Inspect</span>
-        <span class="field__control">
+        </label>
+        <label class="toggle">
+          <span class="toggle__name">Inspect</span>
           <input type="checkbox" name="inspect" />
-        </span>
-      </label>
+        </label>
+      </div>
       <!-- PNG export (O2, #92). Actions, not form state: wired directly in
            main.ts (no settings snapshot, no rerender). Both render the current
            view off-screen so the saved pixels always match the permalink in the
