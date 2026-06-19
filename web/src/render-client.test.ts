@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { createRenderClient, type ProgressReporter } from './render-client.js'
+import { createRenderClient, type PixelProbe, type ProgressReporter } from './render-client.js'
 import type {
   Aborted,
   CancelRequest,
@@ -62,13 +62,18 @@ interface TestRenderClient {
     field: number,
   ) => void
   recolorize: (ctx: CanvasRenderingContext2D, palette: number, mode: number) => void
+  probe: (x: number, y: number, palette: number, mode: number) => boolean
   discardInFlight: () => void
 }
 
 // Construct a client over a fresh FakeWorker, injecting the optional fatal /
 // progress collaborators at construction (mirrors how `main.ts` wires them).
 // Supplying `onFatal` also arms the boot watchdog, matching production.
-function makeClient(deps?: { onFatal?: (message: string) => void; progress?: ProgressReporter }): {
+function makeClient(deps?: {
+  onFatal?: (message: string) => void
+  progress?: ProgressReporter
+  onProbeResult?: (probe: PixelProbe) => void
+}): {
   client: TestRenderClient
   worker: FakeWorker
 } {
@@ -630,5 +635,124 @@ describe('render-client', () => {
     deliverAborted(worker, 1) // terminal → end()
 
     expect(reporter.end).toHaveBeenCalledTimes(1)
+  })
+})
+
+// --- pixel inspector probe (E2, #95) ----------------------------------------
+
+interface ProbeMsg {
+  kind: 'probe'
+  seq: number
+  x: number
+  y: number
+  palette: number
+  mode: number
+}
+
+function postedProbes(worker: FakeWorker): ProbeMsg[] {
+  return worker.posted.filter((m) => (m as { kind: string }).kind === 'probe') as ProbeMsg[]
+}
+
+function deliverProbeResponse(worker: FakeWorker, seq: number, probe: Partial<PixelProbe>): void {
+  worker.onmessage?.({
+    data: { kind: 'probe-response', seq, raw: 0, t: 0, inside: false, r: 0, g: 0, b: 0, ...probe },
+  } as MessageEvent)
+}
+
+// Drive the client into the exact window a hover may probe in: ready, one render
+// issued *and* completed (cache populated, nothing in flight), no Preview transform.
+function readyWithStableFrame(deps?: Parameters<typeof makeClient>[0]): {
+  client: TestRenderClient
+  worker: FakeWorker
+  ctx: CanvasRenderingContext2D
+} {
+  const { client, worker } = makeClient(deps)
+  const ctx = makeCtx()
+  deliver(worker, readyMsg())
+  doRender(client, ctx) // flushes → render in flight
+  deliver(worker, response(1)) // terminal → inFlight clears, cache stable
+  return { client, worker, ctx }
+}
+
+describe('render-client probe (E2, #95)', () => {
+  it('posts a probe carrying seq + pixel + palette/mode once the cache is stable', () => {
+    const { client, worker } = readyWithStableFrame()
+    expect(client.probe(5, 7, PALETTE_MAGMA, MODE_HISTOGRAM)).toBe(true)
+    const probes = postedProbes(worker)
+    expect(probes).toHaveLength(1)
+    expect(probes[0]).toMatchObject({
+      kind: 'probe',
+      x: 5,
+      y: 7,
+      palette: PALETTE_MAGMA,
+      mode: MODE_HISTOGRAM,
+    })
+    expect(probes[0].seq).toBeGreaterThan(0)
+  })
+
+  it('does not probe before the worker is ready', () => {
+    const { client, worker } = makeClient()
+    expect(client.probe(1, 1, PALETTE_VIRIDIS, MODE_CYCLED)).toBe(false)
+    expect(postedProbes(worker)).toHaveLength(0)
+  })
+
+  it('does not probe while a render is in flight (the cached buffer is being rewritten)', () => {
+    const { client, worker } = makeClient()
+    const ctx = makeCtx()
+    deliver(worker, readyMsg())
+    doRender(client, ctx) // in flight, no response yet
+    expect(client.probe(1, 1, PALETTE_VIRIDIS, MODE_CYCLED)).toBe(false)
+    expect(postedProbes(worker)).toHaveLength(0)
+    // Once the frame lands the cache is whole and a probe goes through.
+    deliver(worker, response(1))
+    expect(client.probe(1, 1, PALETTE_VIRIDIS, MODE_CYCLED)).toBe(true)
+    expect(postedProbes(worker)).toHaveLength(1)
+  })
+
+  it('does not probe while a Preview transform is live (mid-gesture the buffer is stale)', () => {
+    const { client, worker, ctx } = readyWithStableFrame()
+    ctx.canvas.style.transform = 'scale(1.5)'
+    expect(client.probe(1, 1, PALETTE_VIRIDIS, MODE_CYCLED)).toBe(false)
+    expect(postedProbes(worker)).toHaveLength(0)
+    ctx.canvas.style.transform = ''
+    expect(client.probe(1, 1, PALETTE_VIRIDIS, MODE_CYCLED)).toBe(true)
+    expect(postedProbes(worker)).toHaveLength(1)
+  })
+
+  it('drops an outstanding probe response after a render supersedes its frame', () => {
+    const onProbeResult = vi.fn()
+    const { client, worker, ctx } = readyWithStableFrame({ onProbeResult })
+    client.probe(2, 3, PALETTE_VIRIDIS, MODE_CYCLED)
+    const { seq } = postedProbes(worker)[0]
+
+    // The user pans/recolors before the probe round-trips: issuing the render
+    // advances the probe generation, so the response — computed against the now-
+    // superseded frame — must be dropped, not painted into the HUD.
+    doRender(client, ctx)
+    deliverProbeResponse(worker, seq, { raw: 5, t: 0.2, inside: false, r: 9, g: 9, b: 9 })
+    expect(onProbeResult).not.toHaveBeenCalled()
+  })
+
+  it('delivers only the newest probe response to onProbeResult', () => {
+    const onProbeResult = vi.fn()
+    const { client, worker } = readyWithStableFrame({ onProbeResult })
+    client.probe(2, 3, PALETTE_VIRIDIS, MODE_CYCLED)
+    const { seq } = postedProbes(worker)[0]
+
+    // A response for an older seq (one the cursor has moved past) is dropped.
+    deliverProbeResponse(worker, seq - 1, { raw: 9 })
+    expect(onProbeResult).not.toHaveBeenCalled()
+
+    // The matching response is delivered as a plain payload (no wire fields).
+    deliverProbeResponse(worker, seq, { raw: 12.5, t: 0.5, inside: false, r: 1, g: 2, b: 3 })
+    expect(onProbeResult).toHaveBeenCalledTimes(1)
+    expect(onProbeResult).toHaveBeenCalledWith({
+      raw: 12.5,
+      t: 0.5,
+      inside: false,
+      r: 1,
+      g: 2,
+      b: 3,
+    })
   })
 })

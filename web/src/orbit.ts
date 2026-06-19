@@ -44,8 +44,8 @@ interface Anchored {
 export function viewGeometryFromStore(
   store: ViewportStore,
   surface: HTMLElement,
+  rect: DOMRect = surface.getBoundingClientRect(),
 ): ViewGeometry | null {
-  const rect = surface.getBoundingClientRect()
   if (rect.width <= 0 || rect.height <= 0) return null
   const vp = store.get()
   return {
@@ -57,6 +57,16 @@ export function viewGeometryFromStore(
     rectW: rect.width,
     rectH: rect.height,
   }
+}
+
+/**
+ * Whether a gesture currently owns the fractal image, so a hover-driven readout
+ * (the orbit overlay, the pixel inspector) must hold off: a drag shifts the
+ * buffer (`.dragging`) and a wheel Preview CSS-transforms the canvas, either of
+ * which makes the cursor→complex/pixel mapping wrong until the store settles.
+ */
+export function isGestureInProgress(surface: HTMLElement): boolean {
+  return surface.classList.contains('dragging') || surface.style.transform !== ''
 }
 
 /**
@@ -170,10 +180,9 @@ export class OrbitOverlay {
 
   private readonly handleHover = (event: MouseEvent): void => {
     if (!this.enabled || this.pinned !== null) return
-    // Don't track while a gesture owns the image: a drag shifts the buffer and
-    // a wheel Preview CSS-transforms the canvas, so the cursor→complex mapping
+    // Don't track while a gesture owns the image — the cursor→complex mapping
     // would be wrong until the store settles.
-    if (this.surface.classList.contains('dragging') || this.surface.style.transform !== '') return
+    if (isGestureInProgress(this.surface)) return
     const view = this.geometry()
     if (view === null) return
     const rect = this.overlay.getBoundingClientRect()

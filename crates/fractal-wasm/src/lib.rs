@@ -26,8 +26,8 @@
 use std::cell::RefCell;
 
 use fractal_core::{
-    Complex64, Field as CoreField, FractalKind as CoreFractalKind, NormalizationMode as CoreMode,
-    Palette as CorePalette, Viewport as CoreViewport,
+    Complex64, Field as CoreField, FractalKind as CoreFractalKind, FrameColoring,
+    NormalizationMode as CoreMode, Palette as CorePalette, Viewport as CoreViewport,
 };
 use wasm_bindgen::prelude::*;
 
@@ -47,6 +47,41 @@ pub use wasm_bindgen_rayon::init_thread_pool;
 thread_local! {
     static ITER_BUFFER: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
     static RGBA_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    /// The frame colouring the last [`colorize`] painted with, cached so the
+    /// pixel-inspector probe (E2, #95) reads one pixel without re-reducing the
+    /// whole frame (the global family's `[min, max]`, Histogram's CDF) or
+    /// rebuilding the palette LUT. The key pins it to the `(palette, mode,
+    /// max_iter, len)` it was built for, so a probe whose settings drift from
+    /// the last paint rebuilds rather than reusing a stale colouring.
+    static LAST_NORM: RefCell<Option<NormCache>> = const { RefCell::new(None) };
+}
+
+/// The cached frame colouring plus the key identifying which frame / settings
+/// it belongs to (see [`LAST_NORM`]).
+struct NormCache {
+    palette: Palette,
+    mode: NormalizationMode,
+    max_iter: u32,
+    len: usize,
+    coloring: FrameColoring,
+}
+
+impl NormCache {
+    /// Whether this cache entry is valid for a probe against `(palette, mode,
+    /// max_iter, len)`. Palette matters because `Cycled`'s period is the
+    /// palette's; `len` guards against a buffer resized out from under us.
+    fn matches(
+        &self,
+        palette: Palette,
+        mode: NormalizationMode,
+        max_iter: u32,
+        len: usize,
+    ) -> bool {
+        self.palette as u32 == palette as u32
+            && self.mode as u32 == mode as u32
+            && self.max_iter == max_iter
+            && self.len == len
+    }
 }
 
 /// Numeric discriminants are explicit so the JS↔WASM boundary stays
@@ -449,8 +484,92 @@ pub fn colorize(
         // clears and reserves, reusing the prior frame's allocation instead of
         // swapping in a fresh `Vec` (which would free the old one and let wasm
         // linear memory ratchet under per-frame churn).
-        fractal_core::colorize_into(iters, palette.into(), mode.into(), max_iter, &mut buf);
+        let coloring =
+            fractal_core::colorize_into(iters, palette.into(), mode.into(), max_iter, &mut buf);
+        // Stash the colouring so the inspector probe (E2, #95) reuses this frame's
+        // global stats / CDF and palette LUT instead of rebuilding them per hover.
+        LAST_NORM.with(|c| {
+            *c.borrow_mut() = Some(NormCache {
+                palette,
+                mode,
+                max_iter,
+                len,
+                coloring,
+            });
+        });
         buf.as_ptr()
+    })
+}
+
+/// One pixel of the cached Field buffer traced through the colorize pipeline,
+/// for the pixel inspector (E2, #95). Read via wasm-bindgen getters on the JS
+/// side; see [`probe_pixel`].
+#[wasm_bindgen]
+#[derive(Clone, Copy)]
+pub struct ProbeResult {
+    /// Raw cached Field scalar: smooth `nu`, distance `d`, or `NaN` inside.
+    pub raw: f32,
+    /// Normalised palette coordinate `t ∈ [0, 1]`; `NaN` when `inside` (ignore).
+    pub t: f32,
+    /// `true` iff the pixel is the NaN inside-set sentinel.
+    pub inside: bool,
+    /// Painted colour — matches the on-screen pixel exactly. Black inside.
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+/// Trace one pixel of the cached iteration buffer through the current
+/// `(palette, mode)` and return its raw value, normalised `t`, and painted
+/// colour — the worker side of the pixel inspector (E2, #95).
+///
+/// `iter_ptr` / `len` must be the pair last returned by [`compute_band`] +
+/// [`compute_len`] (the same cached buffer [`colorize`] reads); `index` is the
+/// row-major pixel `y * width + x`, validated against `len` here. No recompute
+/// runs: the frame colouring cached by the last [`colorize`] is reused when its
+/// `(palette, mode, max_iter, len)` still matches, and only rebuilt on a
+/// mismatch (e.g. a probe arriving before the matching repaint).
+#[wasm_bindgen]
+#[allow(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "wasm-bindgen exports cannot be marked `unsafe` while remaining callable from JS; the caller upholds the (iter_ptr, len) pairing invariant exactly as `colorize` documents — the JS render-layer cache enforces it."
+)]
+pub fn probe_pixel(
+    iter_ptr: *const f32,
+    len: usize,
+    index: usize,
+    palette: Palette,
+    mode: NormalizationMode,
+    max_iter: u32,
+) -> Result<ProbeResult, JsError> {
+    if index >= len {
+        return Err(JsError::new("probe_pixel: index out of range"));
+    }
+    // SAFETY: as with `colorize`, the caller guarantees (iter_ptr, len) is the
+    // live cached buffer and has not been invalidated by an intervening frame.
+    let iters = unsafe { std::slice::from_raw_parts(iter_ptr, len) };
+    let sample = LAST_NORM.with(|c| {
+        let cache = c.borrow();
+        match cache.as_ref() {
+            Some(entry) if entry.matches(palette, mode, max_iter, len) => {
+                fractal_core::probe_value(iters, index, &entry.coloring)
+            }
+            _ => {
+                // No matching cached colouring (e.g. a probe raced ahead of the
+                // repaint): rebuild it for this one read. Still correct, just not
+                // O(1) for the global/Histogram modes.
+                let coloring = FrameColoring::build(iters, palette.into(), mode.into(), max_iter);
+                fractal_core::probe_value(iters, index, &coloring)
+            }
+        }
+    });
+    Ok(ProbeResult {
+        raw: sample.raw,
+        t: sample.t,
+        inside: sample.inside,
+        r: sample.rgb[0],
+        g: sample.rgb[1],
+        b: sample.rgb[2],
     })
 }
 

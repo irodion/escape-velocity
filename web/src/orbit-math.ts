@@ -143,3 +143,36 @@ export function cssToComplex(x: number, y: number, view: ViewGeometry): { re: nu
     im: view.centerIm - (logicalY - midY) * scale,
   }
 }
+
+/**
+ * Map a CSS pixel on the surface to the **render-buffer pixel** under it — the
+ * row-major `(px, py)` index into the worker's cached Field buffer the pixel
+ * inspector probes (E2, #95).
+ *
+ * It maps against the canvas **backing store** (`bufferW`/`bufferH` =
+ * `canvas.width`/`canvas.height`), *not* the viewport's logical grid: render
+ * scale decouples the two (a 2× buffer is twice the logical width over the same
+ * CSS box), so keying off the logical size would probe only the top-left
+ * fraction at >1× and clamp along the edges at <1×. The CSS box (`rectW`/`rectH`)
+ * is `getBoundingClientRect`'s size. A fractional CSS coordinate stays inside its
+ * current cell, so this `floor`s to the *containing* pixel rather than the
+ * nearest sample centre, then clamps into `[0, buffer)` (a cursor exactly on the
+ * right/bottom edge would otherwise land one past the last pixel). Returns `null`
+ * for a degenerate display box.
+ */
+export function cssToBufferPixel(
+  cssX: number,
+  cssY: number,
+  rectW: number,
+  rectH: number,
+  bufferW: number,
+  bufferH: number,
+): { px: number; py: number } | null {
+  if (rectW <= 0 || rectH <= 0) return null
+  const px = Math.floor((cssX / rectW) * bufferW)
+  const py = Math.floor((cssY / rectH) * bufferH)
+  return {
+    px: Math.min(Math.max(px, 0), bufferW - 1),
+    py: Math.min(Math.max(py, 0), bufferH - 1),
+  }
+}

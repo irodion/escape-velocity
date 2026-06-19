@@ -14,6 +14,7 @@ const BASE: Settings = {
   cRe: 0,
   cIm: 0,
   orbit: false,
+  inspect: false,
 }
 
 const JULIA: Settings = { ...BASE, mode: 'julia', cRe: -0.4, cIm: 0.6 }
@@ -83,6 +84,10 @@ describe('classifyTransition', () => {
 
     it('orbit-only toggle → noop (overlay handled outside the render path)', () => {
       expect(classifyTransition(BASE, change({ orbit: true }))).toEqual({ action: 'noop' })
+    })
+
+    it('inspect-only toggle → noop (E2, #95: a view-only probe, no recompute)', () => {
+      expect(classifyTransition(BASE, change({ inspect: true }))).toEqual({ action: 'noop' })
     })
   })
 

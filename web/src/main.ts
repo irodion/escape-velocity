@@ -14,6 +14,7 @@ import { buildFilename, exportRenderedFrame } from './export-png.js'
 import { showFatal } from './fatal.js'
 import { defaultModeForField, isModeValidForField } from './field-modes.js'
 import { InputController } from './input.js'
+import { PixelInspector } from './inspector.js'
 import { OrbitOverlay, viewGeometryFromStore } from './orbit.js'
 import { cssToComplex } from './orbit-math.js'
 import { mountProgress } from './progress.js'
@@ -92,6 +93,10 @@ const INITIAL_MODE: FractalMode = 'mandelbrot'
 const INITIAL_C_RE = -0.7
 const INITIAL_C_IM = 0.27015
 const INITIAL_ORBIT = false
+// The pixel inspector (E2, #95) is off at boot and never persisted in the URL
+// (a view-only inspection tool), so unlike the other settings it has no
+// `ViewState` field — `resolveView` always seeds it from this constant.
+const INITIAL_INSPECT = false
 const CENTER_RE = -0.7435
 const CENTER_IM = 0.1314
 const ZOOM = 200.0
@@ -109,6 +114,12 @@ if (ctx === null) {
 const orbitCanvas = document.getElementById('orbit')
 if (!(orbitCanvas instanceof HTMLCanvasElement)) {
   throw new Error('canvas#orbit not found in index.html')
+}
+// The pixel inspector's corner HUD (E2, #95), stacked over `#fractal` inside
+// `.stage`. Populated by `PixelInspector`; hidden until the Inspect toggle is on.
+const inspectorHud = document.getElementById('inspector')
+if (!(inspectorHud instanceof HTMLElement)) {
+  throw new Error('#inspector not found in index.html')
 }
 const controlsForm = document.getElementById('controls')
 if (!(controlsForm instanceof HTMLFormElement)) {
@@ -174,13 +185,20 @@ mountDrawer(controlsToggle, controlsForm, canvas)
 //    The client drives `begin`/`report`/`end` as a banded render streams its
 //    heartbeats; the mounted reporter owns the reveal debounce so fast frames
 //    never flash.
-const { render, recolorize, discardInFlight } = createRenderClient({
+// Forward-declared so the render client's `onProbeResult` can reach it (the
+// inspector needs the client's `probe`, so they're mutually referential — the
+// same forward-decl shape `controls` uses below). Assigned once below.
+let inspector: PixelInspector | undefined
+const { render, recolorize, probe, discardInFlight } = createRenderClient({
   workerFactory: () =>
     new Worker(new URL('./worker/worker.ts', import.meta.url), { type: 'module' }),
   onFatal: (message) => {
     showFatal('Renderer unavailable', message)
   },
   progress: mountProgress(document.body),
+  // Deliver each traced pixel (E2, #95) to the inspector HUD. Dropped before the
+  // inspector is constructed (no probe can be issued before then anyway).
+  onProbeResult: (result) => inspector?.showResult(result),
 })
 
 // Initialise the WASM module on the main thread so the synchronous
@@ -279,6 +297,9 @@ const resolveView = (
     cRe: view.cRe,
     cIm: view.cIm,
     orbit: view.orbit,
+    // Not in the hash (see INITIAL_INSPECT): a permalink never forces the
+    // recipient into inspect mode.
+    inspect: INITIAL_INSPECT,
   }
   return { view, settings }
 }
@@ -453,6 +474,19 @@ const orbitOverlay = new OrbitOverlay(
   () => controlsForm.classList.contains('open'),
 )
 
+// Pixel inspector (E2, #95). Presentation-only like the orbit overlay: it maps
+// the cursor to a render-buffer pixel and asks the worker to trace that pixel
+// through the cached Field buffer, showing the result in the corner HUD. The
+// probe closure reads the live palette/normalisation each call so a colour
+// change mid-hover traces with the current settings.
+inspector = new PixelInspector(
+  inspectorHud,
+  canvas,
+  store,
+  { mode: current.mode, field: current.field, enabled: current.inspect },
+  (px, py) => probe(px, py, paletteEnum(current.palette), modeEnum(current.normalisation)),
+)
+
 // Whether the controls drawer was open at the *start* of the current press.
 // The drawer's light-dismiss (drawer.ts) closes the drawer on the canvas
 // `pointerup`, which runs before the InputController's `pointerup` delivers the
@@ -580,6 +614,9 @@ const applySettings = (rawNext: Settings): void => {
     maxIter: next.maxIter,
     enabled: next.orbit,
   })
+  // The inspector reads mode (c vs z₀ label) and field (ν vs d units) and shows/
+  // hides on the toggle — a pure presentation reaction, no render path touched.
+  inspector?.sync({ mode: next.mode, field: next.field, enabled: next.inspect })
 
   const transition = classifyTransition(current, next)
   // Commit `current` before carrying out the transition: a `reset-view` store
@@ -652,6 +689,7 @@ window.addEventListener('hashchange', () => {
     maxIter: settings.maxIter,
     enabled: settings.orbit,
   })
+  inspector?.sync({ mode: settings.mode, field: settings.field, enabled: settings.inspect })
   const live = store.get()
   store.set(new Viewport(view.re, view.im, view.zoom, live.width(), live.height()), 'hashchange')
 })

@@ -85,4 +85,11 @@ export interface Settings {
   readonly cIm: number
   /** Whether the orbit visualizer overlay is enabled (E1, #94). */
   readonly orbit: boolean
+  /**
+   * Whether the pixel inspector is enabled (E2, #95). A view-only inspection
+   * mode (it never recomputes or recolorizes), so it rides the settings
+   * snapshot like `orbit` but, unlike it, is *not* persisted in the URL hash —
+   * a shared permalink should not force the recipient into inspect mode.
+   */
+  readonly inspect: boolean
 }

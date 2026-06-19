@@ -5,6 +5,8 @@ import type {
   FractalKind,
   NormalizationMode,
   Palette,
+  ProbeRequest,
+  ProbeResponse,
   ProgressResponse,
   Ready,
   RecolorizeRequest,
@@ -12,6 +14,22 @@ import type {
   RenderRequest,
   RenderResponse,
 } from './worker/protocol.js'
+
+/**
+ * One traced pixel handed to the inspector (E2, #95) — the {@link ProbeResponse}
+ * payload minus the wire fields. `inside` means the NaN inside-set sentinel (so
+ * `t` is meaningless and the swatch black); otherwise `raw` is the Field scalar,
+ * `t ∈ [0, 1]` where it landed after normalisation, and `r`/`g`/`b` the painted
+ * colour.
+ */
+export interface PixelProbe {
+  readonly raw: number
+  readonly t: number
+  readonly inside: boolean
+  readonly r: number
+  readonly g: number
+  readonly b: number
+}
 
 /**
  * Determinate progress sink for a slow render (P2, #78). The client reports
@@ -117,6 +135,12 @@ export interface RenderClientDeps {
    * no-op; recolorizes never drive it. See `ProgressReporter`.
    */
   readonly progress?: ProgressReporter
+  /**
+   * Pixel-inspector sink (E2, #95). Called with the traced pixel for the most
+   * recent `probe()` whose response has come back. Omitted when the inspector
+   * is not wired (tests, headless), in which case probe responses are dropped.
+   */
+  readonly onProbeResult?: (probe: PixelProbe) => void
 }
 
 /**
@@ -142,6 +166,15 @@ export interface RenderClient {
     palette: Palette,
     mode: NormalizationMode,
   ) => void
+  /**
+   * Read one render-buffer pixel `(x, y)` of the cached frame for the
+   * inspector (E2, #95). The result lands on a later `onProbeResult`. Returns
+   * `false` without sending when the cached buffer is not stable — booting, a
+   * compute in flight rewriting it, or a Preview transform live mid-gesture — so
+   * the caller can keep its last reading rather than pairing it with a fresh
+   * coordinate.
+   */
+  readonly probe: (x: number, y: number, palette: Palette, mode: NormalizationMode) => boolean
   readonly discardInFlight: () => void
 }
 
@@ -175,10 +208,46 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
   // recolorizes never drive it. See `ProgressReporter`.
   const progress: ProgressReporter = deps.progress ?? NOOP_PROGRESS
 
+  // Pixel-inspector sink + a monotonic probe generation (E2, #95). A response
+  // is delivered only if its seq still equals `latestProbeSeq`; the seq advances
+  // both when a newer probe is issued (a hover fires many — drop the ones the
+  // cursor moved past) AND whenever the cached frame changes under an
+  // outstanding probe (a render/recolorize/discard — see `invalidateProbes`), so
+  // a response computed against a superseded frame never paints stale
+  // values/colours into the HUD. Independent of the render epoch — a probe never
+  // enters the render slot.
+  const onProbeResult: ((probe: PixelProbe) => void) | null = deps.onProbeResult ?? null
+  let latestProbeSeq = 0
+
+  // Advance the probe generation so any probe response still in flight is
+  // dropped on arrival. Called whenever the cached frame is about to change.
+  function invalidateProbes(): void {
+    latestProbeSeq += 1
+  }
+
   worker.onmessage = (
-    event: MessageEvent<RenderResponse | Ready | RenderError | ProgressResponse | Aborted>,
+    event: MessageEvent<
+      RenderResponse | Ready | RenderError | ProgressResponse | Aborted | ProbeResponse
+    >,
   ): void => {
     const msg = event.data
+    if (msg.kind === 'probe-response') {
+      // A read-only side query's reply (E2, #95): independent of the render
+      // slot, so handled before the in-flight guard. Deliver only the newest
+      // probe — responses return in order, so any older seq is one the user has
+      // already hovered past.
+      if (msg.seq === latestProbeSeq) {
+        onProbeResult?.({
+          raw: msg.raw,
+          t: msg.t,
+          inside: msg.inside,
+          r: msg.r,
+          g: msg.g,
+          b: msg.b,
+        })
+      }
+      return
+    }
     if (msg.kind === 'ready') {
       ready = true
       // Boot succeeded — the watchdog (if armed) must not later declare a
@@ -316,6 +385,9 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
   function issue(req: ClientRequest, ctx: CanvasRenderingContext2D): void {
     latestEpoch += 1
     targetCtx = ctx
+    // A new compute/recolorize will change the cached frame, so any probe
+    // response still in flight describes a frame about to be superseded — drop it.
+    invalidateProbes()
     if (req.kind === 'recolorize' && pending !== null && pending.kind === 'render') {
       // Keep the queued render's compute (its newer viewport); swap only
       // the colours it will be painted with. Bump the epoch onto the
@@ -356,6 +428,9 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
   function discardInFlight(): void {
     latestEpoch += 1
     pending = null
+    // A Preview is taking over the canvas; the buffer a probe would describe is
+    // about to be stale, so invalidate any outstanding probe response too.
+    invalidateProbes()
     // Also stop the in-flight render's *work*, not just its paint: bumping the
     // epoch already guarantees its response won't paint, and this makes the
     // worker abandon the remaining bands so it is free for the next real issue
@@ -464,6 +539,37 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     issue({ kind: 'recolorize', epoch: 0, palette, mode }, ctx)
   }
 
+  /**
+   * Read one render-buffer pixel of the cached frame for the inspector (E2,
+   * #95) — fire-and-forget; the traced pixel lands on a later `onProbeResult`.
+   *
+   * Bypasses the render coalescing entirely (it carries a `seq`, not an
+   * `epoch`, and posts immediately) and is gated on the cached buffer being
+   * stable: skipped while booting/dead, while a *render* is in flight (its
+   * first band has already clobbered the cached frame with partial data), or
+   * while a Preview transform is live (mid-gesture the buffer is stale — the
+   * same paint-guard signal `paint` keys off). In those windows the inspector
+   * keeps its last reading rather than showing a value that isn't on screen. An
+   * in-flight *recolorize* is fine: it never rewrites the iteration buffer and
+   * runs synchronously on the worker, so the probe reads a whole frame.
+   */
+  function probe(x: number, y: number, palette: Palette, mode: NormalizationMode): boolean {
+    if (dead || !ready) {
+      return false
+    }
+    if (inFlight && inFlightKind === 'render') {
+      return false
+    }
+    const canvas = targetCtx?.canvas
+    if (canvas == null || canvas.style.transform !== '') {
+      return false
+    }
+    latestProbeSeq += 1
+    const req: ProbeRequest = { kind: 'probe', seq: latestProbeSeq, x, y, palette, mode }
+    worker.postMessage(req)
+    return true
+  }
+
   // Arm the boot watchdog now, at construction — but only if a fatal surface
   // was injected. With no `onFatal` there is nothing to surface to, so a client
   // built without one leaves no stray timer running. The worker cannot have
@@ -483,5 +589,5 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     }, BOOT_TIMEOUT_MS)
   }
 
-  return { render, recolorize, discardInFlight }
+  return { render, recolorize, probe, discardInFlight }
 }

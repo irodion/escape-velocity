@@ -389,93 +389,141 @@ pub fn colorize_into(
     mode: NormalizationMode,
     max_iter: u32,
     out: &mut Vec<u8>,
-) {
+) -> FrameColoring {
     // Resize without clearing — see the note above: the writers overwrite
     // every byte, so a same-size repaint skips the zero-fill entirely.
     out.resize(nus.len() * 4, 0);
-    let lut = ColorLut::build(palette);
-    match mode {
-        NormalizationMode::Cycled => colorize_cycled(nus, palette.period(), &lut, out),
-        NormalizationMode::Histogram => colorize_histogram(nus, &lut, max_iter, out),
-        NormalizationMode::Linear => colorize_global(nus, &lut, |s| s, out),
-        NormalizationMode::SquareRoot => colorize_global(nus, &lut, f32::sqrt, out),
-        NormalizationMode::Logarithmic => {
-            // ln(1 + s·(e − 1)) maps [0, 1] → [0, 1] (s = 1 gives
-            // ln(e) = 1) with no division, expanding the low end so
-            // small-`nu` escapers spread across the palette.
-            colorize_global(
-                nus,
-                &lut,
-                |s| (1.0 + s * (std::f32::consts::E - 1.0)).ln(),
-                out,
-            )
+    // Build the frame's colouring once (the global family's `[min, max]` and
+    // Histogram's CDF are whole-frame reductions; the palette LUT is a 1024-entry
+    // bake), then fan the per-pixel mapping out across rayon. It is returned so
+    // the WASM layer can cache it for the pixel-inspector probe (E2, #95): a hover
+    // reuses the same stats *and* LUT to read one pixel — no whole-frame reduction
+    // and no LUT rebuild.
+    let coloring = FrameColoring::build(nus, palette, mode, max_iter);
+    nus.par_iter()
+        .zip(out.par_chunks_exact_mut(4))
+        .for_each(|(&scalar, px)| px.copy_from_slice(&coloring.pixel(scalar)));
+    coloring
+}
+
+/// Everything the active [`NormalizationMode`] needs to turn a single
+/// scalar into the palette coordinate `t ∈ [0, 1]` — the frame-level half
+/// of normalisation, computed once per [`colorize_into`].
+///
+/// Splitting it out from the per-pixel mapping ([`normalize_value`]) is what
+/// lets the pixel inspector (E2, #95) reuse the *exact* colorize maths for
+/// one pixel: the WASM layer caches the context a frame was painted with, so
+/// a probe is O(1) for the global/Histogram modes that would otherwise need
+/// a fresh whole-frame reduction. Cycled/Clamped carry no frame state and
+/// are pure per-value functions either way.
+///
+/// `Empty` is the "no finite escapers in the frame" case (every pixel inside
+/// the set or non-finite): there is no range to normalise against / no
+/// distribution to equalise, so [`normalize_value`] returns `None` for every
+/// pixel and the whole frame paints black — matching the old per-mode
+/// all-black short-circuits.
+#[derive(Debug, Clone)]
+pub(crate) enum NormContext {
+    /// `Cycled`: fractional part of `scalar / period`. `period` is the
+    /// palette's, captured here so a probe needn't re-derive it.
+    Cycled { period: f32 },
+    /// `Clamped`: `min(1, scalar / k)` against the fixed [`CLAMPED_DISTANCE_K`]
+    /// — no frame state, so the variant is a marker.
+    Clamped,
+    /// The global family (Linear/SquareRoot/Logarithmic): rescale against the
+    /// frame `[min, min + range]`, then apply `transfer`.
+    Global {
+        min: f32,
+        range: f32,
+        transfer: fn(f32) -> f32,
+    },
+    /// `Histogram`: the normalised CDF, indexed by `floor(scalar)`. Entry `k`
+    /// is `Σ original_bins[0..=k] / total`; `cdf.len() == max_iter + 1`.
+    Histogram { cdf: Vec<f32> },
+    /// No finite escapers — every pixel paints black.
+    Empty,
+}
+
+impl NormContext {
+    /// Build the frame-level normalisation context for `mode` over `nus`.
+    /// Mirrors exactly what the old per-mode `colorize_*` functions computed
+    /// up front (the global `[min, max]` reduction, the Histogram CDF), so the
+    /// resulting per-pixel `t` is bit-identical.
+    pub(crate) fn build(
+        nus: &[f32],
+        palette: Palette,
+        mode: NormalizationMode,
+        max_iter: u32,
+    ) -> NormContext {
+        match mode {
+            NormalizationMode::Cycled => NormContext::Cycled {
+                period: palette.period(),
+            },
+            NormalizationMode::Clamped => NormContext::Clamped,
+            NormalizationMode::Linear => global_context(nus, |s| s),
+            NormalizationMode::SquareRoot => global_context(nus, f32::sqrt),
+            // ln(1 + s·(e − 1)) maps [0, 1] → [0, 1] (s = 1 gives ln(e) = 1)
+            // with no division, expanding the low end so small-`scalar`
+            // escapers spread across the palette.
+            NormalizationMode::Logarithmic => {
+                global_context(nus, |s| (1.0 + s * (std::f32::consts::E - 1.0)).ln())
+            }
+            NormalizationMode::Histogram => histogram_context(nus, max_iter),
         }
-        NormalizationMode::Clamped => colorize_clamped(nus, &lut, out),
     }
 }
 
-/// The `Clamped` distance ramp (ADR-0013) — the Distance Estimate Field's
-/// default normalisation. Each finite scalar `d` (a pixel-unit distance,
-/// though `colorize` stays Field-blind and never assumes so) maps through
-/// `t = min(1, d / k)`: a hard linear ramp over the first
-/// [`CLAMPED_DISTANCE_K`] units, flat at the palette's far end beyond. The
-/// gradient stays inside the thin boundary shell, so the boundary renders
-/// as hairline filaments rather than a soft halo.
+/// Map one finite scalar to its palette coordinate `t ∈ [0, 1]` under `ctx`,
+/// or `None` when the pixel paints opaque black — the NaN inside-set sentinel
+/// and any ±Inf (symmetric across every mode), or any pixel in an `Empty`
+/// frame.
 ///
-/// Unlike the global family, this does **not** rescale against the
-/// frame's `[min, max]`: the clamp is absolute, against the fixed `k`.
-/// That is exactly what makes it resolution-independent — `k` is in the
-/// same pixel units the compute pipeline puts in the buffer, so a filament
-/// stays `k` pixels wide at any zoom or buffer size.
-///
-/// Non-finite scalars (the NaN inside-set sentinel and any ±Inf) paint
-/// opaque black, symmetric with every other mode. Negative scalars (not
-/// expected from a distance, but cheap to guard) clamp to the palette
-/// start.
-fn colorize_clamped(nus: &[f32], lut: &ColorLut, out: &mut [u8]) {
-    nus.par_iter()
-        .zip(out.par_chunks_exact_mut(4))
-        .for_each(|(&d, px)| {
-            let rgba = if d.is_finite() {
-                lut.lookup((d / CLAMPED_DISTANCE_K).clamp(0.0, 1.0))
+/// This is the per-pixel half of normalisation, shared verbatim by
+/// [`colorize_into`]'s parallel loop and the pixel-inspector probe so the two
+/// can never drift.
+#[inline]
+pub(crate) fn normalize_value(scalar: f32, ctx: &NormContext) -> Option<f32> {
+    if !scalar.is_finite() {
+        return None;
+    }
+    match ctx {
+        NormContext::Cycled { period } => Some((scalar / period).rem_euclid(1.0)),
+        NormContext::Clamped => Some((scalar / CLAMPED_DISTANCE_K).clamp(0.0, 1.0)),
+        NormContext::Global {
+            min,
+            range,
+            transfer,
+        } => {
+            let s = if *range > 0.0 {
+                (scalar - min) / range
             } else {
-                BLACK
+                // Degenerate `min == max` frame: every finite pixel maps to the
+                // palette start rather than dividing by zero.
+                0.0
             };
-            px.copy_from_slice(&rgba);
-        });
+            Some(transfer(s).clamp(0.0, 1.0))
+        }
+        NormContext::Histogram { cdf } => {
+            let bin_count = cdf.len();
+            let last_idx = bin_count - 1;
+            let k = (scalar.floor() as i64).clamp(0, last_idx as i64) as usize;
+            let frac = (scalar - k as f32).clamp(0.0, 1.0);
+            let cdf_k = cdf[k];
+            // cdf[max_iter + 1] is defined as 1.0 (the PRD sentinel); reached
+            // only when `k == max_iter` since `cdf[max_iter] == 1.0` already.
+            let cdf_kp1 = if k + 1 < bin_count { cdf[k + 1] } else { 1.0 };
+            Some(cdf_k + (cdf_kp1 - cdf_k) * frac)
+        }
+        NormContext::Empty => None,
+    }
 }
 
-fn colorize_cycled(nus: &[f32], period: f32, lut: &ColorLut, out: &mut [u8]) {
-    nus.par_iter()
-        .zip(out.par_chunks_exact_mut(4))
-        .for_each(|(&nu, px)| {
-            // Treat any non-finite `nu` (NaN inside-set sentinel and the
-            // theoretical ±Inf escapees alike) as opaque black so the
-            // mode-dispatch behaviour is symmetric with Histogram pass 1.
-            let rgba = if nu.is_finite() {
-                lut.lookup((nu / period).rem_euclid(1.0))
-            } else {
-                BLACK
-            };
-            px.copy_from_slice(&rgba);
-        });
-}
-
-/// The "global" normalisation family: rescale each finite `nu` against
-/// the frame's own `[min, max]` into `s ∈ [0, 1]`, apply `transfer`,
-/// and sample the palette. `transfer` is the only thing that differs
-/// between Linear (identity), SquareRoot (`√s`), and Logarithmic.
-///
-/// Like the other modes, non-finite `nu` (the NaN inside-set sentinel
-/// and any ±Inf) paints opaque black. A frame with no finite escapers
-/// at all is entirely black — there is no range to normalise against.
-/// A degenerate `min == max` frame maps every pixel to `s = 0` (the
-/// palette's start) rather than dividing by zero.
-fn colorize_global(nus: &[f32], lut: &ColorLut, transfer: fn(f32) -> f32, out: &mut [u8]) {
-    // Pass 1 — frame extent over finite values only. `min`/`max` are
-    // commutative and associative over finite inputs, so the parallel
-    // reduce lands the exact same extent as a serial scan regardless of how
-    // rayon splits the work — no order-dependent drift.
+/// Frame extent over finite values only, wrapped in the [`NormContext`] for
+/// the global family. `min`/`max` are commutative and associative over finite
+/// inputs, so the parallel reduce lands the exact same extent as a serial scan
+/// regardless of how rayon splits the work. `min` stays `+∞` iff no finite
+/// value was seen — every pixel is inside the set — yielding [`NormContext::Empty`].
+fn global_context(nus: &[f32], transfer: fn(f32) -> f32) -> NormContext {
     let (min, max) = nus
         .par_iter()
         .filter(|nu| nu.is_finite())
@@ -487,46 +535,23 @@ fn colorize_global(nus: &[f32], lut: &ColorLut, transfer: fn(f32) -> f32, out: &
             || (f32::INFINITY, f32::NEG_INFINITY),
             |(amn, amx), (bmn, bmx)| (amn.min(bmn), amx.max(bmx)),
         );
-
-    // `min` stays +∞ iff no finite value was seen — every pixel is
-    // inside the set (or non-finite). Symmetric with histogram's
-    // all-NaN short-circuit.
     if !min.is_finite() {
-        out.par_chunks_exact_mut(4)
-            .for_each(|px| px.copy_from_slice(&BLACK));
-        return;
+        return NormContext::Empty;
     }
-
-    let range = max - min;
-    // Pass 2 — rescale, curve, sample.
-    nus.par_iter()
-        .zip(out.par_chunks_exact_mut(4))
-        .for_each(|(&nu, px)| {
-            let rgba = if nu.is_finite() {
-                let s = if range > 0.0 { (nu - min) / range } else { 0.0 };
-                lut.lookup(transfer(s).clamp(0.0, 1.0))
-            } else {
-                BLACK
-            };
-            px.copy_from_slice(&rgba);
-        });
+    NormContext::Global {
+        min,
+        range: max - min,
+        transfer,
+    }
 }
 
-fn colorize_histogram(nus: &[f32], lut: &ColorLut, max_iter: u32, out: &mut [u8]) {
-    // Pass 1 — count escapers per integer bin. Left serial: it is a
-    // memory-bound increment over a shared `bins` vector (parallelising
-    // would need per-thread bins plus a merge, allocating `bin_count` u32s
-    // per worker for a loop that is already cheap next to the palette
-    // sampling pass 2 now does via the LUT). `nu` is bounded above
-    // by `max_iter` (the loop exits earlier with NaN otherwise) and
-    // bounded below by `i + 1 − log₂(log₂(BAILOUT_SQR)/2)`, which can
-    // dip negative for first-iteration escapers far from the set —
-    // clamp `k` into `[0, max_iter]` so those escapers still appear
-    // in the distribution. Without this, a viewport composed entirely
-    // of negative-`nu` pixels would land `total = 0` and paint
-    // all-black on pass 2 even though every pixel escaped; clamping
-    // here keeps Pass 1 and Pass 2 (which clamps the same way for
-    // the CDF lookup) in lockstep.
+/// Build the Histogram CDF (ADR-0002 / PRD): bin finite escapers by
+/// `floor(scalar)` into `0..=max_iter`, accumulate, and normalise by the
+/// total. `floor` can dip negative for first-iteration escapers far from the
+/// set, so `k` is clamped into `[0, max_iter]` — without it a frame of all
+/// negative-`scalar` pixels would land `total == 0` and paint black despite
+/// every pixel escaping. An all-non-finite frame yields [`NormContext::Empty`].
+fn histogram_context(nus: &[f32], max_iter: u32) -> NormContext {
     let bin_count = (max_iter as usize) + 1;
     let last_idx = bin_count - 1;
     let mut bins: Vec<u32> = vec![0; bin_count];
@@ -534,56 +559,110 @@ fn colorize_histogram(nus: &[f32], lut: &ColorLut, max_iter: u32, out: &mut [u8]
         if !nu.is_finite() {
             continue;
         }
-        let k_signed = nu.floor() as i64;
-        let k = k_signed.clamp(0, last_idx as i64) as usize;
+        let k = (nu.floor() as i64).clamp(0, last_idx as i64) as usize;
         bins[k] = bins[k].saturating_add(1);
     }
 
     let total: u64 = bins.iter().map(|&b| u64::from(b)).sum();
     if total == 0 {
-        // All-NaN (or all-non-finite) input — every pixel is inside
-        // the set, no escape statistics to equalise.
-        out.par_chunks_exact_mut(4)
-            .for_each(|px| px.copy_from_slice(&BLACK));
-        return;
-    }
-
-    // Compute the CDF in place: bins[k] becomes Σ original_bins[0..=k].
-    let mut cum: u32 = 0;
-    for bin in &mut bins {
-        cum = cum.saturating_add(*bin);
-        *bin = cum;
+        return NormContext::Empty;
     }
     let total_f = total as f32;
 
-    // Pass 2 — palette lookup with linear interpolation between
-    // adjacent CDF entries by the fractional part of `nu`. Reject
-    // any non-finite value (NaN and ±Inf alike) symmetrically with
-    // pass 1 — keeping the two passes consistent forecloses a
-    // latent asymmetry where ±Inf would skip the bin count yet
-    // still land at a clamped colour.
-    nus.par_iter()
-        .zip(out.par_chunks_exact_mut(4))
-        .for_each(|(&nu, px)| {
-            let rgba = if nu.is_finite() {
-                let k_signed = nu.floor() as i64;
-                let k = k_signed.clamp(0, last_idx as i64) as usize;
-                let frac = (nu - k as f32).clamp(0.0, 1.0);
-                let cdf_k = bins[k] as f32 / total_f;
-                let cdf_kp1 = if k + 1 < bin_count {
-                    bins[k + 1] as f32 / total_f
-                } else {
-                    // cdf[max_iter + 1] is defined as 1.0 (the PRD sentinel).
-                    // bins[max_iter] already equals total → cdf[max_iter] = 1.0,
-                    // so this branch is only entered when `k == max_iter`.
-                    1.0
-                };
-                lut.lookup(cdf_k + (cdf_kp1 - cdf_k) * frac)
-            } else {
-                BLACK
-            };
-            px.copy_from_slice(&rgba);
-        });
+    // Accumulate to a CDF, normalising in the same pass: entry `k` becomes
+    // `Σ original_bins[0..=k] / total`. Dividing here (once per bin) instead of
+    // per pixel is the only structural change from the old inline loop and is
+    // numerically identical — `cum as f32 / total_f` is the same float.
+    let mut cum: u32 = 0;
+    let cdf: Vec<f32> = bins
+        .iter()
+        .map(|&bin| {
+            cum = cum.saturating_add(bin);
+            cum as f32 / total_f
+        })
+        .collect();
+    NormContext::Histogram { cdf }
+}
+
+/// One pixel traced through the colorize pipeline for the inspector (E2, #95):
+/// the raw Field scalar, where it lands after normalisation (`t`), and the
+/// resulting palette colour — answering "why is this pixel this colour?"
+/// end-to-end.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProbeSample {
+    /// The raw cached Field value: smooth `nu` (Escape Time), pixel-unit
+    /// distance `d` (Distance Estimate), or `f32::NAN` inside the set.
+    pub raw: f32,
+    /// The normalised palette coordinate `t ∈ [0, 1]`, or `f32::NAN` when the
+    /// pixel paints black (`inside` or an `Empty` frame) — read it only when
+    /// `!inside`.
+    pub t: f32,
+    /// `true` iff `raw` is the NaN inside-set sentinel.
+    pub inside: bool,
+    /// The painted colour `[r, g, b]` — the same LUT lookup the frame used, so
+    /// the swatch matches the pixel under the cursor exactly. Black inside.
+    pub rgb: [u8; 3],
+}
+
+/// Everything needed to colour one frame's pixels: the per-frame normalisation
+/// context plus the baked palette LUT, built once per [`colorize_into`] and
+/// reused for every pixel. The WASM layer caches it for the pixel-inspector
+/// probe (E2, #95) so a hover reuses the frame's whole-buffer stats *and* its
+/// 1024-entry LUT — reading one pixel without re-reducing the frame or
+/// rebuilding the table.
+pub struct FrameColoring {
+    norm: NormContext,
+    lut: ColorLut,
+}
+
+impl FrameColoring {
+    /// Build the colouring for `(palette, mode)` over `nus`: the whole-frame
+    /// normalisation context and the baked palette LUT.
+    pub fn build(
+        nus: &[f32],
+        palette: Palette,
+        mode: NormalizationMode,
+        max_iter: u32,
+    ) -> FrameColoring {
+        FrameColoring {
+            norm: NormContext::build(nus, palette, mode, max_iter),
+            lut: ColorLut::build(palette),
+        }
+    }
+
+    /// The RGBA a single scalar paints — the one per-pixel rule shared by the
+    /// `colorize_into` fan-out and the inspector probe, so they cannot drift.
+    #[inline]
+    fn pixel(&self, scalar: f32) -> [u8; 4] {
+        match normalize_value(scalar, &self.norm) {
+            Some(t) => self.lut.lookup(t),
+            None => BLACK,
+        }
+    }
+}
+
+/// Trace pixel `index` of `nus` through the pre-built `coloring`, reusing the
+/// exact [`normalize_value`] mapping and palette LUT [`colorize_into`] applied —
+/// so the inspector's `t` and swatch agree with the on-screen frame to the bit.
+///
+/// `index` must be in `0..nus.len()` (the caller validates at the WASM
+/// boundary).
+pub fn probe_value(nus: &[f32], index: usize, coloring: &FrameColoring) -> ProbeSample {
+    let raw = nus[index];
+    let inside = raw.is_nan();
+    let (t, rgb) = match normalize_value(raw, &coloring.norm) {
+        Some(t) => {
+            let [r, g, b, _] = coloring.lut.lookup(t);
+            (t, [r, g, b])
+        }
+        None => (f32::NAN, [0, 0, 0]),
+    };
+    ProbeSample {
+        raw,
+        t,
+        inside,
+        rgb,
+    }
 }
 
 #[cfg(test)]
@@ -633,7 +712,7 @@ mod tests {
     ];
 
     // The global-normalisation family, which shares one implementation
-    // (`colorize_global`) parameterised by a transfer curve.
+    // (`global_context` + `normalize_value`) parameterised by a transfer curve.
     const GLOBAL_MODES: &[NormalizationMode] = &[
         NormalizationMode::Linear,
         NormalizationMode::SquareRoot,
@@ -1603,6 +1682,99 @@ mod tests {
         for &p in ALL_PALETTES {
             let out = colorize(&[f32::NAN], p, NormalizationMode::Clamped, MAX_ITER);
             assert_eq!(out, vec![0, 0, 0, 255], "{p:?}");
+        }
+    }
+
+    // --- pixel inspector probe (E2, #95) ----------------------------------
+
+    /// A synthetic Field buffer spanning the cases every mode must handle: a
+    /// negative escaper (floor dips below 0), bin-0, fractional and integer
+    /// `nu`, a wide spread for the global `[min, max]` rescale, the NaN
+    /// inside-set sentinel, and a duplicate to give the histogram a non-flat
+    /// distribution.
+    fn probe_fixture() -> Vec<f32> {
+        vec![
+            -0.3,
+            0.0,
+            1.5,
+            3.7,
+            3.7,
+            10.25,
+            42.0,
+            (MAX_ITER as f32) - 0.5,
+            f32::NAN,
+            200.0,
+        ]
+    }
+
+    #[test]
+    fn probe_matches_colorize_pixel_for_pixel_for_every_combo() {
+        // The whole point of E2: the inspector's swatch and `t` must agree
+        // with the painted frame to the byte. Colorize the fixture, then probe
+        // each pixel with the cached context and assert the colour is
+        // identical — and that `inside` tracks the NaN sentinel exactly.
+        let nus = probe_fixture();
+        for &p in ALL_PALETTES {
+            for &m in ALL_MODES {
+                let rgba = colorize(&nus, p, m, MAX_ITER);
+                let coloring = FrameColoring::build(&nus, p, m, MAX_ITER);
+                for i in 0..nus.len() {
+                    let s = probe_value(&nus, i, &coloring);
+                    assert_eq!(
+                        rgba_of(s.rgb),
+                        [
+                            rgba[4 * i],
+                            rgba[4 * i + 1],
+                            rgba[4 * i + 2],
+                            rgba[4 * i + 3]
+                        ],
+                        "{p:?}/{m:?} pixel {i} (raw {})",
+                        nus[i],
+                    );
+                    assert_eq!(s.inside, nus[i].is_nan(), "{p:?}/{m:?} pixel {i} inside");
+                    assert_eq!(s.raw.is_nan(), nus[i].is_nan(), "{p:?}/{m:?} pixel {i} raw");
+                    if !s.inside {
+                        assert_eq!(s.raw, nus[i], "{p:?}/{m:?} pixel {i} raw value");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn probe_t_is_in_unit_range_for_escaped_pixels() {
+        // Every finite escaper's `t` is a valid palette coordinate; the NaN
+        // pixel reports `inside` and a non-finite `t` the caller must ignore.
+        let nus = probe_fixture();
+        for &m in ALL_MODES {
+            let coloring = FrameColoring::build(&nus, Palette::Viridis, m, MAX_ITER);
+            for i in 0..nus.len() {
+                let s = probe_value(&nus, i, &coloring);
+                if s.inside {
+                    assert!(s.t.is_nan(), "{m:?} pixel {i}: inside should carry NaN t");
+                } else {
+                    assert!(
+                        (0.0..=1.0).contains(&s.t),
+                        "{m:?} pixel {i}: t={} out of [0,1]",
+                        s.t,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn probe_reports_inside_for_an_all_nan_frame() {
+        // An all-inside frame (every pixel NaN) probes as inside with a black
+        // swatch under every mode — the Empty-context path.
+        let nus = vec![f32::NAN; 4];
+        for &m in ALL_MODES {
+            let coloring = FrameColoring::build(&nus, Palette::Turbo, m, MAX_ITER);
+            for i in 0..nus.len() {
+                let s = probe_value(&nus, i, &coloring);
+                assert!(s.inside, "{m:?} pixel {i}");
+                assert_eq!(s.rgb, [0, 0, 0], "{m:?} pixel {i} swatch");
+            }
         }
     }
 }
