@@ -23,6 +23,7 @@
         --hair:       rgba(255, 255, 255, 0.08);
         --accent:     #5fd0c0;   /* keyed to palette at runtime (main.ts) */
         --accent-dim: color-mix(in oklab, var(--accent) 28%, transparent);
+        --warn:       #e0a05f;   /* precision low — depth meter near the f64 wall */
 
         --font-mono:  "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
         --font-tech:  "Martian Mono Variable", var(--font-mono);
@@ -303,6 +304,40 @@
       /* Mandelbrot mode: dim the whole `c` row (via :has) so the visitor reads
          the seed as "off", not just the two fields. */
       .coord--c:has(input:disabled) { opacity: 0.4; }
+
+      /* Depth meter (#98): a thin log-scale bar + compact "N.N / 13" readout
+         sharing the value column — the bar grows as the zoom descends into the
+         f64 precision budget (ADR-0006). main.ts drives --fill (0..1) and the
+         label on every commit, and adds .depth--near for the last ~15%. */
+      .coord--depth .coord__val {
+        display: flex;
+        align-items: baseline;
+        gap: 0.55rem;
+      }
+      .depth {
+        flex: 1 1 auto;
+        height: 0.45rem;
+        align-self: center;
+        background: var(--hair);
+        border-radius: var(--r);
+        overflow: hidden;
+      }
+      .depth__fill {
+        display: block;
+        height: 100%;
+        width: calc(var(--fill, 0) * 100%);
+        background: var(--accent);
+        border-radius: inherit;
+        transition: width 0.26s var(--ease), background 0.26s var(--ease);
+      }
+      .depth--near .depth__fill { background: var(--warn); }
+      .depth__num {
+        flex: 0 0 auto;
+        font-size: 0.78rem;
+        color: var(--ink-dim);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
 
       /* Off-screen mirror of the readout as one string, so a screen reader
          announces the settled view as a single utterance (the visible cells
@@ -728,6 +763,8 @@
         form#controls, #controls-toggle { transition: none; }
         form#controls.open .console-head, form#controls.open .coords,
         form#controls.open .field { animation: none; }
+        /* The depth meter snaps to its value instead of sliding on each commit. */
+        .depth__fill { transition: none; }
       }
     </style>
   </head>
@@ -772,6 +809,17 @@
           <div class="coord" aria-hidden="true">
             <dt class="coord__key">zoom</dt>
             <dd class="coord__val" data-coord="zoom">—</dd>
+          </div>
+          <!-- Depth meter (#98): how deep the zoom sits in the f64 precision
+               budget (ADR-0006, ~10^13 ceiling). main.ts sets --fill and the
+               numeric label on every commit; the off-screen #coords mirror
+               carries "depth N.N / 13" so it reaches screen readers too. -->
+          <div class="coord coord--depth" aria-hidden="true">
+            <dt class="coord__key">depth</dt>
+            <dd class="coord__val">
+              <span class="depth"><i class="depth__fill"></i></span>
+              <span class="depth__num" data-coord="depth">—</span>
+            </dd>
           </div>
           <div class="coord coord--c">
             <dt class="coord__key">c</dt>

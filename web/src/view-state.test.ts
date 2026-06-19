@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ViewState } from './view-state.js'
-import { formatCoords, parse, serialize } from './view-state.js'
+import { formatCoords, parse, serialize, zoomDepth } from './view-state.js'
 
 const SAMPLE: ViewState = {
   re: -0.743,
@@ -112,7 +112,9 @@ describe('parse tolerance', () => {
 
 describe('formatCoords', () => {
   it('shows signed re/im to five decimals and scientific zoom', () => {
-    expect(formatCoords(-0.7435, 0.1314, 200)).toBe('re −0.74350 · im +0.13140 · zoom 2.0e2')
+    expect(formatCoords(-0.7435, 0.1314, 200)).toBe(
+      're −0.74350 · im +0.13140 · zoom 2.0e2 · depth 2.3 / 13',
+    )
   })
 
   it('uses a typographic minus and an explicit plus', () => {
@@ -122,10 +124,49 @@ describe('formatCoords', () => {
   })
 
   it('renders +0 for a zero component', () => {
-    expect(formatCoords(0, 0, 1)).toBe('re +0.00000 · im +0.00000 · zoom 1.0e0')
+    expect(formatCoords(0, 0, 1)).toBe('re +0.00000 · im +0.00000 · zoom 1.0e0 · depth 0.0 / 13')
   })
 
   it('keeps zoom compact at deep magnification', () => {
     expect(formatCoords(0, 0, 1.2e9)).toContain('zoom 1.2e9')
+  })
+
+  it('appends the depth clause for screen readers', () => {
+    expect(formatCoords(0, 0, 2e5)).toContain('· depth 5.3 / 13')
+  })
+})
+
+describe('zoomDepth', () => {
+  it('reads empty at the 1× base', () => {
+    const d = zoomDepth(1)
+    expect(d.fraction).toBe(0)
+    expect(d.label).toBe('0.0 / 13')
+    expect(d.nearCeiling).toBe(false)
+  })
+
+  it('clamps a sub-unit (default) view to empty', () => {
+    const d = zoomDepth(0.25)
+    expect(d.fraction).toBe(0)
+    expect(d.label).toBe('0.0 / 13')
+  })
+
+  it('projects mid-range magnification onto the budget', () => {
+    const d = zoomDepth(2e5)
+    expect(d.fraction).toBeCloseTo(5.301 / 13, 3)
+    expect(d.label).toBe('5.3 / 13')
+    expect(d.nearCeiling).toBe(false)
+  })
+
+  it('fills and warns at the 1e13 ceiling', () => {
+    const d = zoomDepth(1e13)
+    expect(d.fraction).toBe(1)
+    expect(d.label).toBe('13.0 / 13')
+    expect(d.nearCeiling).toBe(true)
+  })
+
+  it('flips nearCeiling around the 85% threshold', () => {
+    // 0.85 * 13 ≈ 11.05 decades → zoom ≈ 1.12e11
+    expect(zoomDepth(10 ** 11).nearCeiling).toBe(false)
+    expect(zoomDepth(10 ** 11.2).nearCeiling).toBe(true)
   })
 })
