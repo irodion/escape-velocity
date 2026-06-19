@@ -348,12 +348,9 @@ export class InputController {
     const [midX, midY] = this.midpointBetween(this.pinch.pointerA, this.pinch.pointerB)
     const cssX = midX - rect.left
     const cssY = midY - rect.top
-    // zoom_around takes a point on the viewport's logical grid — scale by the
-    // viewport dimensions, not the render buffer, so the anchored point is
-    // correct at any render scale. (cssX, cssY) anchors the Preview transform;
-    // they scale by the same ratio, so both hold the same on-screen point fixed.
-    const pixelX = (cssX * this.currentViewport.width()) / rect.width
-    const pixelY = (cssY * this.currentViewport.height()) / rect.height
+    // The logical-grid sample under the midpoint anchors the zoom; the raw
+    // (cssX, cssY) anchors the Preview transform (see `cssToGridSample`).
+    const [pixelX, pixelY] = this.cssToGridSample(cssX, cssY, rect)
 
     this.zoomPreview = applyZoomNotch(this.zoomPreview, pixelX, pixelY, cssX, cssY, factor)
     this.currentViewport = this.zoomPreview.viewport
@@ -479,6 +476,32 @@ export class InputController {
     return [(a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2]
   }
 
+  /**
+   * Map a CSS-pixel cursor position to the logical-grid sample point that
+   * `Viewport.zoom_around` (and `pixel_to_complex_f`) consume. Both the wheel
+   * and pinch zoom feeders go through here, so the convention lives in one
+   * place (B5, #76).
+   *
+   * Two corrections are folded in:
+   *  - Scale by the viewport's *logical* dimensions over `rect`, not the
+   *    render buffer, so the anchored point is correct at any render scale.
+   *  - Subtract a half-pixel. `pixel_to_complex_f` samples index j at
+   *    coordinate j, so the sample for buffer pixel j is displayed across the
+   *    screen cell [j, j+1) centred at j+0.5. The cursor's CSS coordinate is
+   *    cell-edge, so the buffer position under it is `cssX·scale`; the −0.5
+   *    names the *sample* drawn there — the point that must stay put.
+   *
+   * The raw `(cssX, cssY)` is kept separately by callers to anchor the CSS
+   * Preview transform: that pins the true on-screen position, not a grid
+   * sample, so it must not get the −0.5.
+   */
+  private cssToGridSample(cssX: number, cssY: number, rect: DOMRect): [number, number] {
+    return [
+      (cssX * this.currentViewport.width()) / rect.width - 0.5,
+      (cssY * this.currentViewport.height()) / rect.height - 0.5,
+    ]
+  }
+
   private readonly handleWheel = (event: WheelEvent): void => {
     event.preventDefault()
     // A Preview transform is already applied (a scrub is visually active)
@@ -516,13 +539,9 @@ export class InputController {
     if (rect === null || rect.width <= 0 || rect.height <= 0) return
     const cssX = event.clientX - rect.left
     const cssY = event.clientY - rect.top
-    // zoom_around takes a point on the viewport's logical grid — scale
-    // by the viewport dimensions, not the render buffer, so the cursor-
-    // invariant point is correct at any render scale. The CSS-pixel
-    // (cssX, cssY) anchors the Preview transform; they scale by the same
-    // ratio, so both hold the same on-screen point fixed.
-    const pixelX = (cssX * this.currentViewport.width()) / rect.width
-    const pixelY = (cssY * this.currentViewport.height()) / rect.height
+    // The cursor's logical-grid sample anchors the zoom; the raw (cssX, cssY)
+    // anchors the Preview transform (see `cssToGridSample`).
+    const [pixelX, pixelY] = this.cssToGridSample(cssX, cssY, rect)
     const factor = 1.25 ** (-normalizeWheelDelta(event) / 100)
 
     this.zoomPreview = applyZoomNotch(preview, pixelX, pixelY, cssX, cssY, factor)

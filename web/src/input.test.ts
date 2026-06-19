@@ -357,10 +357,11 @@ describe('InputController', () => {
     expect(onChange).not.toHaveBeenCalled()
 
     // Spread the fingers to distance 200: factor = 200/100 = 2, midpoint
-    // (200, 100) → logical grid (200, 100) at render scale 1.
+    // (200, 100) → logical grid (199.5, 99.5) at render scale 1 (the −0.5
+    // half-pixel correction, B5 #76).
     canvas.dispatchEvent(pe('pointermove', { pointerId: 2, clientX: 300, clientY: 100 }))
     expect(viewport.zoom_around).toHaveBeenCalledTimes(1)
-    expect(viewport.zoom_around).toHaveBeenCalledWith(200, 100, 2)
+    expect(viewport.zoom_around).toHaveBeenCalledWith(199.5, 99.5, 2)
     // The Preview transform is applied instantly; no recompute yet.
     expect(canvas.style.transform).not.toBe('')
     expect(onChange).not.toHaveBeenCalled()
@@ -500,7 +501,9 @@ describe('InputController', () => {
     // factor = 1.25 ^ (-100 / 100) = 1 / 1.25 = 0.8. zoom_around runs
     // immediately to advance the authoritative viewport...
     expect(viewport.zoom_around).toHaveBeenCalledTimes(1)
-    expect(viewport.zoom_around).toHaveBeenCalledWith(200, 150, 1.25 ** -1)
+    // logical grid (199.5, 149.5): the cursor's cell-edge CSS coordinate minus
+    // the half-pixel that aligns it with the sample-at-index grid (B5, #76).
+    expect(viewport.zoom_around).toHaveBeenCalledWith(199.5, 149.5, 1.25 ** -1)
     // ...the Preview transform is applied instantly (cursor-anchored
     // scale) — exact matrix is covered in zoom-preview.test.ts...
     expect(canvas.style.transform).not.toBe('')
@@ -511,6 +514,33 @@ describe('InputController', () => {
     vi.advanceTimersByTime(WHEEL_SETTLE_MS)
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledWith(zoomed)
+  })
+
+  it('feeds zoom_around the sample displayed under the cursor (half-pixel convention, B5 #76)', () => {
+    // The five scale-1 assertions can't distinguish cssX·scale − 0.5 from
+    // (cssX − 0.5)·scale (they coincide when scale = 1). Render scale 2 (buffer
+    // 1600×1200 over an 800×600 viewport grid, CSS 400×300) separates them: the
+    // correction is a flat −0.5 in *grid* units, cssX·(800/400) − 0.5. This is
+    // the only assertion that would fail if the −0.5 were applied in CSS units
+    // instead of grid units. (Convention rationale lives at `cssToGridSample`.)
+    canvas.width = 1600
+    canvas.height = 1200
+    setRect(canvas, { width: 400, height: 300 })
+    viewport.zoom_around.mockReturnValue(makeZoomResult(1.25))
+    mount(canvas, viewport, onChange)
+
+    // Cursor at CSS (123, 77): grid x = 123·800/400 − 0.5 = 245.5,
+    // grid y = 77·600/300 − 0.5 = 153.5.
+    canvas.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: -100,
+        clientX: 123,
+        clientY: 77,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    expect(viewport.zoom_around).toHaveBeenCalledWith(245.5, 153.5, 1.25)
   })
 
   it('coalesces a multi-notch scrub into one onChange at the Settle', () => {
@@ -586,10 +616,11 @@ describe('InputController', () => {
     notch()
     notch()
     // factor = 1.25 ^ (100/100) = 1.25 (zoom in). Both notches map the
-    // cursor through the layout box: pixelX = 200·800/800 = 200. The
-    // transformed box would have given (200−(−100))·800/1000 = 240.
-    expect(viewport.zoom_around).toHaveBeenCalledWith(200, 150, 1.25)
-    expect(afterFirst.zoom_around).toHaveBeenCalledWith(200, 150, 1.25)
+    // cursor through the layout box: pixelX = 200·800/800 − 0.5 = 199.5
+    // (the B5 #76 half-pixel correction). The transformed box would have
+    // given (200−(−100))·800/1000 − 0.5 = 239.5.
+    expect(viewport.zoom_around).toHaveBeenCalledWith(199.5, 149.5, 1.25)
+    expect(afterFirst.zoom_around).toHaveBeenCalledWith(199.5, 149.5, 1.25)
   })
 
   it('re-bases the Preview to the committed viewport once a paint clears the transform', () => {
@@ -738,7 +769,8 @@ describe('InputController', () => {
     setRect(canvas, { left: 0, top: 0, width: 400, height: 300 })
     mount(canvas, viewport, onChange)
 
-    // CSS-centre cursor at (200, 150) ⇒ internal pixel (400, 300).
+    // CSS-centre cursor at (200, 150) ⇒ internal pixel (400, 300), minus the
+    // B5 #76 half-pixel ⇒ (399.5, 299.5).
     canvas.dispatchEvent(
       new WheelEvent('wheel', {
         deltaY: 0,
@@ -748,7 +780,7 @@ describe('InputController', () => {
         cancelable: true,
       }),
     )
-    expect(viewport.zoom_around).toHaveBeenCalledWith(400, 300, 1)
+    expect(viewport.zoom_around).toHaveBeenCalledWith(399.5, 299.5, 1)
   })
 
   it('wheel normalizes line-mode deltas (Firefox-on-Linux style)', () => {
@@ -769,7 +801,7 @@ describe('InputController', () => {
         cancelable: true,
       }),
     )
-    expect(viewport.zoom_around).toHaveBeenCalledWith(100, 50, 1.25 ** (-(3 * 40) / 100))
+    expect(viewport.zoom_around).toHaveBeenCalledWith(99.5, 49.5, 1.25 ** (-(3 * 40) / 100))
   })
 
   it('wheel normalizes page-mode deltas', () => {
@@ -786,7 +818,7 @@ describe('InputController', () => {
         cancelable: true,
       }),
     )
-    expect(viewport.zoom_around).toHaveBeenCalledWith(100, 50, 1.25 ** (-(1 * 800) / 100))
+    expect(viewport.zoom_around).toHaveBeenCalledWith(99.5, 49.5, 1.25 ** (-(1 * 800) / 100))
   })
 
   it('ignores non-primary pointer buttons on the first pointerdown', () => {
