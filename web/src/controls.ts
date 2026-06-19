@@ -92,6 +92,7 @@ export class Controls {
   private readonly cReInput: HTMLInputElement
   private readonly cImInput: HTMLInputElement
   private readonly orbitCheckbox: HTMLInputElement
+  private readonly inspectCheckbox: HTMLInputElement
   private readonly onChange: (settings: Settings) => void
 
   constructor(form: HTMLFormElement, initial: Settings, onChange: (settings: Settings) => void) {
@@ -104,6 +105,7 @@ export class Controls {
     const cReInput = form.elements.namedItem('c-re')
     const cImInput = form.elements.namedItem('c-im')
     const orbitCheckbox = form.elements.namedItem('orbit')
+    const inspectCheckbox = form.elements.namedItem('inspect')
     if (!(maxIterRange instanceof HTMLInputElement) || maxIterRange.type !== 'range') {
       throw new Error('Controls: form is missing an <input type="range" name="max-iter">')
     }
@@ -134,6 +136,9 @@ export class Controls {
     }
     if (!(orbitCheckbox instanceof HTMLInputElement) || orbitCheckbox.type !== 'checkbox') {
       throw new Error('Controls: form is missing an <input type="checkbox" name="orbit">')
+    }
+    if (!(inspectCheckbox instanceof HTMLInputElement) || inspectCheckbox.type !== 'checkbox') {
+      throw new Error('Controls: form is missing an <input type="checkbox" name="inspect">')
     }
 
     // The slider is index-addressed: its value is a position in
@@ -191,6 +196,7 @@ export class Controls {
       throw new Error(`Controls: initial.cIm=${initial.cIm} is not a finite number`)
     }
     orbitCheckbox.checked = initial.orbit
+    inspectCheckbox.checked = initial.inspect
 
     this.maxIterRange = maxIterRange
     this.maxIterReadout = maxIterReadout
@@ -202,6 +208,7 @@ export class Controls {
     this.cReInput = cReInput
     this.cImInput = cImInput
     this.orbitCheckbox = orbitCheckbox
+    this.inspectCheckbox = inspectCheckbox
     this.onChange = onChange
     // The c inputs are visual-state only — they always hold their last
     // committed value even in Mandelbrot mode (which simply ignores
@@ -255,6 +262,10 @@ export class Controls {
     // still emits a snapshot so the dispatcher can enable/disable the overlay
     // and persist the toggle to the URL like every other setting.
     orbitCheckbox.addEventListener('change', () => this.emit())
+    // The pixel inspector is a pure presentation toggle too (no recompute); it
+    // emits so the dispatcher can show/hide the inspector. Unlike orbit it is
+    // not persisted to the URL (see `Settings.inspect`).
+    inspectCheckbox.addEventListener('change', () => this.emit())
   }
 
   // Translate the slider index back to the iteration count it stands for.
@@ -306,6 +317,7 @@ export class Controls {
       cRe: this.cReInput.valueAsNumber,
       cIm: this.cImInput.valueAsNumber,
       orbit: this.orbitCheckbox.checked,
+      inspect: this.inspectCheckbox.checked,
     })
   }
 
@@ -346,6 +358,7 @@ export class Controls {
     this.setCInputsEnabled(settings.mode === 'julia')
     this.setCValues(settings.cRe, settings.cIm)
     this.orbitCheckbox.checked = settings.orbit
+    this.inspectCheckbox.checked = settings.inspect
   }
 
   /**

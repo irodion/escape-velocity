@@ -27,6 +27,7 @@ const INITIAL: Settings = {
   cRe: -0.7,
   cIm: 0.27015,
   orbit: true,
+  inspect: false,
 }
 
 // Build the same form layout the production index.html ships. Slices
@@ -120,6 +121,10 @@ function buildForm(): HTMLFormElement {
       Orbit:
       <input type="checkbox" name="orbit" checked />
     </label>
+    <label>
+      Inspect:
+      <input type="checkbox" name="inspect" />
+    </label>
   `
   document.body.appendChild(form)
   return form
@@ -182,6 +187,7 @@ describe('Controls', () => {
         cRe: -0.512,
         cIm: 0.61,
         orbit: true,
+        inspect: false,
       })
 
       expect(onChange).not.toHaveBeenCalled()

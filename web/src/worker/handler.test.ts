@@ -24,6 +24,19 @@ vi.mock('../../wasm/fractal_wasm.js', () => {
       (_iterPtr: number, _len: number, _palette: number, _mode: number, _maxIter: number) => 0x2000,
     ),
     colorize_len: vi.fn(() => 16),
+    // `probe_pixel` returns a wasm-bindgen class instance (fields + `free`);
+    // the double records its args and hands back a fixed traced pixel with a
+    // `free` spy so a test can assert the handle is released.
+    probe_pixel: vi.fn(
+      (
+        _iterPtr: number,
+        _len: number,
+        _index: number,
+        _palette: number,
+        _mode: number,
+        _maxIter: number,
+      ) => ({ raw: 12.5, t: 0.5, inside: false, r: 10, g: 20, b: 30, free: vi.fn() }),
+    ),
     Viewport: class {
       constructor(
         public readonly re: number,
@@ -73,18 +86,20 @@ import {
 } from '../../wasm/fractal_wasm.js'
 import {
   createWorkerState,
+  handleProbe,
   handleRecolorize,
   handleRender,
   planBands,
   type RenderHooks,
 } from './handler.js'
-import type { RecolorizeRequest, RenderRequest } from './protocol.js'
+import type { ProbeRequest, RecolorizeRequest, RenderRequest } from './protocol.js'
 
 interface MockedWasm {
   compute_band: ReturnType<typeof vi.fn>
   compute_len: ReturnType<typeof vi.fn>
   colorize: ReturnType<typeof vi.fn>
   colorize_len: ReturnType<typeof vi.fn>
+  probe_pixel: ReturnType<typeof vi.fn>
 }
 
 // Shape the mock `Viewport` class records its constructor inputs under,
@@ -363,5 +378,82 @@ describe('handleRender', () => {
     // Mutating WASM memory after the call must not bleed into the copy.
     seed.fill(0x00)
     expect(Array.from(response.rgba)).toEqual(new Array(16).fill(0xab))
+  })
+})
+
+describe('handleProbe (E2, #95)', () => {
+  beforeEach(() => {
+    wasm.probe_pixel.mockClear()
+  })
+
+  function probeRequest(overrides: Partial<ProbeRequest> = {}): ProbeRequest {
+    return {
+      kind: 'probe',
+      seq: 7,
+      x: 1,
+      y: 1,
+      palette: Palette.Viridis,
+      mode: NormalizationMode.Cycled,
+      ...overrides,
+    }
+  }
+
+  it('reads the cached buffer at the row-major index and echoes the traced pixel', async () => {
+    const { hooks } = makeHooks()
+    // A render populates the cache: ptr 0x1000, len 4 (compute_len), 2×2, maxIter 256.
+    const { state } = expectRendered(await handleRender(renderRequest(), wasmInit, hooks))
+
+    const response = handleProbe(state, probeRequest({ x: 1, y: 1, seq: 9 }))
+
+    expect(wasm.probe_pixel).toHaveBeenCalledTimes(1)
+    const [iterPtr, len, index, palette, mode, maxIter] = wasm.probe_pixel.mock.calls[0] as [
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+    ]
+    expect(iterPtr).toBe(0x1000)
+    expect(len).toBe(4)
+    // cachedWidth is 2, so (x=1, y=1) → index 1*2 + 1 = 3.
+    expect(index).toBe(3)
+    expect(palette).toBe(Palette.Viridis)
+    expect(mode).toBe(NormalizationMode.Cycled)
+    expect(maxIter).toBe(256)
+    expect(response).toEqual({
+      kind: 'probe-response',
+      seq: 9,
+      raw: 12.5,
+      t: 0.5,
+      inside: false,
+      r: 10,
+      g: 20,
+      b: 30,
+    })
+  })
+
+  it('frees the wasm-bindgen ProbeResult handle after reading it', async () => {
+    const { hooks } = makeHooks()
+    const { state } = expectRendered(await handleRender(renderRequest(), wasmInit, hooks))
+    handleProbe(state, probeRequest())
+    const result = wasm.probe_pixel.mock.results[0].value as { free: ReturnType<typeof vi.fn> }
+    expect(result.free).toHaveBeenCalledTimes(1)
+  })
+
+  it('clamps an out-of-range coordinate into the cached buffer', async () => {
+    const { hooks } = makeHooks()
+    const { state } = expectRendered(await handleRender(renderRequest(), wasmInit, hooks))
+    // The cache is 2×2; a coordinate past the edge clamps to the last pixel
+    // (index 1*2 + 1 = 3) so the WASM probe can never index out of range.
+    handleProbe(state, probeRequest({ x: 99, y: 99 }))
+    expect((wasm.probe_pixel.mock.calls[0] as number[])[2]).toBe(3)
+  })
+
+  it('returns an inside sentinel without probing when no frame is cached yet', () => {
+    const response = handleProbe(createWorkerState(), probeRequest({ seq: 3 }))
+    expect(wasm.probe_pixel).not.toHaveBeenCalled()
+    expect(response).toMatchObject({ kind: 'probe-response', seq: 3, inside: true })
+    expect(Number.isNaN(response.raw)).toBe(true)
   })
 })

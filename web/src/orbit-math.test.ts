@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   BAILOUT_SQR,
   complexToCss,
+  cssToBufferPixel,
   cssToComplex,
   pixelScale,
   revealedCount,
@@ -115,5 +116,35 @@ describe('complexToCss / cssToComplex', () => {
     const c = cssToComplex(399.5 * 2, 299.5 * 2, stretched)
     expect(c.re).toBeCloseTo(view.centerRe, 12)
     expect(c.im).toBeCloseTo(view.centerIm, 12)
+  })
+})
+
+describe('cssToBufferPixel (E2, #95)', () => {
+  it('floors a CSS pixel to the containing buffer cell at 1× (buffer == CSS box)', () => {
+    // 800×600 CSS box over an 800×600 backing store: a fractional coordinate
+    // stays inside its current cell (floor), not the nearest sample centre.
+    expect(cssToBufferPixel(123.4, 456.6, 800, 600, 800, 600)).toEqual({ px: 123, py: 456 })
+  })
+
+  it('maps against the backing store, not the CSS box, at 2× render scale', () => {
+    // 800×600 CSS box over a 1600×1200 backing store (render scale 2×): the CSS
+    // centre reaches the buffer centre and the far edge reaches the far buffer —
+    // a CSS-box mapping would only ever address the top-left quarter.
+    expect(cssToBufferPixel(400, 300, 800, 600, 1600, 1200)).toEqual({ px: 800, py: 600 })
+    expect(cssToBufferPixel(799, 599, 800, 600, 1600, 1200)).toEqual({ px: 1598, py: 1198 })
+  })
+
+  it('maps against the backing store at 0.5× render scale', () => {
+    // 800×600 CSS box over a 400×300 backing store (render scale 0.5×).
+    expect(cssToBufferPixel(400, 300, 800, 600, 400, 300)).toEqual({ px: 200, py: 150 })
+  })
+
+  it('clamps a cursor on the far edge into the buffer (never one past the last pixel)', () => {
+    expect(cssToBufferPixel(800, 600, 800, 600, 800, 600)).toEqual({ px: 799, py: 599 })
+    expect(cssToBufferPixel(-3, -3, 800, 600, 800, 600)).toEqual({ px: 0, py: 0 })
+  })
+
+  it('returns null for a degenerate display box', () => {
+    expect(cssToBufferPixel(10, 10, 0, 600, 800, 600)).toBeNull()
   })
 })

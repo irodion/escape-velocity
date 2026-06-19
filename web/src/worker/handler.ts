@@ -4,9 +4,16 @@ import {
   compute_band,
   compute_len,
   type InitOutput,
+  probe_pixel,
   Viewport,
 } from '../../wasm/fractal_wasm.js'
-import type { RecolorizeRequest, RenderRequest, RenderResponse } from './protocol.js'
+import type {
+  ProbeRequest,
+  ProbeResponse,
+  RecolorizeRequest,
+  RenderRequest,
+  RenderResponse,
+} from './protocol.js'
 
 /**
  * The render worker's deep module: owns the ADR-0002 iteration-buffer
@@ -204,6 +211,62 @@ export function handleRecolorize(
     height: state.cachedHeight,
   }
   return { response, transfer: [rgba.buffer] }
+}
+
+/**
+ * Read one pixel of the cached Field buffer for the pixel inspector (E2,
+ * #95). Reuses the ADR-0002 recolorize cache `(ptr, len, maxIter, dims)` —
+ * no recompute — and traces the pixel through the probe's `palette` / `mode`
+ * via the WASM `probe_pixel`, which reuses the normalisation context the last
+ * `colorize` cached so a hover is O(1) for the global / Histogram modes.
+ *
+ * Tolerant by construction, because hover probes fire constantly: with no
+ * cached buffer yet (before the first frame, or just after an aborted render
+ * dropped the cache) it reports an "inside" sentinel rather than throwing, and
+ * it clamps `(x, y)` into the cached dimensions so an edge or slightly-stale
+ * coordinate can never index out of range.
+ */
+export function handleProbe(state: WorkerState, msg: ProbeRequest): ProbeResponse {
+  if (state.cachedIterPtr === null) {
+    return {
+      kind: 'probe-response',
+      seq: msg.seq,
+      raw: NaN,
+      t: NaN,
+      inside: true,
+      r: 0,
+      g: 0,
+      b: 0,
+    }
+  }
+  const x = Math.min(Math.max(msg.x | 0, 0), state.cachedWidth - 1)
+  const y = Math.min(Math.max(msg.y | 0, 0), state.cachedHeight - 1)
+  const index = y * state.cachedWidth + x
+  // `probe_pixel` returns a wasm-bindgen class wrapping WASM memory; read its
+  // fields into a plain response (the class can't survive `postMessage`) and
+  // free it so the handle doesn't leak across the constant hover traffic.
+  const result = probe_pixel(
+    state.cachedIterPtr,
+    state.cachedIterLen,
+    index,
+    msg.palette,
+    msg.mode,
+    state.cachedMaxIter,
+  )
+  try {
+    return {
+      kind: 'probe-response',
+      seq: msg.seq,
+      raw: result.raw,
+      t: result.t,
+      inside: result.inside,
+      r: result.r,
+      g: result.g,
+      b: result.b,
+    }
+  } finally {
+    result.free()
+  }
 }
 
 /**

@@ -55,6 +55,47 @@ export interface RecolorizeRequest {
   readonly mode: NormalizationMode
 }
 
+/**
+ * Read one pixel of the cached Field buffer for the pixel inspector (E2,
+ * #95) — "why is this pixel this colour?". The worker reads a single `f32`
+ * from the recolorize cache (no recompute) and traces it through the current
+ * `palette` / `mode`, returning the raw value, the normalised `t`, and the
+ * painted colour.
+ *
+ * It carries a `seq`, **not** an `epoch`: a probe is a read-only side query
+ * that never enters the render-client's single-slot coalescing and never
+ * supersedes a render. The worker echoes `seq` back so the client can drop a
+ * probe response older than the latest it issued (hover fires many). `x` / `y`
+ * are render-buffer pixel coordinates (row-major `y * width + x`).
+ */
+export interface ProbeRequest {
+  readonly kind: 'probe'
+  readonly seq: number
+  readonly x: number
+  readonly y: number
+  readonly palette: Palette
+  readonly mode: NormalizationMode
+}
+
+/**
+ * The traced pixel (see {@link ProbeRequest}). `raw` is the cached Field
+ * scalar (smooth `nu`, distance `d`, or `NaN` inside the set); `inside` is
+ * `true` iff that sentinel, in which case `t` is `NaN` and the swatch is
+ * black. `t ∈ [0, 1]` is where `raw` landed after the current normalisation,
+ * and `r` / `g` / `b` is the colour that pixel was painted — matching the
+ * on-screen pixel exactly (same palette LUT the frame used).
+ */
+export interface ProbeResponse {
+  readonly kind: 'probe-response'
+  readonly seq: number
+  readonly raw: number
+  readonly t: number
+  readonly inside: boolean
+  readonly r: number
+  readonly g: number
+  readonly b: number
+}
+
 export interface Ready {
   readonly kind: 'ready'
 }

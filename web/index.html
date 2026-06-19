@@ -78,6 +78,52 @@
         display: block;
         pointer-events: none;
       }
+      /* Pixel inspector HUD (E2, #95): a compact readout pinned to the stage's
+         bottom-right, shown only while the Inspect toggle is on. Bottom-right
+         clears the top-left toggle and the left drawer; `pointer-events: none`
+         lets a pan/zoom that strays under it pass through to the canvas. Mirrors
+         the instrument skin — translucent slab, hairline, mono, tabular figures. */
+      .inspector {
+        position: absolute;
+        right: max(0.9rem, env(safe-area-inset-right));
+        bottom: max(0.9rem, env(safe-area-inset-bottom));
+        z-index: 20;
+        display: grid;
+        grid-template-columns: auto auto minmax(0, 1fr);
+        align-items: center;
+        gap: 0.15rem 0.55rem;
+        padding: 0.6rem 0.7rem;
+        max-width: min(20rem, 72vw);
+        color: var(--ink);
+        background: var(--panel);
+        -webkit-backdrop-filter: blur(14px) saturate(1.2);
+        backdrop-filter: blur(14px) saturate(1.2);
+        border: 1px solid var(--panel-edge);
+        border-radius: var(--r);
+        font-family: var(--font-mono);
+        font-size: 0.82rem;
+        line-height: 1.5;
+        font-variant-numeric: tabular-nums;
+        pointer-events: none;
+      }
+      .inspector[hidden] { display: none; }
+      /* Swatch: the exact painted colour (set inline by inspector.ts), spanning
+         the three readout rows down the left. */
+      .inspector__swatch {
+        grid-row: 1 / 4;
+        grid-column: 1;
+        align-self: stretch;
+        width: 2.5rem;
+        min-height: 2.5rem;
+        margin-right: 0.2rem;
+        border: 1px solid var(--panel-edge);
+        border-radius: var(--r);
+        background: #000;
+      }
+      .inspector__key { color: var(--ink-dim); white-space: nowrap; }
+      .inspector__val { color: var(--ink); white-space: nowrap; }
+      .inspector__val--inside { color: var(--ink-dim); font-style: italic; }
+
       canvas#fractal {
         cursor: crosshair;
         width: 100%;
@@ -919,6 +965,17 @@
           <input type="checkbox" name="orbit" />
         </span>
       </label>
+      <!-- Pixel inspector toggle (E2, #95). Off by default; tick it, then hover
+           the canvas to read the pixel under the cursor — its coordinate, raw
+           Field value, where it lands after normalisation (t), and the painted
+           colour. A view-only inspection tool, so unlike Orbit it is not
+           persisted in the URL hash. -->
+      <label class="field field--check">
+        <span class="field__label">Inspect</span>
+        <span class="field__control">
+          <input type="checkbox" name="inspect" />
+        </span>
+      </label>
       <!-- PNG export (O2, #92). Actions, not form state: wired directly in
            main.ts (no settings snapshot, no rerender). Both render the current
            view off-screen so the saved pixels always match the permalink in the
@@ -931,6 +988,9 @@
     <div class="stage">
       <canvas id="fractal" width="800" height="600"></canvas>
       <canvas id="orbit"></canvas>
+      <!-- Pixel inspector HUD (E2, #95). Populated by inspector.ts; shown only
+           while the Inspect toggle is on. -->
+      <div id="inspector" class="inspector" hidden aria-live="polite"></div>
     </div>
     <div class="vignette"></div>
     <script type="module" src="/src/main.ts"></script>

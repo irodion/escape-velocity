@@ -20,10 +20,17 @@
  * list so the RGBA buffer moves zero-copy to the client.
  */
 import init, { initThreadPool } from '../../wasm/fractal_wasm.js'
-import { createWorkerState, handleRecolorize, handleRender, type WorkerState } from './handler.js'
+import {
+  createWorkerState,
+  handleProbe,
+  handleRecolorize,
+  handleRender,
+  type WorkerState,
+} from './handler.js'
 import type {
   Aborted,
   CancelRequest,
+  ProbeRequest,
   ProgressResponse,
   Ready,
   RecolorizeRequest,
@@ -91,8 +98,20 @@ function yieldToEventLoop(): Promise<void> {
 const ready: Ready = { kind: 'ready' }
 ctx.postMessage(ready)
 
-ctx.onmessage = (event: MessageEvent<RenderRequest | RecolorizeRequest | CancelRequest>): void => {
+ctx.onmessage = (
+  event: MessageEvent<RenderRequest | RecolorizeRequest | CancelRequest | ProbeRequest>,
+): void => {
   const msg = event.data
+
+  if (msg.kind === 'probe') {
+    // A read-only side query (E2, #95). It carries a `seq`, not an `epoch`, so
+    // it neither bumps `latestSeen` nor supersedes a render; it just reads the
+    // current cache and replies. The client only issues one when the cache is
+    // stable (not mid-render, no active Preview), so the buffer it reads is whole.
+    ctx.postMessage(handleProbe(state, msg))
+    return
+  }
+
   // Record the newest epoch across ALL message kinds first, so an in-flight
   // banded render can detect supersession even by a bare `cancel`.
   if (msg.epoch > latestSeen) {
