@@ -42,6 +42,7 @@ import {
   parse,
   serialize,
   type ViewState,
+  zoomDepth,
 } from './view-state.js'
 import { createViewportStore } from './viewport-store.js'
 import { fieldEnum, kindEnum, modeEnum, PALETTE_ACCENT, paletteEnum } from './wasm-enums.js'
@@ -149,6 +150,14 @@ const coordCell = (axis: 're' | 'im' | 'zoom'): HTMLElement => {
   return el
 }
 const coordCells = { re: coordCell('re'), im: coordCell('im'), zoom: coordCell('zoom') }
+
+// Depth meter (#98): the bar track carries --fill / the .depth--near cue, the
+// adjacent cell carries the "N.N / 13" label. Both written by renderCoords.
+const depthTrack = document.querySelector('.coord--depth .depth')
+const depthNum = document.querySelector('.depth__num[data-coord="depth"]')
+if (!(depthTrack instanceof HTMLElement) || !(depthNum instanceof HTMLElement)) {
+  throw new Error('depth meter elements not found in index.html')
+}
 
 // Collapsible drawer (Slice 4): the controls panel is closed by default and
 // the ☰ button toggles it. Fixed-positioned (index.html), so this is purely
@@ -367,8 +376,14 @@ const renderCoords = (state: ViewState): void => {
   coordCells.re.textContent = formatAxis(state.re)
   coordCells.im.textContent = formatAxis(state.im)
   coordCells.zoom.textContent = formatZoom(state.zoom)
-  // The off-screen mirror announces all three axes as a single utterance.
-  coordsReadout.textContent = formatCoords(state.re, state.im, state.zoom)
+  // Depth meter: project the zoom onto the f64 precision budget (ADR-0006).
+  const depth = zoomDepth(state.zoom)
+  depthTrack.style.setProperty('--fill', String(depth.fraction))
+  depthTrack.classList.toggle('depth--near', depth.nearCeiling)
+  depthNum.textContent = depth.label
+  // The off-screen mirror announces all axes (incl. depth) as a single utterance
+  // — reuse the depth we just computed rather than recomputing it inside.
+  coordsReadout.textContent = formatCoords(state.re, state.im, state.zoom, depth)
 }
 
 // Update the readout synchronously (cheap, and the user wants instant feedback)

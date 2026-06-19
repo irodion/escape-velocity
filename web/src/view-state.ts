@@ -196,12 +196,59 @@ export function formatZoom(zoom: number): string {
 }
 
 /**
- * Compose the three axes into a single line, e.g. `re −0.74350 · im +0.13140 ·
- * zoom 2.0e2`. The visible readout now renders each axis in its own cell (see
- * `index.html`'s `.coords` block); this single string feeds the off-screen
- * `aria-live` region so a screen reader announces the settled view as one
- * utterance rather than three.
+ * log10(MAX_ZOOM) — the f64 zoom budget in decades. ADR-0006 pins the project
+ * to a ~10¹³ ceiling (`MAX_ZOOM = 1e13` in `crates/fractal-core/src/viewport.rs`,
+ * the source of truth); this mirrors it for the depth meter.
  */
-export function formatCoords(re: number, im: number, zoom: number): string {
-  return `re ${formatAxis(re)} · im ${formatAxis(im)} · zoom ${formatZoom(zoom)}`
+export const ZOOM_CEILING_DECADES = 13
+
+/**
+ * Fraction of the budget past which the depth meter warns that precision is
+ * running out — the last ~15% before the f64 wall (zoom ≳ 1.1e11).
+ */
+const ZOOM_NEAR_CEILING = 0.85
+
+export interface ZoomDepth {
+  /** Bar fill, `0..1`: `clamp(log10(zoom), 0, ZOOM_CEILING_DECADES)` normalised. */
+  fraction: number
+  /** `fraction > ZOOM_NEAR_CEILING` — drives the near-ceiling colour cue. */
+  nearCeiling: boolean
+  /** Compact decades readout, e.g. `5.3 / 13`. */
+  label: string
+}
+
+/**
+ * Map a linear magnification onto the f64 precision budget for the depth meter
+ * (issue #98). Pure log-scale projection: the whole bar spans 10⁰ → 10¹³, so a
+ * sub-unit default view reads empty and the 1e13 ceiling reads full. Decades
+ * are clamped to `[0, 13]` — below 1× there is no "depth" to show.
+ */
+export function zoomDepth(zoom: number): ZoomDepth {
+  const decades = Math.min(Math.max(Math.log10(zoom), 0), ZOOM_CEILING_DECADES)
+  const fraction = decades / ZOOM_CEILING_DECADES
+  return {
+    fraction,
+    nearCeiling: fraction > ZOOM_NEAR_CEILING,
+    label: `${decades.toFixed(1)} / ${ZOOM_CEILING_DECADES}`,
+  }
+}
+
+/**
+ * Compose the view into a single line, e.g. `re −0.74350 · im +0.13140 · zoom
+ * 2.0e2 · depth 5.3 / 13`. The visible readout now renders each axis in its own
+ * cell (see `index.html`'s `.coords` block); this single string feeds the
+ * off-screen `aria-live` region so a screen reader announces the settled view —
+ * including how deep into the precision budget it sits — as one utterance.
+ *
+ * `depth` defaults to `zoomDepth(zoom)` so the function stays self-contained,
+ * but a caller that already computed it (e.g. `renderCoords`) passes it in to
+ * avoid recomputing the log projection.
+ */
+export function formatCoords(
+  re: number,
+  im: number,
+  zoom: number,
+  depth: ZoomDepth = zoomDepth(zoom),
+): string {
+  return `re ${formatAxis(re)} · im ${formatAxis(im)} · zoom ${formatZoom(zoom)} · depth ${depth.label}`
 }
