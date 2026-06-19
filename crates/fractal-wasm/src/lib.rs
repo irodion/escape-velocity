@@ -464,7 +464,7 @@ pub fn compute_band(
 #[wasm_bindgen]
 #[allow(
     clippy::not_unsafe_ptr_arg_deref,
-    reason = "wasm-bindgen exports cannot be marked `unsafe` while remaining callable from JS; the JS-side caller upholds the (ptr, len) pairing invariant described in this function's doc comment. The render-layer cache in `web/src/render.ts` encodes that invariant explicitly."
+    reason = "wasm-bindgen exports cannot be marked `unsafe` while remaining callable from JS; the JS-side caller upholds the (ptr, len) pairing invariant described in this function's doc comment. The render worker's iteration-buffer cache encodes that invariant explicitly."
 )]
 pub fn colorize(
     iter_ptr: *const f32,
@@ -532,7 +532,7 @@ pub struct ProbeResult {
 #[wasm_bindgen]
 #[allow(
     clippy::not_unsafe_ptr_arg_deref,
-    reason = "wasm-bindgen exports cannot be marked `unsafe` while remaining callable from JS; the caller upholds the (iter_ptr, len) pairing invariant exactly as `colorize` documents — the JS render-layer cache enforces it."
+    reason = "wasm-bindgen exports cannot be marked `unsafe` while remaining callable from JS; the caller upholds the (iter_ptr, len) pairing invariant exactly as `colorize` documents — the render worker's iteration-buffer cache enforces it."
 )]
 pub fn probe_pixel(
     iter_ptr: *const f32,

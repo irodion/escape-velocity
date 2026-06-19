@@ -6,8 +6,9 @@
  * Everything here takes primitives rather than the opaque wasm `Viewport`
  * class, so the whole module is unit-testable without booting wasm. The
  * constants and the projection formula are a deliberate mirror of the Rust
- * source of truth (`crates/fractal-core/src/viewport.rs` and
- * `escape_time.rs`) — iterating one point is microseconds, so E1 stays
+ * source of truth (`crates/fractal-core/src/viewport.rs`, `lib.rs`'s
+ * `BAILOUT_SQR`, and `escape_time.rs`'s iteration) — iterating one point is
+ * microseconds, so E1 stays
  * entirely on the TS side with no wasm/protocol change (per the issue).
  */
 
@@ -26,7 +27,8 @@ export const BASE_RE_SPAN = 3.5
 
 /**
  * Escape threshold on `|z|²`. The renderer bails at `|z| > 256`, i.e.
- * `|z|² > 65_536`. Mirror of `BAILOUT_SQR` in `escape_time.rs`. We trace the
+ * `|z|² > 65_536`. Mirror of `BAILOUT_SQR` in `crates/fractal-core/src/lib.rs`.
+ * We trace the
  * orbit against the same threshold so the polyline escapes exactly when the
  * pixel under it is coloured "outside the set".
  */

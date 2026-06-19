@@ -32,18 +32,8 @@
 //! immediately) and is unreachable for Mandelbrot mode (where `z_0`
 //! is always the origin).
 
+use crate::BAILOUT_SQR;
 use crate::complex::Complex64;
-
-/// Bailout threshold: `|z|² > 65_536` ⇔ `|z| > 256`.
-///
-/// Slice 1 used `4.0` (`|z| > 2`), the textbook minimum that proves
-/// escape. Slice 4 raises it because the smooth-iteration formula's
-/// accuracy improves with bailout radius: at `|z|` close to the
-/// minimum, the kink between the discrete index `i` and the smooth
-/// correction is visible as banding; at `|z| > 256` it shrinks below
-/// the perceptible level. `256² + epsilon` squared is `≈ 4.3·10⁹`,
-/// well inside `f64` range, so the larger bailout costs no precision.
-const BAILOUT_SQR: f64 = 65_536.0;
 
 pub fn escape_time(z0: Complex64, c: Complex64, max_iter: u32) -> f32 {
     let mut z = z0;
