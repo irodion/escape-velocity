@@ -1,4 +1,38 @@
 import { defaultModeForField, isModeValidForField } from './field-modes.js'
+import {
+  type FieldName,
+  type FractalMode,
+  MAX_ITER_STOPS,
+  type NormalisationName,
+  type PaletteName,
+  type Settings,
+} from './settings.js'
+
+/**
+ * Snap an arbitrary iteration count to the nearest `MAX_ITER_STOPS` member.
+ *
+ * The `Controls` constructor *throws* on a `maxIter` that isn't exactly a stop
+ * (the slider is index-addressed). That fail-fast is right for an in-code
+ * programmer constant, but fatal for *external* input — a persisted or shared
+ * URL (O1, #91) can carry a stale `1000` from before the slider existed, or a
+ * value from a future stop table. Hydration runs the foreign number through
+ * here first so the form always boots on a real stop instead of killing every
+ * control. Lives beside the table it depends on so the two can't drift.
+ */
+export function nearestMaxIterStop(value: number): number {
+  return MAX_ITER_STOPS.reduce((best, stop) =>
+    Math.abs(stop - value) < Math.abs(best - value) ? stop : best,
+  )
+}
+
+/**
+ * Derive the settings for picking a Julia constant (the c-picker, O2 #92):
+ * switch to Julia mode with `c = (cRe, cIm)`, preserving every other setting.
+ * Pure, so the click handler that wires it stays trivially testable.
+ */
+export function pickJuliaSettings(current: Settings, cRe: number, cIm: number): Settings {
+  return { ...current, mode: 'julia', cRe, cIm }
+}
 
 /**
  * Wires the controls form's `<select>`s and `<input type="number">`s
@@ -47,108 +81,6 @@ import { defaultModeForField, isModeValidForField } from './field-modes.js'
  * the Field's default before the snapshot is emitted. Same shape as the
  * mode → c-inputs coupling already in this class.
  */
-export type PaletteName =
-  | 'grayscale'
-  | 'viridis'
-  | 'magma'
-  | 'inferno'
-  | 'plasma'
-  | 'turbo'
-  | 'cubehelix'
-  | 'twilight'
-  | 'earth-and-sky'
-  | 'rainbow'
-  | 'kahol-lavan'
-  | 'ocean'
-  | 'solar'
-  | 'spectral'
-  | 'cosmic'
-export type NormalisationName =
-  | 'cycled'
-  | 'histogram'
-  | 'linear'
-  | 'sqrt'
-  | 'logarithmic'
-  | 'clamped'
-export type FractalMode = 'mandelbrot' | 'julia'
-/**
- * The Field axis (ADR-0013): the per-pixel scalar `compute` emits. Only
- * `escape-time` is selectable in this slice; `distance-estimate` is
- * reserved in the union and ships as a disabled `<option>` until its
- * kernel lands (#61). `main.ts` maps these tag strings to the
- * wasm-bindgen `Field` discriminants at the WASM seam.
- */
-export type FieldName = 'escape-time' | 'distance-estimate'
-
-/**
- * Iteration-count stops for the log slider, low → high.
- *
- * The old `<select>` sampled only the octave boundaries (64, 128, 256, …
- * 8192), so the smallest step *doubled* the iteration count — too coarse.
- * This is a quarter-octave geometric grid instead: each octave `2^k` is
- * subdivided into `2^k × {1, 1.25, 1.5, 1.75}` (so 64, 80, 96, 112, then
- * 128, 160, …), capped by the 8192 endpoint. ~29 clean integer stops give
- * fine control, and because the spacing is geometric every step is the same
- * ~19–25% change — the slider feels uniform across its whole travel rather
- * than crawling at the low end and leaping at the high end.
- *
- * The slider's `value` is an INDEX into this array — a plain linear `0..N-1`
- * range — so equal pixel travel maps to equal ratio with no log maths in the
- * event handler. The table lives here, not in the markup, because it's a
- * computed sequence the constructor uses to drive the input's `min`/`max`/
- * `value` and to map an index back to its iteration count; keeping it in one
- * place is what stops the two from drifting.
- */
-export const MAX_ITER_STOPS: readonly number[] = [
-  64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280, 1536,
-  1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192,
-]
-
-/**
- * Snap an arbitrary iteration count to the nearest `MAX_ITER_STOPS` member.
- *
- * The `Controls` constructor *throws* on a `maxIter` that isn't exactly a stop
- * (the slider is index-addressed). That fail-fast is right for an in-code
- * programmer constant, but fatal for *external* input — a persisted or shared
- * URL (O1, #91) can carry a stale `1000` from before the slider existed, or a
- * value from a future stop table. Hydration runs the foreign number through
- * here first so the form always boots on a real stop instead of killing every
- * control. Lives beside the table it depends on so the two can't drift.
- */
-export function nearestMaxIterStop(value: number): number {
-  return MAX_ITER_STOPS.reduce((best, stop) =>
-    Math.abs(stop - value) < Math.abs(best - value) ? stop : best,
-  )
-}
-
-export interface Settings {
-  readonly maxIter: number
-  /**
-   * Render-buffer multiplier relative to the display size (a quality /
-   * sharpness knob, not a framing knob). `1` renders one buffer pixel
-   * per display pixel; `2` supersamples; `0.5` subsamples for speed.
-   */
-  readonly renderScale: number
-  readonly palette: PaletteName
-  readonly normalisation: NormalisationName
-  /** The Field axis (ADR-0013) — what scalar each pixel carries. */
-  readonly field: FieldName
-  readonly mode: FractalMode
-  readonly cRe: number
-  readonly cIm: number
-  /** Whether the orbit visualizer overlay is enabled (E1, #94). */
-  readonly orbit: boolean
-}
-
-/**
- * Derive the settings for picking a Julia constant (the c-picker, O2 #92):
- * switch to Julia mode with `c = (cRe, cIm)`, preserving every other setting.
- * Pure, so the click handler that wires it stays trivially testable.
- */
-export function pickJuliaSettings(current: Settings, cRe: number, cIm: number): Settings {
-  return { ...current, mode: 'julia', cRe, cIm }
-}
-
 export class Controls {
   private readonly maxIterRange: HTMLInputElement
   private readonly maxIterReadout: HTMLOutputElement

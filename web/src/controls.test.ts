@@ -1,14 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { Controls, pickJuliaSettings } from './controls.js'
 import {
-  Controls,
   type FieldName,
   type FractalMode,
   MAX_ITER_STOPS,
   type NormalisationName,
   type PaletteName,
-  pickJuliaSettings,
   type Settings,
-} from './controls.js'
+} from './settings.js'
 
 // Index of an iteration count within the slider's stop table — the value
 // the range input actually carries.

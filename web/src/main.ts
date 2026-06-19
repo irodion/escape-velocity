@@ -7,23 +7,8 @@ import '@fontsource/ibm-plex-mono/latin-400.css'
 import '@fontsource/ibm-plex-mono/latin-500.css'
 import '@fontsource-variable/martian-mono/wght.css'
 import { registerSW } from 'virtual:pwa-register'
-import init, {
-  Field,
-  FractalKind,
-  NormalizationMode,
-  Palette,
-  Viewport,
-} from '../wasm/fractal_wasm.js'
-import {
-  Controls,
-  type FieldName,
-  type FractalMode,
-  type NormalisationName,
-  nearestMaxIterStop,
-  type PaletteName,
-  pickJuliaSettings,
-  type Settings,
-} from './controls.js'
+import init, { Viewport } from '../wasm/fractal_wasm.js'
+import { Controls, nearestMaxIterStop, pickJuliaSettings } from './controls.js'
 import { mountDrawer } from './drawer.js'
 import { buildFilename, exportRenderedFrame } from './export-png.js'
 import { showFatal } from './fatal.js'
@@ -42,6 +27,14 @@ import {
   setFatalHandler,
   setProgressReporter,
 } from './render-client.js'
+import type {
+  FieldName,
+  FractalMode,
+  NormalisationName,
+  PaletteName,
+  Settings,
+} from './settings.js'
+import { classifyTransition, sanitizeSettings } from './settings-transition.js'
 import {
   formatAxis,
   formatCoords,
@@ -51,6 +44,7 @@ import {
   type ViewState,
 } from './view-state.js'
 import { createViewportStore } from './viewport-store.js'
+import { fieldEnum, kindEnum, modeEnum, PALETTE_ACCENT, paletteEnum } from './wasm-enums.js'
 import type { RenderRequest } from './worker/protocol.js'
 
 // PWA install + update lifecycle (Slice 8B). The controller (a deep, tested
@@ -106,16 +100,6 @@ const INITIAL_ORBIT = false
 const CENTER_RE = -0.7435
 const CENTER_IM = 0.1314
 const ZOOM = 200.0
-
-// Canonical "starting frame" for each fractal family, consulted ONLY
-// by the mode-switch branch of the dispatcher below. Mandelbrot's set
-// is centred near (−0.5, 0); Julia sets (for the c values we care
-// about) are roughly centred on the origin. Both use zoom=1.0 so the
-// initial view shows the whole structure, not a deep dive — the user
-// can pan/zoom from there. The boot-time viewport stays the Slice 1
-// seahorse zoom; these are emphatically NOT used at startup.
-const MANDELBROT_DEFAULT_VIEW = { re: -0.5, im: 0.0, zoom: 1.0 }
-const JULIA_DEFAULT_VIEW = { re: 0.0, im: 0.0, zoom: 1.0 }
 
 const canvas = document.getElementById('fractal')
 if (!(canvas instanceof HTMLCanvasElement)) {
@@ -298,97 +282,10 @@ let current: Settings = booted.settings
 
 // Tune the console's accent to the active palette so the controls read as an
 // instrument keyed to what it's rendering (the `--accent` CSS custom property
-// drives the toggle, focus rings, carets, and selected options in
-// index.html). A representative mid-to-high colour from each colourmap.
-const PALETTE_ACCENT: Record<PaletteName, string> = {
-  grayscale: '#c9c9d1',
-  viridis: '#5fd0c0',
-  magma: '#fe6a8c',
-  inferno: '#ff7a3c',
-  plasma: '#fb9f3a',
-  turbo: '#2ad4c1',
-  cubehelix: '#c2a3bd',
-  twilight: '#b78cff',
-  'earth-and-sky': '#ffaa00',
-  rainbow: '#ff6ec7',
-  'kahol-lavan': '#3a78d8',
-  ocean: '#41c7e8',
-  solar: '#ff8c42',
-  spectral: '#2ec5c5',
-  cosmic: '#c77dff',
-}
+// drives the toggle, focus rings, carets, and selected options in index.html).
+// The per-palette colour table lives in `wasm-enums.ts` beside the enum tables.
 const applyAccent = (palette: PaletteName): void => {
   document.documentElement.style.setProperty('--accent', PALETTE_ACCENT[palette])
-}
-
-const paletteEnum = (name: PaletteName): Palette => {
-  switch (name) {
-    case 'grayscale':
-      return Palette.Grayscale
-    case 'viridis':
-      return Palette.Viridis
-    case 'magma':
-      return Palette.Magma
-    case 'inferno':
-      return Palette.Inferno
-    case 'plasma':
-      return Palette.Plasma
-    case 'turbo':
-      return Palette.Turbo
-    case 'cubehelix':
-      return Palette.Cubehelix
-    case 'twilight':
-      return Palette.Twilight
-    case 'earth-and-sky':
-      return Palette.EarthAndSky
-    case 'rainbow':
-      return Palette.Rainbow
-    case 'kahol-lavan':
-      return Palette.KaholLavan
-    case 'ocean':
-      return Palette.Ocean
-    case 'solar':
-      return Palette.Solar
-    case 'spectral':
-      return Palette.Spectral
-    case 'cosmic':
-      return Palette.Cosmic
-  }
-}
-
-const modeEnum = (name: NormalisationName): NormalizationMode => {
-  switch (name) {
-    case 'cycled':
-      return NormalizationMode.Cycled
-    case 'histogram':
-      return NormalizationMode.Histogram
-    case 'linear':
-      return NormalizationMode.Linear
-    case 'sqrt':
-      return NormalizationMode.SquareRoot
-    case 'logarithmic':
-      return NormalizationMode.Logarithmic
-    case 'clamped':
-      return NormalizationMode.Clamped
-  }
-}
-
-const kindEnum = (name: FractalMode): FractalKind => {
-  switch (name) {
-    case 'mandelbrot':
-      return FractalKind.Mandelbrot
-    case 'julia':
-      return FractalKind.Julia
-  }
-}
-
-const fieldEnum = (name: FieldName): Field => {
-  switch (name) {
-    case 'escape-time':
-      return Field.EscapeTime
-    case 'distance-estimate':
-      return Field.DistanceEstimate
-  }
 }
 
 const rerender = (): void => {
@@ -640,131 +537,67 @@ resizeObserver.observe(canvas)
 // the module-level `ctx`-not-null narrowing inside it.
 let controls: Controls
 const applySettings = (rawNext: Settings): void => {
-  // Substitute the last-known-finite c values for any non-finite
-  // entries in the form snapshot. `<input type="number">` reports
-  // NaN for an empty / dash-only `value`, and the WASM `compute`
-  // seam validates `c_re`/`c_im` for `is_finite()` **unconditionally**
-  // — Mandelbrot ignores the c payload mathematically, but a NaN
-  // still trips the boundary check. Without this substitution, the
-  // sequence (Julia → clear c.re → toggle back to Mandelbrot) would
-  // store `cRe = NaN` into `current` and throw on the next render.
-  //
-  // The substitution preserves the invariant "`current.cRe`/`current.cIm`
-  // are always finite" — established at boot by the Controls
-  // construction-time NaN guard, and closed here by always pulling
-  // the fallback from `current`. In Julia mode the substitution
-  // turns a mid-edit empty input into a no-op commit (next's c
-  // equals current's after sanitisation, so branch 3's cChangedInJulia
-  // check is false and branch 5 runs). In Mandelbrot mode it lets
-  // mode toggles succeed regardless of whatever the user typed into
-  // the (then-disabled) c fields earlier.
-  //
-  // Where a fallback fires, back-write the substituted value into the
-  // DOM so the visible field matches the rendered parameter. Without
-  // this the input would stay blank while the renderer used the
-  // hidden previous c — e.g., the user clears c.re, then changes
-  // palette: branch 4 would recolour the cached Julia buffer (drawn
-  // with the previous c) while the c.re field shows nothing. The
-  // back-write keeps form and image strictly aligned. Setting
-  // `valueAsNumber` does not dispatch a `change`, so this is a
-  // one-way sync that never re-enters the dispatcher.
   // Keep the accent in step with the palette on every commit — cheap, and
-  // independent of which render branch below the change ends up taking.
+  // independent of which render branch the change ends up taking.
   applyAccent(rawNext.palette)
 
-  const cRe = Number.isFinite(rawNext.cRe) ? rawNext.cRe : current.cRe
-  const cIm = Number.isFinite(rawNext.cIm) ? rawNext.cIm : current.cIm
-  if (cRe !== rawNext.cRe || cIm !== rawNext.cIm) {
-    controls.setCValues(cRe, cIm)
+  // Sanitise any non-finite c values against the last-known-finite snapshot
+  // (the pure rule, and why it matters, live in `sanitizeSettings`). Where a
+  // substitution fired, back-write it into the DOM so the visible field matches
+  // the rendered parameter. Setting `valueAsNumber` does not dispatch a
+  // `change`, so this is a one-way sync that never re-enters the dispatcher.
+  const { next, cBackWrite } = sanitizeSettings(current, rawNext)
+  if (cBackWrite) {
+    controls.setCValues(next.cRe, next.cIm)
   }
-  const next: Settings = { ...rawNext, cRe, cIm }
 
-  // Feed the orbit overlay the live compute parameters *before* any branch
-  // below writes the store: branch 1's `mode-reset` set notifies synchronously,
-  // and the overlay must already have cleared its pin (mode change flips the
-  // seed's meaning) by the time its store subscription fires. This also
-  // enables/disables the overlay and updates the shown orbit for a c/maxIter
-  // change — none of which touch the fractal render path.
+  // Feed the orbit overlay the live compute parameters *before* the store is
+  // written below: a `reset-view` `set` notifies synchronously, and the overlay
+  // must already have cleared its pin (a mode change flips the seed's meaning)
+  // by the time its store subscription fires. This also enables/disables the
+  // overlay and updates the shown orbit for a c/maxIter change — none of which
+  // touch the fractal render path.
   orbitOverlay.sync({
     mode: next.mode,
-    cRe,
-    cIm,
+    cRe: next.cRe,
+    cIm: next.cIm,
     maxIter: next.maxIter,
     enabled: next.orbit,
   })
 
-  // Branch 1: fractal-family change. Reset the viewport to the
-  // canonical "starting frame" for the new family so the user lands
-  // on the whole structure instead of an arbitrary deep dive that
-  // happened to be loaded for the previous family. The viewport keeps
-  // the current logical (window) dimensions; render scale is applied
-  // later, at the render seam, so it is not part of the viewport here.
-  if (next.mode !== current.mode) {
-    const view = next.mode === 'mandelbrot' ? MANDELBROT_DEFAULT_VIEW : JULIA_DEFAULT_VIEW
-    const vp = store.get()
-    // Commit `current` before the `set`: the store notifies synchronously, so
-    // the rerender subscription fires inside `set` and must already see the new
-    // settings. The `set` (source `'mode-reset'`) also drives the rerender and
-    // the InputController's Preview teardown — the work the old explicit
-    // `inputController.setViewport` + `rerender` pair did.
-    current = next
-    store.set(new Viewport(view.re, view.im, view.zoom, vp.width(), vp.height()), 'mode-reset')
-    return
-  }
-
-  // Branch 2: render-scale change. A pure quality knob: the viewport
-  // (framing) is untouched, so neither the stored viewport nor the
-  // input controller's reference changes. `rerender` re-derives the
-  // buffer dimensions and the scale-compensated zoom from
-  // `current.renderScale`, and the canvas backing store is resized when
-  // the new frame paints (see `paint` in render-client).
-  if (next.renderScale !== current.renderScale) {
-    current = next
-    rerender()
-    return
-  }
-
-  // Branch 3: compute-class change — `maxIter`, or (in Julia mode
-  // only) a `c` change. The top-of-handler sanitise step already
-  // replaced any non-finite `c` with the previous finite value, so
-  // `next.cRe`/`next.cIm` reaching this branch are always finite and
-  // safe to send through the WASM seam.
-  const cChangedInJulia =
-    next.mode === 'julia' && (next.cRe !== current.cRe || next.cIm !== current.cIm)
-  if (next.maxIter !== current.maxIter || cChangedInJulia) {
-    current = next
-    rerender()
-    return
-  }
-
-  // Branch 3c: Field change — compute-class (ADR-0013). The Field is the
-  // per-pixel scalar `compute` emits, so switching it invalidates the
-  // iteration buffer exactly as `maxIter` / `c` do. It must route through
-  // `render` (a full recompute), never `recolorize`, because the cached
-  // buffer holds a different Field's values. (Distance Estimate is not yet
-  // selectable, so today this only fires Escape Time → Escape Time no-ops
-  // away above; the branch is here so the axis is wired the moment #61
-  // makes a second Field reachable.)
-  if (next.field !== current.field) {
-    current = next
-    rerender()
-    return
-  }
-
-  // Branch 4: visual-only change. The ADR-0002 payoff — same
-  // iteration buffer, new palette / normalisation, no recompute.
-  if (next.palette !== current.palette || next.normalisation !== current.normalisation) {
-    current = next
-    recolorize(ctx, paletteEnum(next.palette), modeEnum(next.normalisation))
-    return
-  }
-
-  // Branch 5: no-op. Reaches here when the user re-selected the same
-  // value, or when `cRe` / `cIm` changed but the form is in Mandelbrot
-  // mode (where those values are carried-but-ignored). Refreshing
-  // `current` keeps the snapshot in sync with the form so a later
-  // Julia switch sees the committed c values.
+  const transition = classifyTransition(current, next)
+  // Commit `current` before carrying out the transition: a `reset-view` store
+  // `set` notifies synchronously, so the rerender subscription fires inside
+  // `set` and must already see the new settings. For `noop` this is the whole
+  // job — it keeps the snapshot in step with the form (e.g. a c change in
+  // Mandelbrot mode, carried but ignored) so a later Julia switch sees it.
   current = next
+
+  switch (transition.action) {
+    case 'reset-view': {
+      // Reset the viewport to the new family's starting frame, keeping the
+      // current logical (window) dimensions; render scale is applied later, at
+      // the render seam. The `set` (source `'mode-reset'`) also drives the
+      // rerender and the InputController's Preview teardown.
+      const { view } = transition
+      const vp = store.get()
+      store.set(new Viewport(view.re, view.im, view.zoom, vp.width(), vp.height()), 'mode-reset')
+      break
+    }
+    case 'recompute':
+      // Render-scale / maxIter / Julia-c / Field change — the iteration buffer
+      // is invalid. `rerender` re-derives the buffer dimensions and the
+      // scale-compensated zoom and routes through `render`, never `recolorize`
+      // (ADR-0013); the canvas backing store is resized when the frame paints.
+      rerender()
+      break
+    case 'recolorize':
+      // The ADR-0002 payoff — same iteration buffer, new palette / normalisation.
+      recolorize(ctx, paletteEnum(next.palette), modeEnum(next.normalisation))
+      break
+    case 'noop':
+      break
+  }
 }
 
 controls = new Controls(controlsForm, current, (rawNext) => {
