@@ -477,8 +477,8 @@
          near-square knob that slides left→right; flipping on fills the track
          with the live --accent and flips the knob to the page ground so it
          reads on accent — the same accent-fill / ground-mark logic the readout
-         selects and the old tick used. The inputs stay real checkboxes (with
-         role="switch" for the a11y tree), so controls.ts binds them unchanged. */
+         selects and the old tick used. The inputs stay real checkboxes
+         (switch-styled by CSS only), so controls.ts binds them unchanged. */
       .toggles {
         display: flex;
         justify-content: space-between;
@@ -1018,16 +1018,17 @@
            Inspect (E2, #95): hover to read the pixel under the cursor — its
              coordinate, raw Field value, normalised t, and painted colour. A
              view-only tool, so unlike Orbit it is not persisted in the hash.
-           Both stay native checkboxes (role="switch" only adjusts the a11y
-           announcement) so controls.ts binds them by name unchanged. -->
+           Both stay native checkboxes — switch-styled by CSS only, so the
+           browser keeps the checked state in the a11y tree and controls.ts
+           binds them by name unchanged. -->
       <div class="toggles">
         <label class="toggle">
           <span class="toggle__name">Orbit</span>
-          <input type="checkbox" name="orbit" role="switch" />
+          <input type="checkbox" name="orbit" />
         </label>
         <label class="toggle">
           <span class="toggle__name">Inspect</span>
-          <input type="checkbox" name="inspect" role="switch" />
+          <input type="checkbox" name="inspect" />
         </label>
       </div>
       <!-- PNG export (O2, #92). Actions, not form state: wired directly in
