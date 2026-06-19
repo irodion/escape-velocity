@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { FieldName, NormalisationName } from './controls.js'
 import { defaultModeForField, isModeValidForField } from './field-modes.js'
+import type { FieldName, NormalisationName } from './settings.js'
 
 const FIELDS: FieldName[] = ['escape-time', 'distance-estimate']
 const MODES: NormalisationName[] = [

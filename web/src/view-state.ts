@@ -1,4 +1,4 @@
-import type { FieldName, FractalMode, NormalisationName, PaletteName } from './controls.js'
+import type { FieldName, FractalMode, NormalisationName, PaletteName } from './settings.js'
 
 /**
  * The shareable view tuple (O1, #91): everything that decides *what frame the

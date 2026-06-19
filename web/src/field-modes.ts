@@ -13,7 +13,7 @@
  * This module is that rule as a pure function — no DOM, so it is unit-
  * testable in isolation, and there is exactly one place the policy lives.
  */
-import type { FieldName, NormalisationName } from './controls.js'
+import type { FieldName, NormalisationName } from './settings.js'
 
 /**
  * Is `mode` a meaningful normalisation for `field`?

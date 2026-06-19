@@ -1,5 +1,5 @@
-import type { FractalMode } from './controls.js'
 import { cssToComplex, revealedCount, traceOrbit, type ViewGeometry } from './orbit-math.js'
+import type { FractalMode } from './settings.js'
 import type { ViewportStore } from './viewport-store.js'
 
 // The diagram is a compact, self-contained inset — its side is this fraction of
