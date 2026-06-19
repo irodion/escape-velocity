@@ -80,32 +80,7 @@ const NOOP_PROGRESS: ProgressReporter = {
  * pending slot and flushed the moment `ready` arrives.
  */
 
-// Vite rewrites this `new Worker(new URL(...))` form into a bundled
-// module-worker URL at build time, so the worker and its WASM ship as
-// their own chunk. `import.meta.url` anchors the relative path to this
-// module.
-const worker = new Worker(new URL('./worker/worker.ts', import.meta.url), { type: 'module' })
-
 type ClientRequest = RenderRequest | RecolorizeRequest
-
-let latestEpoch = 0
-let inFlight = false
-// The kind of the request currently on the worker, captured at dispatch.
-// `paint` reads it to decide whether the response may clear the Preview
-// transform: only a `render` carries fresh geometry that ends a scrub; a
-// `recolorize` re-tints the cached buffer without moving it (see `paint`).
-let inFlightKind: ClientRequest['kind'] | null = null
-let pending: ClientRequest | null = null
-let ready = false
-// Set once the worker is known to be unusable (it threw at the top level, or
-// never reached `ready`). A dead worker will never respond, so `issue` and
-// `flush` no-op rather than parking requests in a slot that can't drain.
-let dead = false
-// The canvas context to paint the next fresh response onto. Only the
-// latest-epoch response paints, and `targetCtx` always tracks the
-// latest request's context, so a single reference suffices (in practice
-// it is the one canvas for the page's lifetime).
-let targetCtx: CanvasRenderingContext2D | null = null
 
 // How long to wait for the worker's `ready` before declaring boot failed.
 // The worker bootstraps WASM + a rayon thread pool; on a cold cache that is
@@ -113,333 +88,400 @@ let targetCtx: CanvasRenderingContext2D | null = null
 // stuck boot (a stripped cross-origin-isolation header, a LinkError) rather
 // than hanging on a black screen forever.
 const BOOT_TIMEOUT_MS = 5000
-// Surfaced to the host (main.ts wires `showFatal`). Null until registered;
-// `reportFatal` no-ops without it, so the worker can boot before the handler
-// is set without losing a later, real failure.
-let onFatal: ((message: string) => void) | null = null
-let bootTimer: ReturnType<typeof setTimeout> | undefined
-// Progress sink for the in-flight render (P2). No-op until the host registers
-// one; recolorizes never drive it. See `ProgressReporter`.
-let progress: ProgressReporter = NOOP_PROGRESS
 
-worker.onmessage = (
-  event: MessageEvent<RenderResponse | Ready | RenderError | ProgressResponse | Aborted>,
-): void => {
-  const msg = event.data
-  if (msg.kind === 'ready') {
-    ready = true
-    // Boot succeeded — the watchdog (if armed) must not later declare a
-    // false failure.
+/**
+ * Construction-time collaborators for the render client. Injected here (rather
+ * than reached for via setters after the fact) so the client owns its worker
+ * and surfaces from birth — `pwa-lifecycle.ts` follows the same ports-and-
+ * adapters shape. Tests pass a fake `workerFactory` and, where relevant, fakes
+ * for the two optional surfaces; no global patching or module resets.
+ */
+export interface RenderClientDeps {
+  /**
+   * Builds the Web Worker the client drives. In production this is a thunk
+   * around `new Worker(new URL('./worker/worker.ts', import.meta.url), { type:
+   * 'module' })` — that expression must stay syntactically intact at the call
+   * site (it lives in `main.ts`) for Vite's static worker-bundling analysis,
+   * which is why the *factory*, not a ready-made worker, is injected.
+   */
+  readonly workerFactory: () => Worker
+  /**
+   * Unrecoverable-boot-failure surface (`main.ts` wires `showFatal`). When
+   * provided, the boot watchdog is armed at construction; when omitted,
+   * `reportFatal` only logs and no watchdog runs (so a test that doesn't care
+   * leaves no stray timer).
+   */
+  readonly onFatal?: (message: string) => void
+  /**
+   * Determinate-progress sink for the in-flight render (P2). Defaults to a
+   * no-op; recolorizes never drive it. See `ProgressReporter`.
+   */
+  readonly progress?: ProgressReporter
+}
+
+/**
+ * The fire-and-forget surface `main.ts` dispatches against. All pipeline state
+ * (epoch counter, in-flight/pending slots, boot status) lives in the closure,
+ * so each client owns exactly one worker — constructing a second instance is
+ * the seam a future side-by-side view would use.
+ */
+export interface RenderClient {
+  readonly render: (
+    viewport: { centerRe: number; centerIm: number; zoom: number; width: number; height: number },
+    ctx: CanvasRenderingContext2D,
+    maxIter: number,
+    palette: Palette,
+    mode: NormalizationMode,
+    kind: FractalKind,
+    cRe: number,
+    cIm: number,
+    field: Field,
+  ) => void
+  readonly recolorize: (
+    ctx: CanvasRenderingContext2D,
+    palette: Palette,
+    mode: NormalizationMode,
+  ) => void
+  readonly discardInFlight: () => void
+}
+
+export function createRenderClient(deps: RenderClientDeps): RenderClient {
+  const worker = deps.workerFactory()
+
+  let latestEpoch = 0
+  let inFlight = false
+  // The kind of the request currently on the worker, captured at dispatch.
+  // `paint` reads it to decide whether the response may clear the Preview
+  // transform: only a `render` carries fresh geometry that ends a scrub; a
+  // `recolorize` re-tints the cached buffer without moving it (see `paint`).
+  let inFlightKind: ClientRequest['kind'] | null = null
+  let pending: ClientRequest | null = null
+  let ready = false
+  // Set once the worker is known to be unusable (it threw at the top level, or
+  // never reached `ready`). A dead worker will never respond, so `issue` and
+  // `flush` no-op rather than parking requests in a slot that can't drain.
+  let dead = false
+  // The canvas context to paint the next fresh response onto. Only the
+  // latest-epoch response paints, and `targetCtx` always tracks the
+  // latest request's context, so a single reference suffices (in practice
+  // it is the one canvas for this client's lifetime).
+  let targetCtx: CanvasRenderingContext2D | null = null
+
+  // Surfaced to the host (main.ts wires `showFatal`). Null when not injected;
+  // `reportFatal` no-ops without it.
+  const onFatal: ((message: string) => void) | null = deps.onFatal ?? null
+  let bootTimer: ReturnType<typeof setTimeout> | undefined
+  // Progress sink for the in-flight render (P2). No-op when not injected;
+  // recolorizes never drive it. See `ProgressReporter`.
+  const progress: ProgressReporter = deps.progress ?? NOOP_PROGRESS
+
+  worker.onmessage = (
+    event: MessageEvent<RenderResponse | Ready | RenderError | ProgressResponse | Aborted>,
+  ): void => {
+    const msg = event.data
+    if (msg.kind === 'ready') {
+      ready = true
+      // Boot succeeded — the watchdog (if armed) must not later declare a
+      // false failure.
+      if (bootTimer !== undefined) {
+        clearTimeout(bootTimer)
+        bootTimer = undefined
+      }
+      flush()
+      return
+    }
+
+    if (msg.kind === 'progress') {
+      // A non-terminal heartbeat from a banded render (P2): it does NOT free
+      // the slot. Drive the indicator only for the frame the user is still
+      // waiting on — a heartbeat for an already-superseded render is ignored,
+      // so a doomed frame never moves the bar.
+      if (msg.epoch === latestEpoch) {
+        progress.report(msg.rowsTotal > 0 ? msg.rowsDone / msg.rowsTotal : 0)
+      }
+      return
+    }
+
+    // Ignore a terminal message with nothing outstanding — there is no request
+    // it could belong to (e.g. a stray message before `ready`). Without this
+    // guard a spurious response could paint a frame that was never dispatched.
+    if (!inFlight) {
+      return
+    }
+    // A response, error, or abort is terminal for the in-flight request: it
+    // frees the worker for the next one and ends any progress indicator.
+    inFlight = false
+    progress.end()
+    if (msg.kind === 'aborted') {
+      // The worker abandoned this render because a newer one superseded it
+      // (P2). There is no frame to paint — just dispatch whatever overtook it.
+      flush()
+      return
+    }
+    if (msg.kind === 'error') {
+      // A render/recolorize threw inside the worker (a boundary-validation
+      // JsError, or the recolorize-before-render guard). The worker stays
+      // alive and idle, so this is recoverable: free the slot, log, and
+      // dispatch whatever queued — a single dropped frame, not a permanent
+      // freeze. The canvas keeps its last good frame.
+      console.error(`render worker error (epoch ${msg.epoch}): ${msg.message}`)
+      flush()
+      return
+    }
+    // Paint it only if it is still the frame the user wants; then dispatch
+    // whatever queued up while it ran.
+    if (msg.epoch === latestEpoch && targetCtx !== null) {
+      paint(targetCtx, msg, inFlightKind)
+    }
+    flush()
+  }
+
+  // A top-level throw in the worker (boot failure: WASM instantiation, or the
+  // cross-origin-isolation gate in worker.ts) fires here, not `onmessage`. No
+  // response will ever come, so mark the client dead and surface a fatal
+  // panel. `preventDefault` suppresses the browser's default console spam,
+  // which `reportFatal` (via console.error) already covers more legibly.
+  worker.onerror = (event: ErrorEvent): void => {
+    event.preventDefault()
+    dead = true
+    reportFatal(
+      event.message ||
+        'The render worker failed to start. The page may not be cross-origin ' +
+          'isolated, which the multithreaded renderer requires (SharedArrayBuffer).',
+    )
+  }
+
+  /**
+   * Report an unrecoverable boot failure exactly once: mark the worker dead,
+   * cancel the watchdog, log, and hand a human message to the host surface (if
+   * injected). Idempotent so a worker.onerror and the watchdog can both fire
+   * without double-reporting.
+   */
+  function reportFatal(message: string): void {
     if (bootTimer !== undefined) {
       clearTimeout(bootTimer)
       bootTimer = undefined
     }
-    flush()
-    return
+    dead = true
+    console.error(`render worker fatal: ${message}`)
+    onFatal?.(message)
   }
 
-  if (msg.kind === 'progress') {
-    // A non-terminal heartbeat from a banded render (P2): it does NOT free
-    // the slot. Drive the indicator only for the frame the user is still
-    // waiting on — a heartbeat for an already-superseded render is ignored,
-    // so a doomed frame never moves the bar.
-    if (msg.epoch === latestEpoch) {
-      progress.report(msg.rowsTotal > 0 ? msg.rowsDone / msg.rowsTotal : 0)
-    }
-    return
-  }
-
-  // Ignore a terminal message with nothing outstanding — there is no request
-  // it could belong to (e.g. a stray message before `ready`). Without this
-  // guard a spurious response could paint a frame that was never dispatched.
-  if (!inFlight) {
-    return
-  }
-  // A response, error, or abort is terminal for the in-flight request: it
-  // frees the worker for the next one and ends any progress indicator.
-  inFlight = false
-  progress.end()
-  if (msg.kind === 'aborted') {
-    // The worker abandoned this render because a newer one superseded it
-    // (P2). There is no frame to paint — just dispatch whatever overtook it.
-    flush()
-    return
-  }
-  if (msg.kind === 'error') {
-    // A render/recolorize threw inside the worker (a boundary-validation
-    // JsError, or the recolorize-before-render guard). The worker stays
-    // alive and idle, so this is recoverable: free the slot, log, and
-    // dispatch whatever queued — a single dropped frame, not a permanent
-    // freeze. The canvas keeps its last good frame.
-    console.error(`render worker error (epoch ${msg.epoch}): ${msg.message}`)
-    flush()
-    return
-  }
-  // Paint it only if it is still the frame the user wants; then dispatch
-  // whatever queued up while it ran.
-  if (msg.epoch === latestEpoch && targetCtx !== null) {
-    paint(targetCtx, msg, inFlightKind)
-  }
-  flush()
-}
-
-// A top-level throw in the worker (boot failure: WASM instantiation, or the
-// cross-origin-isolation gate in worker.ts) fires here, not `onmessage`. No
-// response will ever come, so mark the client dead and surface a fatal
-// panel. `preventDefault` suppresses the browser's default console spam,
-// which `reportFatal` (via console.error) already covers more legibly.
-worker.onerror = (event: ErrorEvent): void => {
-  event.preventDefault()
-  dead = true
-  reportFatal(
-    event.message ||
-      'The render worker failed to start. The page may not be cross-origin ' +
-        'isolated, which the multithreaded renderer requires (SharedArrayBuffer).',
-  )
-}
-
-/**
- * Report an unrecoverable boot failure exactly once: mark the worker dead,
- * cancel the watchdog, log, and hand a human message to the host surface (if
- * registered). Idempotent so a worker.onerror and the watchdog can both fire
- * without double-reporting.
- */
-function reportFatal(message: string): void {
-  if (bootTimer !== undefined) {
-    clearTimeout(bootTimer)
-    bootTimer = undefined
-  }
-  dead = true
-  console.error(`render worker fatal: ${message}`)
-  onFatal?.(message)
-}
-
-/**
- * Register the host's fatal-error surface and arm the boot watchdog. Arming
- * here (rather than at module load) means a test that never registers a
- * handler leaves no stray timer running. If `ready` already arrived, the
- * watchdog is pointless and skipped.
- */
-export function setFatalHandler(handler: (message: string) => void): void {
-  onFatal = handler
-  if (ready || dead || bootTimer !== undefined) {
-    return
-  }
-  bootTimer = setTimeout(() => {
-    bootTimer = undefined
-    if (ready) {
+  /**
+   * Dispatch the pending request if the worker is ready and idle. A no-op
+   * when still booting, busy, or nothing is queued — the response handler
+   * and the `ready` handler both call it, so a queued request is never
+   * stranded.
+   */
+  function flush(): void {
+    if (dead || !ready || inFlight || pending === null) {
       return
     }
-    reportFatal(
-      `The renderer did not start within ${BOOT_TIMEOUT_MS / 1000}s. The page ` +
-        'may not be cross-origin isolated, which the multithreaded renderer ' +
-        'requires (SharedArrayBuffer).',
-    )
-  }, BOOT_TIMEOUT_MS)
-}
+    inFlight = true
+    const req = pending
+    pending = null
+    inFlightKind = req.kind
+    // Arm the progress indicator at the true dispatch time so its debounce
+    // measures from when the worker actually starts (P2). Only a render does
+    // per-band work; a recolorize is the fast path and never reports.
+    if (req.kind === 'render') {
+      progress.begin()
+    }
+    worker.postMessage(req)
+  }
 
-/**
- * Dispatch the pending request if the worker is ready and idle. A no-op
- * when still booting, busy, or nothing is queued — the response handler
- * and the `ready` handler both call it, so a queued request is never
- * stranded.
- */
-function flush(): void {
-  if (dead || !ready || inFlight || pending === null) {
-    return
+  /**
+   * Tell the worker that a render now on it is superseded, so it abandons its
+   * remaining bands instead of grinding the doomed frame to completion (P2,
+   * #78). Sent only when something is actually in flight — otherwise the new
+   * request just dispatches immediately and there is nothing to cancel. The
+   * worker tracks the max epoch it has seen, so the bare epoch is all it needs.
+   */
+  function postCancel(): void {
+    if (dead || !inFlight) {
+      return
+    }
+    const cancel: CancelRequest = { kind: 'cancel', epoch: latestEpoch }
+    worker.postMessage(cancel)
   }
-  inFlight = true
-  const req = pending
-  pending = null
-  inFlightKind = req.kind
-  // Arm the progress indicator at the true dispatch time so its debounce
-  // measures from when the worker actually starts (P2). Only a render does
-  // per-band work; a recolorize is the fast path and never reports.
-  if (req.kind === 'render') {
-    progress.begin()
-  }
-  worker.postMessage(req)
-}
 
-/**
- * Tell the worker that a render now on it is superseded, so it abandons its
- * remaining bands instead of grinding the doomed frame to completion (P2,
- * #78). Sent only when something is actually in flight — otherwise the new
- * request just dispatches immediately and there is nothing to cancel. The
- * worker tracks the max epoch it has seen, so the bare epoch is all it needs.
- */
-function postCancel(): void {
-  if (dead || !inFlight) {
-    return
+  /**
+   * Stamp a request with the next epoch, record its target context, place
+   * it in the single pending slot, then try to flush.
+   *
+   * Coalescing rule (see the module doc): a recolorize folds its colours
+   * into a pending render rather than replacing it, so the queued compute
+   * is never lost. Every other case is newest-wins.
+   */
+  function issue(req: ClientRequest, ctx: CanvasRenderingContext2D): void {
+    latestEpoch += 1
+    targetCtx = ctx
+    if (req.kind === 'recolorize' && pending !== null && pending.kind === 'render') {
+      // Keep the queued render's compute (its newer viewport); swap only
+      // the colours it will be painted with. Bump the epoch onto the
+      // merged render so its eventual response is recognised as the latest
+      // frame and paints.
+      pending = { ...pending, palette: req.palette, mode: req.mode, epoch: latestEpoch }
+    } else {
+      pending = { ...req, epoch: latestEpoch }
+    }
+    // Cancel the in-flight render only when a newer *render* makes it obsolete —
+    // then the queued frame starts sooner instead of after the doomed one
+    // finishes (P2). A queued recolorize is the opposite: it re-tints whatever
+    // the in-flight render is computing, so it must let that render finish. (It
+    // also must not abort it: an aborted render leaves a partial iteration buffer
+    // that the recolorize would then read.) Once the render completes, the
+    // recolorize dispatches against its whole, fresh buffer.
+    if (pending?.kind === 'render') {
+      postCancel()
+    }
+    flush()
   }
-  const cancel: CancelRequest = { kind: 'cancel', epoch: latestEpoch }
-  worker.postMessage(cancel)
-}
 
-/**
- * Stamp a request with the next epoch, record its target context, place
- * it in the single pending slot, then try to flush.
- *
- * Coalescing rule (see the module doc): a recolorize folds its colours
- * into a pending render rather than replacing it, so the queued compute
- * is never lost. Every other case is newest-wins.
- */
-function issue(req: ClientRequest, ctx: CanvasRenderingContext2D): void {
-  latestEpoch += 1
-  targetCtx = ctx
-  if (req.kind === 'recolorize' && pending !== null && pending.kind === 'render') {
-    // Keep the queued render's compute (its newer viewport); swap only
-    // the colours it will be painted with. Bump the epoch onto the
-    // merged render so its eventual response is recognised as the latest
-    // frame and paints.
-    pending = { ...pending, palette: req.palette, mode: req.mode, epoch: latestEpoch }
-  } else {
-    pending = { ...req, epoch: latestEpoch }
-  }
-  // Cancel the in-flight render only when a newer *render* makes it obsolete —
-  // then the queued frame starts sooner instead of after the doomed one
-  // finishes (P2). A queued recolorize is the opposite: it re-tints whatever
-  // the in-flight render is computing, so it must let that render finish. (It
-  // also must not abort it: an aborted render leaves a partial iteration buffer
-  // that the recolorize would then read.) Once the render completes, the
-  // recolorize dispatches against its whole, fresh buffer.
-  if (pending?.kind === 'render') {
+  /**
+   * Discard any in-flight *or queued* render so it neither paints nor wastes
+   * worker time. Bumping the epoch past everything outstanding makes the next
+   * worker response fail the `epoch === latestEpoch` check in `onmessage`, so
+   * an in-flight render is dropped on arrival; clearing the pending slot stops
+   * a queued render from ever dispatching (it could otherwise run to
+   * completion on the worker, delaying the frame that will actually paint).
+   * The canvas keeps whatever it currently shows.
+   *
+   * The input controller calls this while a wheel-zoom Preview is active
+   * (ADR-0012): a render committed by a premature Settle must not paint
+   * mid-scrub and clear the Preview transform out from under the gesture. The
+   * next real `issue()` (the final Settle, or a pan's commit) bumps the epoch
+   * again and paints normally, so this only suppresses the stale frame.
+   */
+  function discardInFlight(): void {
+    latestEpoch += 1
+    pending = null
+    // Also stop the in-flight render's *work*, not just its paint: bumping the
+    // epoch already guarantees its response won't paint, and this makes the
+    // worker abandon the remaining bands so it is free for the next real issue
+    // (the Settle render, or a pan commit) immediately (P2).
     postCancel()
   }
-  flush()
-}
 
-/**
- * Discard any in-flight *or queued* render so it neither paints nor wastes
- * worker time. Bumping the epoch past everything outstanding makes the next
- * worker response fail the `epoch === latestEpoch` check in `onmessage`, so
- * an in-flight render is dropped on arrival; clearing the pending slot stops
- * a queued render from ever dispatching (it could otherwise run to
- * completion on the worker, delaying the frame that will actually paint).
- * The canvas keeps whatever it currently shows.
- *
- * The input controller calls this while a wheel-zoom Preview is active
- * (ADR-0012): a render committed by a premature Settle must not paint
- * mid-scrub and clear the Preview transform out from under the gesture. The
- * next real `issue()` (the final Settle, or a pan's commit) bumps the epoch
- * again and paints normally, so this only suppresses the stale frame.
- */
-export function discardInFlight(): void {
-  latestEpoch += 1
-  pending = null
-  // Also stop the in-flight render's *work*, not just its paint: bumping the
-  // epoch already guarantees its response won't paint, and this makes the
-  // worker abandon the remaining bands so it is free for the next real issue
-  // (the Settle render, or a pan commit) immediately (P2).
-  postCancel()
-}
-
-/**
- * Register the determinate-progress sink (see `ProgressReporter`). Set by the
- * host (`main.ts`) to a `progress.ts`-backed reporter; absent it, render
- * progress is silently ignored.
- */
-export function setProgressReporter(reporter: ProgressReporter): void {
-  progress = reporter
-}
-
-function paint(
-  ctx: CanvasRenderingContext2D,
-  response: RenderResponse,
-  requestKind: ClientRequest['kind'] | null,
-): void {
-  // Size the canvas backing store to the frame being painted, here at
-  // paint time rather than at dispatch. The buffer dimensions can change
-  // between requests (a window resize or a render-scale change), and
-  // resizing a canvas clears it — doing that at dispatch would blank the
-  // canvas for the whole duration of the compute. Deferring to paint
-  // keeps the previous frame on screen (CSS-stretched to the new display
-  // size as a live preview) until the fresh, correctly-sized frame is
-  // ready to replace it in one step. The guard avoids a needless clear
-  // when the dimensions are unchanged (the common pan/zoom case).
-  const canvas = ctx.canvas
-  if (canvas.width !== response.width) {
-    canvas.width = response.width
+  function paint(
+    ctx: CanvasRenderingContext2D,
+    response: RenderResponse,
+    requestKind: ClientRequest['kind'] | null,
+  ): void {
+    // Size the canvas backing store to the frame being painted, here at
+    // paint time rather than at dispatch. The buffer dimensions can change
+    // between requests (a window resize or a render-scale change), and
+    // resizing a canvas clears it — doing that at dispatch would blank the
+    // canvas for the whole duration of the compute. Deferring to paint
+    // keeps the previous frame on screen (CSS-stretched to the new display
+    // size as a live preview) until the fresh, correctly-sized frame is
+    // ready to replace it in one step. The guard avoids a needless clear
+    // when the dimensions are unchanged (the common pan/zoom case).
+    const canvas = ctx.canvas
+    if (canvas.width !== response.width) {
+      canvas.width = response.width
+    }
+    if (canvas.height !== response.height) {
+      canvas.height = response.height
+    }
+    // Clear any wheel-zoom Preview transform before painting (ADR-0012), but
+    // only for a `render`. A render carries fresh geometry — the Settle frame,
+    // a pan/resize commit, boot — so clearing it in the same tick as
+    // `putImageData` makes the Preview→true-frame swap atomic (no snap-back)
+    // without any callback back to the input layer. A `recolorize` is
+    // different: it re-tints the *cached* (pre-scrub) buffer without moving it,
+    // so if a palette change lands mid-scrub (within the settle window) the
+    // Preview scale still applies to the same image — clearing the transform
+    // would snap the frame to identity at the wrong scale until the Settle
+    // render lands. So a recolorize leaves the transform for the render that
+    // ends the scrub. Outside a scrub the transform is already '' and the guard
+    // skips regardless, so this only ever matters while a Preview is live.
+    if (requestKind === 'render' && canvas.style.transform !== '') {
+      canvas.style.transform = ''
+    }
+    const image = new ImageData(response.rgba, response.width, response.height)
+    ctx.putImageData(image, 0, 0)
   }
-  if (canvas.height !== response.height) {
-    canvas.height = response.height
-  }
-  // Clear any wheel-zoom Preview transform before painting (ADR-0012), but
-  // only for a `render`. A render carries fresh geometry — the Settle frame,
-  // a pan/resize commit, boot — so clearing it in the same tick as
-  // `putImageData` makes the Preview→true-frame swap atomic (no snap-back)
-  // without any callback back to the input layer. A `recolorize` is
-  // different: it re-tints the *cached* (pre-scrub) buffer without moving it,
-  // so if a palette change lands mid-scrub (within the settle window) the
-  // Preview scale still applies to the same image — clearing the transform
-  // would snap the frame to identity at the wrong scale until the Settle
-  // render lands. So a recolorize leaves the transform for the render that
-  // ends the scrub. Outside a scrub the transform is already '' and the guard
-  // skips regardless, so this only ever matters while a Preview is live.
-  if (requestKind === 'render' && canvas.style.transform !== '') {
-    canvas.style.transform = ''
-  }
-  const image = new ImageData(response.rgba, response.width, response.height)
-  ctx.putImageData(image, 0, 0)
-}
 
-/**
- * Request a full compute → colorize → paint for `viewport`. Fire-and-
- * forget: returns immediately, the paint lands on a later worker
- * response. The viewport is passed as flat primitives (read off the
- * `Viewport` getters in `main.ts`) because a wasm-bindgen `Viewport`
- * instance cannot survive `postMessage`.
- */
-export function render(
-  viewport: { centerRe: number; centerIm: number; zoom: number; width: number; height: number },
-  ctx: CanvasRenderingContext2D,
-  maxIter: number,
-  palette: Palette,
-  mode: NormalizationMode,
-  kind: FractalKind,
-  cRe: number,
-  cIm: number,
-  field: Field,
-): void {
-  issue(
-    {
-      kind: 'render',
-      epoch: 0, // replaced by issue()
-      width: viewport.width,
-      height: viewport.height,
-      centerRe: viewport.centerRe,
-      centerIm: viewport.centerIm,
-      zoom: viewport.zoom,
-      maxIter,
-      palette,
-      mode,
-      fractalKind: kind,
-      cRe,
-      cIm,
-      field,
-    },
-    ctx,
-  )
-}
+  /**
+   * Request a full compute → colorize → paint for `viewport`. Fire-and-
+   * forget: returns immediately, the paint lands on a later worker
+   * response. The viewport is passed as flat primitives (read off the
+   * `Viewport` getters in `main.ts`) because a wasm-bindgen `Viewport`
+   * instance cannot survive `postMessage`.
+   */
+  function render(
+    viewport: { centerRe: number; centerIm: number; zoom: number; width: number; height: number },
+    ctx: CanvasRenderingContext2D,
+    maxIter: number,
+    palette: Palette,
+    mode: NormalizationMode,
+    kind: FractalKind,
+    cRe: number,
+    cIm: number,
+    field: Field,
+  ): void {
+    issue(
+      {
+        kind: 'render',
+        epoch: 0, // replaced by issue()
+        width: viewport.width,
+        height: viewport.height,
+        centerRe: viewport.centerRe,
+        centerIm: viewport.centerIm,
+        zoom: viewport.zoom,
+        maxIter,
+        palette,
+        mode,
+        fractalKind: kind,
+        cRe,
+        cIm,
+        field,
+      },
+      ctx,
+    )
+  }
 
-/**
- * Re-colorize the worker's cached iteration buffer with new palette /
- * normalisation — the ADR-0002 fast path, no recompute. Fire-and-
- * forget.
- *
- * If a render is already queued, this folds its colours into that
- * render (see `issue`) rather than replacing it, so a visual-only
- * change can never strand a pending compute. A recolorize is only
- * dispatched as a standalone request when the worker already holds a
- * computed buffer (the in-flight or last-completed render); reaching
- * the worker with no cached buffer would throw there (the
- * programmer-error guard in the handler), which the fold rule makes
- * unreachable in normal dispatch ordering.
- */
-export function recolorize(
-  ctx: CanvasRenderingContext2D,
-  palette: Palette,
-  mode: NormalizationMode,
-): void {
-  issue({ kind: 'recolorize', epoch: 0, palette, mode }, ctx)
+  /**
+   * Re-colorize the worker's cached iteration buffer with new palette /
+   * normalisation — the ADR-0002 fast path, no recompute. Fire-and-
+   * forget.
+   *
+   * If a render is already queued, this folds its colours into that
+   * render (see `issue`) rather than replacing it, so a visual-only
+   * change can never strand a pending compute. A recolorize is only
+   * dispatched as a standalone request when the worker already holds a
+   * computed buffer (the in-flight or last-completed render); reaching
+   * the worker with no cached buffer would throw there (the
+   * programmer-error guard in the handler), which the fold rule makes
+   * unreachable in normal dispatch ordering.
+   */
+  function recolorize(
+    ctx: CanvasRenderingContext2D,
+    palette: Palette,
+    mode: NormalizationMode,
+  ): void {
+    issue({ kind: 'recolorize', epoch: 0, palette, mode }, ctx)
+  }
+
+  // Arm the boot watchdog now, at construction — but only if a fatal surface
+  // was injected. With no `onFatal` there is nothing to surface to, so a client
+  // built without one leaves no stray timer running. The worker cannot have
+  // reached `ready` or thrown yet (both are asynchronous), so this is the only
+  // place the watchdog needs to arm.
+  if (onFatal !== null) {
+    bootTimer = setTimeout(() => {
+      bootTimer = undefined
+      if (ready) {
+        return
+      }
+      reportFatal(
+        `The renderer did not start within ${BOOT_TIMEOUT_MS / 1000}s. The page ` +
+          'may not be cross-origin isolated, which the multithreaded renderer ' +
+          'requires (SharedArrayBuffer).',
+      )
+    }, BOOT_TIMEOUT_MS)
+  }
+
+  return { render, recolorize, discardInFlight }
 }

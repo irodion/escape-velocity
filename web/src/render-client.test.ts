@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { createRenderClient, type ProgressReporter } from './render-client.js'
 import type {
   Aborted,
   CancelRequest,
@@ -32,27 +33,23 @@ if (typeof globalThis.ImageData === 'undefined') {
 
 // Stand-in for the module Worker. Records every posted message and
 // exposes the `onmessage` the client installs so a test can drive
-// worker → client messages synchronously. The client constructs the
-// worker at module-eval time, so each fresh import pushes a new
-// instance here.
+// worker → client messages synchronously. `createRenderClient` calls the
+// injected factory once, so each `makeClient()` gets its own fresh instance —
+// no global `Worker` patching or module resets needed (A3, #86).
 class FakeWorker {
-  static instances: FakeWorker[] = []
   onmessage: ((event: MessageEvent) => void) | null = null
   onerror: ((event: ErrorEvent) => void) | null = null
   readonly posted: unknown[] = []
-  constructor(
-    readonly url: string | URL,
-    readonly options?: WorkerOptions,
-  ) {
-    FakeWorker.instances.push(this)
-  }
   postMessage(message: unknown, _transfer?: Transferable[]): void {
     this.posted.push(message)
   }
   terminate(): void {}
 }
 
-interface RenderClient {
+// The factory returns enum-typed `render`/`recolorize` params (`Palette` etc.);
+// the tests drive them with plain numeric constants, so they exercise the
+// client through this loosely-typed view rather than the branded interface.
+interface TestRenderClient {
   render: (
     viewport: { centerRe: number; centerIm: number; zoom: number; width: number; height: number },
     ctx: CanvasRenderingContext2D,
@@ -66,12 +63,21 @@ interface RenderClient {
   ) => void
   recolorize: (ctx: CanvasRenderingContext2D, palette: number, mode: number) => void
   discardInFlight: () => void
-  setFatalHandler: (handler: (message: string) => void) => void
-  setProgressReporter: (reporter: {
-    begin: () => void
-    report: (fraction: number) => void
-    end: () => void
-  }) => void
+}
+
+// Construct a client over a fresh FakeWorker, injecting the optional fatal /
+// progress collaborators at construction (mirrors how `main.ts` wires them).
+// Supplying `onFatal` also arms the boot watchdog, matching production.
+function makeClient(deps?: { onFatal?: (message: string) => void; progress?: ProgressReporter }): {
+  client: TestRenderClient
+  worker: FakeWorker
+} {
+  const worker = new FakeWorker()
+  const client = createRenderClient({
+    workerFactory: () => worker as unknown as Worker,
+    ...deps,
+  }) as unknown as TestRenderClient
+  return { client, worker }
 }
 
 const VIEWPORT = { centerRe: -0.5, centerIm: 0, zoom: 1, width: 2, height: 2 }
@@ -85,18 +91,6 @@ const MODE_CYCLED = 0
 const MODE_HISTOGRAM = 1
 const KIND_MANDELBROT = 0
 const FIELD_ESCAPE_TIME = 0
-
-// A fresh module per test resets the client's module-level coalescing
-// state (latestEpoch / inFlight / pending / ready) and yields a brand
-// new worker instance with empty `posted`.
-async function loadClient(): Promise<{ client: RenderClient; worker: FakeWorker }> {
-  vi.resetModules()
-  FakeWorker.instances = []
-  vi.stubGlobal('Worker', FakeWorker)
-  const client = (await import('./render-client.js')) as unknown as RenderClient
-  const worker = FakeWorker.instances[0]
-  return { client, worker }
-}
 
 function makeCtx(): CanvasRenderingContext2D {
   const canvas = document.createElement('canvas')
@@ -143,7 +137,7 @@ function response(epoch: number): RenderResponse {
   return { kind: 'response', epoch, rgba: new Uint8ClampedArray(16), width: 2, height: 2 }
 }
 
-function doRender(client: RenderClient, ctx: CanvasRenderingContext2D): void {
+function doRender(client: TestRenderClient, ctx: CanvasRenderingContext2D): void {
   client.render(
     VIEWPORT,
     ctx,
@@ -183,18 +177,24 @@ describe('render-client', () => {
     vi.restoreAllMocks()
   })
 
-  afterEach(() => {
-    vi.unstubAllGlobals()
+  it('invokes the worker factory exactly once at construction', () => {
+    let calls = 0
+    const worker = new FakeWorker()
+    createRenderClient({
+      workerFactory: () => {
+        calls += 1
+        return worker as unknown as Worker
+      },
+    })
+    // The factory is the seam a future side-by-side view reuses; the client
+    // must build exactly one worker, eagerly, so its handlers are wired before
+    // any message arrives. (The `{ type: 'module' }` contract now lives at the
+    // call site in `main.ts`, not here.)
+    expect(calls).toBe(1)
   })
 
-  it('constructs a module worker at load', async () => {
-    const { worker } = await loadClient()
-    expect(worker).toBeDefined()
-    expect(worker.options?.type).toBe('module')
-  })
-
-  it('stamps successive requests with strictly increasing epochs', async () => {
-    const { client, worker } = await loadClient()
+  it('stamps successive requests with strictly increasing epochs', () => {
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
     deliver(worker, readyMsg())
 
@@ -209,8 +209,8 @@ describe('render-client', () => {
     expect(postedEpochs(worker)).toEqual([1, 2, 3])
   })
 
-  it('paints a response whose epoch is still the latest', async () => {
-    const { client, worker } = await loadClient()
+  it('paints a response whose epoch is still the latest', () => {
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
     deliver(worker, readyMsg())
 
@@ -222,8 +222,8 @@ describe('render-client', () => {
     expect(image.data).toHaveLength(16)
   })
 
-  it('clears a Preview transform before painting the frame (atomic swap, ADR-0012)', async () => {
-    const { client, worker } = await loadClient()
+  it('clears a Preview transform before painting the frame (atomic swap, ADR-0012)', () => {
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
     // A wheel-zoom Preview transform is on the canvas when the fresh frame
     // arrives (the input layer set it; this layer owns clearing it).
@@ -246,8 +246,8 @@ describe('render-client', () => {
     expect(ctx.canvas.style.transform).toBe('')
   })
 
-  it('keeps the Preview transform on a recolorize paint (B2: palette change mid-scrub)', async () => {
-    const { client, worker } = await loadClient()
+  it('keeps the Preview transform on a recolorize paint (B2: palette change mid-scrub)', () => {
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
     deliver(worker, readyMsg())
 
@@ -271,8 +271,8 @@ describe('render-client', () => {
     expect(ctx.canvas.style.transform).toBe('translate(40px, 30px) scale(0.8)')
   })
 
-  it('drops a stale response (epoch behind the latest issued)', async () => {
-    const { client, worker } = await loadClient()
+  it('drops a stale response (epoch behind the latest issued)', () => {
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
     deliver(worker, readyMsg())
 
@@ -284,8 +284,8 @@ describe('render-client', () => {
     expect(ctx.putImageData).not.toHaveBeenCalled()
   })
 
-  it('discardInFlight drops the in-flight render so its response does not paint', async () => {
-    const { client, worker } = await loadClient()
+  it('discardInFlight drops the in-flight render so its response does not paint', () => {
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
     deliver(worker, readyMsg())
 
@@ -296,8 +296,8 @@ describe('render-client', () => {
     expect(ctx.putImageData).not.toHaveBeenCalled()
   })
 
-  it('discardInFlight also drops queued work so it never dispatches', async () => {
-    const { client, worker } = await loadClient()
+  it('discardInFlight also drops queued work so it never dispatches', () => {
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
     deliver(worker, readyMsg())
 
@@ -313,8 +313,8 @@ describe('render-client', () => {
     expect(ctx.putImageData).not.toHaveBeenCalled()
   })
 
-  it('coalesces to a single pending slot: newest queued wins, older dropped', async () => {
-    const { client, worker } = await loadClient()
+  it('coalesces to a single pending slot: newest queued wins, older dropped', () => {
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
     deliver(worker, readyMsg())
 
@@ -331,8 +331,8 @@ describe('render-client', () => {
     expect(postedEpochs(worker)).toEqual([1, 3])
   })
 
-  it('queues a recolorize issued while a render is in flight and dispatches it on response', async () => {
-    const { client, worker } = await loadClient()
+  it('queues a recolorize issued while a render is in flight and dispatches it on response', () => {
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
     deliver(worker, readyMsg())
 
@@ -348,13 +348,13 @@ describe('render-client', () => {
     expect((postedWork(worker)[1] as RenderRequest).epoch).toBe(2)
   })
 
-  it('folds a recolorize into a pending render instead of replacing it', async () => {
+  it('folds a recolorize into a pending render instead of replacing it', () => {
     // P1 regression: render A in flight, render B queued (newer
     // viewport), then a palette change. The recolorize must not evict
     // B — otherwise B's viewport is never computed and the worker
     // re-tints A's stale buffer. Instead B's compute is kept and the
     // new colours are folded in.
-    const { client, worker } = await loadClient()
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
     deliver(worker, readyMsg())
 
@@ -390,11 +390,11 @@ describe('render-client', () => {
     expect(dispatched.epoch).toBe(3)
   })
 
-  it('folds a recolorize into a render still buffered before `ready` (no empty-cache wedge)', async () => {
+  it('folds a recolorize into a render still buffered before `ready` (no empty-cache wedge)', () => {
     // A recolorize issued before the boot render has completed must not
     // replace that render — sending a standalone recolorize to a worker
     // with no cached buffer throws there and wedges the client.
-    const { client, worker } = await loadClient()
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
 
     doRender(client, ctx) // boot render → buffered (not ready yet)
@@ -409,8 +409,8 @@ describe('render-client', () => {
     expect(dispatched.mode).toBe(MODE_HISTOGRAM)
   })
 
-  it('buffers a render issued before `ready` and posts it once ready arrives', async () => {
-    const { client, worker } = await loadClient()
+  it('buffers a render issued before `ready` and posts it once ready arrives', () => {
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
 
     doRender(client, ctx) // before ready → buffered, not posted
@@ -422,8 +422,8 @@ describe('render-client', () => {
     expect((worker.posted[0] as { kind: string }).kind).toBe('render')
   })
 
-  it('does not paint a response that arrives before `ready`', async () => {
-    const { client, worker } = await loadClient()
+  it('does not paint a response that arrives before `ready`', () => {
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
 
     doRender(client, ctx) // buffered; nothing in flight yet
@@ -432,8 +432,8 @@ describe('render-client', () => {
     expect(ctx.putImageData).not.toHaveBeenCalled()
   })
 
-  it('frees the slot and dispatches the next request when a render errors (B4)', async () => {
-    const { client, worker } = await loadClient()
+  it('frees the slot and dispatches the next request when a render errors (B4)', () => {
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
     vi.spyOn(console, 'error').mockImplementation(() => {})
     deliver(worker, readyMsg())
@@ -453,11 +453,10 @@ describe('render-client', () => {
     expect(ctx.putImageData).not.toHaveBeenCalled()
   })
 
-  it('surfaces a fatal handler when the worker throws at the top level (B4)', async () => {
-    const { client, worker } = await loadClient()
+  it('surfaces a fatal handler when the worker throws at the top level (B4)', () => {
     const fatal = vi.fn()
     vi.spyOn(console, 'error').mockImplementation(() => {})
-    client.setFatalHandler(fatal)
+    const { worker } = makeClient({ onFatal: fatal })
 
     fireWorkerError(worker, 'LinkError: shared memory unavailable')
 
@@ -465,8 +464,8 @@ describe('render-client', () => {
     expect(fatal).toHaveBeenCalledWith('LinkError: shared memory unavailable')
   })
 
-  it('a dead worker (onerror) stops dispatching further requests (B4)', async () => {
-    const { client, worker } = await loadClient()
+  it('a dead worker (onerror) stops dispatching further requests (B4)', () => {
+    const { client, worker } = makeClient()
     vi.spyOn(console, 'error').mockImplementation(() => {})
     deliver(worker, readyMsg())
     fireWorkerError(worker, 'worker died')
@@ -479,14 +478,14 @@ describe('render-client', () => {
     expect(worker.posted).toHaveLength(0)
   })
 
-  it('fires the fatal handler if `ready` never arrives within the boot timeout (B4)', async () => {
+  it('fires the fatal handler if `ready` never arrives within the boot timeout (B4)', () => {
     vi.useFakeTimers()
     try {
-      const { client } = await loadClient()
       const fatal = vi.fn()
       vi.spyOn(console, 'error').mockImplementation(() => {})
-      // Registering the handler arms the watchdog. No `ready` is delivered.
-      client.setFatalHandler(fatal)
+      // Injecting the handler arms the watchdog at construction. No `ready` is
+      // delivered, so it must fire.
+      makeClient({ onFatal: fatal })
 
       vi.advanceTimersByTime(5000)
 
@@ -497,12 +496,11 @@ describe('render-client', () => {
     }
   })
 
-  it('does not fire the boot watchdog once `ready` has arrived (B4)', async () => {
+  it('does not fire the boot watchdog once `ready` has arrived (B4)', () => {
     vi.useFakeTimers()
     try {
-      const { client, worker } = await loadClient()
       const fatal = vi.fn()
-      client.setFatalHandler(fatal)
+      const { worker } = makeClient({ onFatal: fatal })
       deliver(worker, readyMsg()) // boot succeeds, cancelling the watchdog
 
       vi.advanceTimersByTime(5000)
@@ -515,8 +513,8 @@ describe('render-client', () => {
 
   // --- P2 (#78): band cancellation + progress ------------------------------
 
-  it('posts a cancel carrying the new epoch when a render supersedes one in flight', async () => {
-    const { client, worker } = await loadClient()
+  it('posts a cancel carrying the new epoch when a render supersedes one in flight', () => {
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
     deliver(worker, readyMsg())
 
@@ -531,12 +529,12 @@ describe('render-client', () => {
     expect(postedEpochs(worker)).toEqual([1])
   })
 
-  it('does not cancel an in-flight render when a recolorize supersedes it', async () => {
+  it('does not cancel an in-flight render when a recolorize supersedes it', () => {
     // A recolorize re-tints whatever the in-flight render is computing, so it
     // must let that render finish rather than abort it — aborting would leave a
     // partial iteration buffer for the recolorize to read. The render runs to
     // completion; the recolorize then dispatches against its whole buffer.
-    const { client, worker } = await loadClient()
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
     deliver(worker, readyMsg())
 
@@ -549,8 +547,8 @@ describe('render-client', () => {
     expect((postedWork(worker)[1] as { kind: string }).kind).toBe('recolorize')
   })
 
-  it('does not post a cancel for the first render (nothing in flight to cancel)', async () => {
-    const { client, worker } = await loadClient()
+  it('does not post a cancel for the first render (nothing in flight to cancel)', () => {
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
     deliver(worker, readyMsg())
 
@@ -559,8 +557,8 @@ describe('render-client', () => {
     expect(postedCancels(worker)).toHaveLength(0)
   })
 
-  it('discardInFlight posts a cancel so the worker abandons the in-flight render', async () => {
-    const { client, worker } = await loadClient()
+  it('discardInFlight posts a cancel so the worker abandons the in-flight render', () => {
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
     deliver(worker, readyMsg())
 
@@ -572,8 +570,8 @@ describe('render-client', () => {
     expect(cancels[0].epoch).toBe(2)
   })
 
-  it('an aborted reply frees the slot and dispatches the queued request (no paint)', async () => {
-    const { client, worker } = await loadClient()
+  it('an aborted reply frees the slot and dispatches the queued request (no paint)', () => {
+    const { client, worker } = makeClient()
     const ctx = makeCtx()
     deliver(worker, readyMsg())
 
@@ -590,11 +588,10 @@ describe('render-client', () => {
     expect(ctx.putImageData).not.toHaveBeenCalled()
   })
 
-  it('drives the progress reporter across a render lifecycle', async () => {
-    const { client, worker } = await loadClient()
-    const ctx = makeCtx()
+  it('drives the progress reporter across a render lifecycle', () => {
     const reporter = { begin: vi.fn(), report: vi.fn(), end: vi.fn() }
-    client.setProgressReporter(reporter)
+    const { client, worker } = makeClient({ progress: reporter })
+    const ctx = makeCtx()
     deliver(worker, readyMsg())
 
     doRender(client, ctx) // dispatched → begin()
@@ -608,11 +605,10 @@ describe('render-client', () => {
     expect(reporter.end).toHaveBeenCalledTimes(1)
   })
 
-  it('ignores progress for an already-superseded render (a doomed frame never moves the bar)', async () => {
-    const { client, worker } = await loadClient()
-    const ctx = makeCtx()
+  it('ignores progress for an already-superseded render (a doomed frame never moves the bar)', () => {
     const reporter = { begin: vi.fn(), report: vi.fn(), end: vi.fn() }
-    client.setProgressReporter(reporter)
+    const { client, worker } = makeClient({ progress: reporter })
+    const ctx = makeCtx()
     deliver(worker, readyMsg())
 
     doRender(client, ctx) // epoch 1, in flight
@@ -624,11 +620,10 @@ describe('render-client', () => {
     expect(reporter.report).not.toHaveBeenCalled()
   })
 
-  it('ends progress when the in-flight render is aborted', async () => {
-    const { client, worker } = await loadClient()
-    const ctx = makeCtx()
+  it('ends progress when the in-flight render is aborted', () => {
     const reporter = { begin: vi.fn(), report: vi.fn(), end: vi.fn() }
-    client.setProgressReporter(reporter)
+    const { client, worker } = makeClient({ progress: reporter })
+    const ctx = makeCtx()
     deliver(worker, readyMsg())
 
     doRender(client, ctx) // begin()

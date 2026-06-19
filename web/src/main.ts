@@ -20,13 +20,7 @@ import { mountProgress } from './progress.js'
 import { createPwaLifecycle } from './pwa-lifecycle.js'
 import { mountPwaUi } from './pwa-ui.js'
 import { computeBufferDims } from './render-buffer.js'
-import {
-  discardInFlight,
-  recolorize,
-  render,
-  setFatalHandler,
-  setProgressReporter,
-} from './render-client.js'
+import { createRenderClient } from './render-client.js'
 import type {
   FieldName,
   FractalMode,
@@ -166,21 +160,28 @@ if (!(depthTrack instanceof HTMLElement) || !(depthNum instanceof HTMLElement)) 
 // fractal closes an open drawer (a pan-drag or wheel-zoom leaves it open).
 mountDrawer(controlsToggle, controlsForm, canvas)
 
-// Route unrecoverable renderer failures to a legible full-screen surface
-// instead of a silent black canvas (B4 / U2). Registering here also arms the
-// render-client's boot watchdog: if the worker never reaches `ready` (a
-// stripped cross-origin-isolation header, a WASM LinkError), the same panel
-// appears after a few seconds rather than the page hanging forever.
-setFatalHandler((message) => {
-  showFatal('Renderer unavailable', message)
+// Construct the render client, injecting its collaborators at birth (A3, #86).
+// The `new Worker(new URL(...))` expression must stay syntactically intact here
+// for Vite's static worker-bundling analysis — so the *factory* is passed, not
+// a ready-made worker; Vite ships the worker and its WASM as their own chunk.
+//
+//  - `onFatal` routes unrecoverable renderer failures to a legible full-screen
+//    surface instead of a silent black canvas (B4 / U2). Supplying it also opts
+//    the client into boot-failure detection: a worker that stalls during
+//    init (a stripped cross-origin-isolation header, a WASM LinkError) surfaces
+//    the same panel after a few seconds rather than leaving the page to hang.
+//  - `progress` is the determinate indicator for slow deep renders (P2, #78).
+//    The client drives `begin`/`report`/`end` as a banded render streams its
+//    heartbeats; the mounted reporter owns the reveal debounce so fast frames
+//    never flash.
+const { render, recolorize, discardInFlight } = createRenderClient({
+  workerFactory: () =>
+    new Worker(new URL('./worker/worker.ts', import.meta.url), { type: 'module' }),
+  onFatal: (message) => {
+    showFatal('Renderer unavailable', message)
+  },
+  progress: mountProgress(document.body),
 })
-
-// Determinate progress indicator for slow deep renders (P2, #78). The render
-// client drives `begin`/`report`/`end` as a banded render streams its
-// heartbeats; the mounted reporter owns the reveal debounce so fast frames
-// never flash. A no-op until registered, so a render before this point simply
-// shows nothing.
-setProgressReporter(mountProgress(document.body))
 
 // Initialise the WASM module on the main thread so the synchronous
 // `Viewport` class (used by the input controller and the dispatcher
