@@ -34,15 +34,8 @@
 //! `z'_{n+1} = 2·z_n·z'_n + dc`, evaluated with the *current* `z_n`
 //! before `z` advances.
 
+use crate::BAILOUT_SQR;
 use crate::complex::Complex64;
-
-/// Bailout threshold, identical to [`crate::escape_time`]'s
-/// (`|z|² > 65_536` ⇔ `|z| > 256`). Sharing it keeps the inside-set
-/// partition bit-for-bit consistent between the Escape Time and Distance
-/// Estimate Fields, so switching Field never reclassifies a pixel as
-/// interior vs. exterior. The large radius also sharpens the distance
-/// estimate: the `|z|·ln|z|/|z'|` approximation tightens as `|z|` grows.
-const BAILOUT_SQR: f64 = 65_536.0;
 
 /// Estimate the distance from `z0` to the set boundary in complex-plane
 /// units, or [`f32::NAN`] if the orbit stays bounded for `max_iter`

@@ -22,7 +22,7 @@
  * The worker echoes the request's `epoch` back on every `RenderResponse`
  * so the client can drop stale responses after the user has issued a
  * newer pan/zoom/parameter change (single-slot coalescing — see
- * `render-client.ts` once #30 lands).
+ * `render-client.ts`).
  */
 import type { Field, FractalKind, NormalizationMode, Palette } from '../../wasm/fractal_wasm.js'
 

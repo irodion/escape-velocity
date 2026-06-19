@@ -98,8 +98,12 @@ _Avoid_: colour scheme; "colormap" is acceptable only for the matplotlib-sourced
 palettes that ship under that name.
 
 ### Normalisation mode
-How a Field's scalar is squashed into `[0,1]` before Palette lookup. Unlike the
-Palette, a Normalisation mode is **not universal across Fields**:
+How a Field's scalar is squashed into `[0,1]` before Palette lookup. Spelled
+`NormalizationMode` (American) in the Rust core, the wasm mirror, and on the
+JS↔WASM wire — pinned by ADR-0013 for discriminant/wire stability; the TS UI
+layer uses British `normalisation`/`NormalisationName`. The British form is
+canonical in prose. Unlike the Palette, a Normalisation mode is **not universal
+across Fields**:
 - **Cycled** (fractional part of `scalar / period`) is **Escape-Time only** — it
   assumes iteration units; a Distance Estimate has no period.
 - **Clamped** (`min(1, d/k)` — a hard linear ramp over the first `k` pixels of

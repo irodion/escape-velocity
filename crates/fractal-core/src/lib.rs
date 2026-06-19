@@ -32,6 +32,19 @@ mod palette;
 mod pipeline;
 mod viewport;
 
+/// Squared escape ("bailout") radius shared by both per-pixel kernels:
+/// `|z|² > 65_536` ⇔ `|z| > 256`.
+///
+/// Hoisted here (not duplicated per kernel) because the Escape Time and
+/// Distance Estimate Fields MUST agree bit-for-bit on which pixels are
+/// interior — switching Field never reclassifies a pixel (ADR-0013). A
+/// single definition makes that agreement structural, not a hand-sync
+/// invariant. The large radius also (a) shrinks smooth-iteration banding
+/// below the perceptible level and (b) tightens the `|z|·ln|z|/|z'|`
+/// distance estimate; both improve as `|z|` grows, and `256²+ε` squared
+/// (`≈ 4.3·10⁹`) stays well inside `f64` range.
+pub(crate) const BAILOUT_SQR: f64 = 65_536.0;
+
 pub use complex::Complex64;
 pub use escape_distance::escape_distance;
 pub use escape_time::escape_time;
