@@ -445,12 +445,17 @@
         transition: color 0.15s var(--ease);
       }
       .field:focus-within .field__label { color: var(--accent); }
-      /* A non-colour focus cue for the borderless selects: recolour the row's
-         existing hairline so focus is visible without relying on the accent
-         tint alone (WCAG 2.4.7/1.4.1). Only recolours an already-present
-         border, so no layout shift. The range slider and toggle carry their
-         own non-colour focus styles. */
-      .field:focus-within { border-bottom-color: var(--accent); }
+      /* A non-colour focus cue for the borderless selects (WCAG 2.4.7/1.4.1):
+         a box-shadow lays a second accent line under the row's existing
+         hairline, so the underline visibly *thickens* on focus — a shape
+         change, not colour alone. box-shadow takes no layout space, so the
+         rows don't shift. Mirrors the box-shadow focus ring the range thumb
+         and toggle already use; the accent border-colour rides along as a
+         secondary cue. */
+      .field:focus-within {
+        border-bottom-color: var(--accent);
+        box-shadow: 0 1px 0 0 var(--accent);
+      }
 
       /* The wrapper carries the custom caret — a <select> can't host ::after.
          Block so the native control's `width: 100%` resolves against it. */
@@ -775,6 +780,13 @@
       }
       #pwa-install:hover { color: var(--accent); border-color: var(--accent-dim); }
       #pwa-install[hidden], .pwa-toast[hidden] { display: none; }
+      /* The button is fixed bottom-left at a higher z-index than the drawer
+         (z-index 20), so while the drawer is open it would overlay the drawer's
+         bottom-left controls and intercept their clicks. Hide it for the
+         duration the drawer is open. (#pwa-install is a later sibling of
+         form#controls in the body, so the general-sibling combinator reaches
+         it.) */
+      form#controls.open ~ #pwa-install { display: none; }
       .pwa-toast {
         position: fixed;
         bottom: max(1rem, env(safe-area-inset-bottom));
