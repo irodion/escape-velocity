@@ -107,6 +107,13 @@
         display: block;
         width: 100%;
         aspect-ratio: 1 / 1;
+        /* On a short (landscape-phone) viewport the full square would overgrow
+           the stage and have its top clipped by `.stage { overflow: hidden }`.
+           Cap the height to the space left after the readout + insets; the
+           width (so the readout) stays put, and `drawFrame` centres a square of
+           the box's smaller side — a capped box just yields a smaller centred
+           chart. Inactive on tall viewports, where the width caps first. */
+        max-height: calc(100dvh - 10rem);
       }
       canvas#orbit[hidden] { display: none; }
 
