@@ -60,10 +60,13 @@ if (!ctx.crossOriginIsolated) {
 
 const wasm = await init()
 // Stand up the rayon thread pool before announcing readiness, so the
-// first `compute` already runs multicore. `navigator.hardwareConcurrency`
-// is the logical-core count; on a single-core device this yields a pool
-// of one and rendering still works.
-await initThreadPool(navigator.hardwareConcurrency)
+// first `compute` already runs multicore. Size it to one *fewer* than the
+// logical-core count (`navigator.hardwareConcurrency`): the pool runs
+// alongside this coordinating worker and the main thread, so claiming every
+// core oversubscribes and can starve the compositor the wheel Preview is
+// composited on (P7, #83). `Math.max(1, …)` keeps a single-core device at a
+// pool of one, where rendering still works.
+await initThreadPool(Math.max(1, navigator.hardwareConcurrency - 1))
 
 let state: WorkerState = createWorkerState()
 
