@@ -109,14 +109,14 @@ const ctx = canvas.getContext('2d')
 if (ctx === null) {
   throw new Error('failed to acquire 2d canvas context')
 }
-// The orbit visualizer's transparent overlay canvas (E1, #94), stacked over
-// `#fractal` inside `.stage` so its pixel box matches.
+// The orbit visualizer's diagram canvas (E1, #94) — the top half of the corner
+// probe panel (`.probe`); `OrbitOverlay` draws the orbit into it.
 const orbitCanvas = document.getElementById('orbit')
 if (!(orbitCanvas instanceof HTMLCanvasElement)) {
   throw new Error('canvas#orbit not found in index.html')
 }
-// The pixel inspector's corner HUD (E2, #95), stacked over `#fractal` inside
-// `.stage`. Populated by `PixelInspector`; hidden until the Inspect toggle is on.
+// The pixel inspector's readout (E2, #95) — the bottom half of the same probe
+// panel. Populated by `PixelInspector`; hidden until the Inspect toggle is on.
 const inspectorHud = document.getElementById('inspector')
 if (!(inspectorHud instanceof HTMLElement)) {
   throw new Error('#inspector not found in index.html')

@@ -2,14 +2,9 @@ import { cssToComplex, revealedCount, traceOrbit, type ViewGeometry } from './or
 import type { FractalMode } from './settings.js'
 import type { ViewportStore } from './viewport-store.js'
 
-// The diagram is a compact, self-contained inset — its side is this fraction of
-// the smaller viewport dimension, so it never exceeds ~⅓ of the image (E1 UX
-// feedback: a full-image path reads as noise; a localized one reads as a chart).
-const DIAGRAM_FRACTION = 1 / 3
-
-// Gap between the cursor/anchor and the diagram box, so it sits *beside* the
-// pointer rather than under it.
-const DIAGRAM_GAP = 18
+// Inner padding of the plot box, as a fraction of its side, so the fitted orbit
+// and the |z| = 2 circle have a margin from the panel edge.
+const DIAGRAM_PAD = 0.1
 
 // Cap on iterates plotted in the diagram. An interior orbit settles onto its
 // cycle within a few dozen steps; plotting thousands just overdraws the same
@@ -27,11 +22,12 @@ const MIN_SPAN = 1e-4
 
 const TAU = Math.PI * 2
 
-// An orbit to show: the complex point that defines it (the cursor's c in
-// Mandelbrot, z₀ in Julia) plus the screen position to anchor the diagram at.
-interface Anchored {
-  readonly point: { re: number; im: number }
-  readonly anchor: { x: number; y: number }
+// The complex point whose orbit is shown: the cursor's c in Mandelbrot, z₀ in
+// Julia. The diagram lives in the fixed corner panel, so no screen anchor is
+// needed — the point alone defines what to plot.
+interface ProbePoint {
+  readonly re: number
+  readonly im: number
 }
 
 /**
@@ -70,24 +66,25 @@ export function isGestureInProgress(surface: HTMLElement): boolean {
 }
 
 /**
- * The orbit visualizer overlay (E1, #94).
+ * The orbit visualizer (E1, #94) — the diagram half of the unified probe panel.
  *
  * With the feature enabled, hovering the fractal draws a compact, animated
- * diagram *beside the cursor* showing the iteration orbit `z₀ → z₁ → z₂ → …` of
- * the point under the pointer; a left-click *pins* the diagram in place, and
+ * diagram *in the bottom-right probe panel* (shared with the pixel inspector)
+ * showing the iteration orbit `z₀ → z₁ → z₂ → …` of the point under the pointer;
+ * a left-click *pins* the orbit so it survives the cursor moving away, and
  * `Escape` un-pins it. The trace animates on a loop — a bright head marker walks
  * the path as it draws in, then holds the settled shape — so the dynamics
  * (spiralling into the cardioid, settling into a short cycle, flying past the
  * escape circle) are visible rather than a static one-shot path.
  *
  * The diagram is a self-contained chart in its own local frame: the orbit's
- * complex-space bounding box is fit into a box ≤ ⅓ of the viewport, anchored at
- * the cursor. This keeps it always on-screen and legible regardless of where
- * the orbit actually lives in the plane (e.g. a Mandelbrot orbit starts at the
- * origin, which is usually off-screen) — the high-level shape matters more than
- * the absolute position. It is therefore viewport-independent: panning/zooming
- * the fractal does not change a pinned orbit, so the overlay does not subscribe
- * to the `ViewportStore`; it only reads it to map the cursor to a complex point.
+ * complex-space bounding box is fit into a centred square filling the panel.
+ * This keeps it legible regardless of where the orbit actually lives in the
+ * plane (e.g. a Mandelbrot orbit starts at the origin, which is usually
+ * off-screen) — the high-level shape matters more than the absolute position. It
+ * is therefore viewport-independent: panning/zooming the fractal does not change
+ * a pinned orbit, so the overlay does not subscribe to the `ViewportStore`; it
+ * only reads it (via the fractal surface) to map the cursor to a complex point.
  *
  * ## Mode semantics
  * - Mandelbrot: the point under the cursor is `c`; the orbit starts at `z₀ = 0`.
@@ -95,8 +92,8 @@ export function isGestureInProgress(surface: HTMLElement): boolean {
  */
 export class OrbitOverlay {
   private readonly ctx: CanvasRenderingContext2D | null
-  private pinned: Anchored | null = null
-  private hover: Anchored | null = null
+  private pinned: ProbePoint | null = null
+  private hover: ProbePoint | null = null
   private rafHandle: number | null = null
   // Timestamp the current animation loop started, set on its first frame so the
   // walk always begins at z₀. Null while idle.
@@ -125,6 +122,7 @@ export class OrbitOverlay {
     this.maxIter = initial.maxIter
     this.enabled = initial.enabled
     this.refreshAccent()
+    this.applyVisibility()
 
     // Hover follows the cursor; pointer events are on the (pointer-eventful)
     // fractal surface — the overlay itself is `pointer-events: none`.
@@ -142,7 +140,7 @@ export class OrbitOverlay {
     if (!this.enabled || this.isDrawerOpen()) return
     const view = this.geometry()
     if (view === null) return
-    this.pinned = { point: cssToComplex(cssX, cssY, view), anchor: { x: cssX, y: cssY } }
+    this.pinned = cssToComplex(cssX, cssY, view)
     this.start()
   }
 
@@ -171,6 +169,7 @@ export class OrbitOverlay {
     this.maxIter = next.maxIter
     this.enabled = next.enabled
     this.refreshAccent()
+    this.applyVisibility()
     if (!this.enabled || this.active() === null) {
       this.stop()
       return
@@ -178,17 +177,24 @@ export class OrbitOverlay {
     this.start()
   }
 
+  // Collapse the diagram's section of the panel when the feature is off (the
+  // CSS `:has` rule then folds the whole panel away if the inspector is off
+  // too). Hidden ⇒ `display:none` ⇒ a zero-size box, so `drawFrame` bails.
+  private applyVisibility(): void {
+    this.overlay.hidden = !this.enabled
+  }
+
   private readonly handleHover = (event: MouseEvent): void => {
     if (!this.enabled || this.pinned !== null) return
     // Don't track while a gesture owns the image — the cursor→complex mapping
     // would be wrong until the store settles.
     if (isGestureInProgress(this.surface)) return
-    const view = this.geometry()
+    const rect = this.surface.getBoundingClientRect()
+    const view = viewGeometryFromStore(this.store, this.surface, rect)
     if (view === null) return
-    const rect = this.overlay.getBoundingClientRect()
     const x = event.clientX - rect.left
     const y = event.clientY - rect.top
-    this.hover = { point: cssToComplex(x, y, view), anchor: { x, y } }
+    this.hover = cssToComplex(x, y, view)
     this.start()
   }
 
@@ -214,7 +220,7 @@ export class OrbitOverlay {
   }
 
   // The orbit currently shown: an explicit pin wins over a transient hover.
-  private active(): Anchored | null {
+  private active(): ProbePoint | null {
     return this.pinned ?? this.hover
   }
 
@@ -255,7 +261,7 @@ export class OrbitOverlay {
   }
 
   private geometry(): ViewGeometry | null {
-    return viewGeometryFromStore(this.store, this.overlay)
+    return viewGeometryFromStore(this.store, this.surface)
   }
 
   private refreshAccent(): void {
@@ -269,7 +275,7 @@ export class OrbitOverlay {
     this.ctx.clearRect(0, 0, this.overlay.width, this.overlay.height)
   }
 
-  private drawFrame(act: Anchored, elapsedMs: number): void {
+  private drawFrame(act: ProbePoint, elapsedMs: number): void {
     const ctx = this.ctx
     if (ctx === null) return
     const rect = this.overlay.getBoundingClientRect()
@@ -286,10 +292,10 @@ export class OrbitOverlay {
     ctx.clearRect(0, 0, rect.width, rect.height)
 
     // Mandelbrot: c = point, z₀ = 0. Julia: z₀ = point, c = the seed.
-    const z0Re = this.mode === 'mandelbrot' ? 0 : act.point.re
-    const z0Im = this.mode === 'mandelbrot' ? 0 : act.point.im
-    const cRe = this.mode === 'mandelbrot' ? act.point.re : this.cRe
-    const cIm = this.mode === 'mandelbrot' ? act.point.im : this.cIm
+    const z0Re = this.mode === 'mandelbrot' ? 0 : act.re
+    const z0Im = this.mode === 'mandelbrot' ? 0 : act.im
+    const cRe = this.mode === 'mandelbrot' ? act.re : this.cRe
+    const cIm = this.mode === 'mandelbrot' ? act.im : this.cIm
     const orbit = traceOrbit(z0Re, z0Im, cRe, cIm, this.maxIter)
     const total = orbit.length / 2
     if (total === 0) return
@@ -313,17 +319,14 @@ export class OrbitOverlay {
     const cReMid = (minRe + maxRe) / 2
     const cImMid = (minIm + maxIm) / 2
 
-    // Box geometry: a square ≤ ⅓ of the viewport, beside the anchor, clamped to
-    // stay fully on-screen (flips to the other side of the cursor near an edge).
-    const side = Math.min(rect.width, rect.height) * DIAGRAM_FRACTION
-    const pad = side * 0.14
+    // Box geometry: a centred square filling the panel canvas (the panel itself
+    // is the slab — translucent fill, hairline, instrument corner — so the
+    // diagram just draws the chart). On a square canvas this is the whole box.
+    const side = Math.min(rect.width, rect.height)
+    const bx = (rect.width - side) / 2
+    const by = (rect.height - side) / 2
+    const pad = side * DIAGRAM_PAD
     const scale = (side - 2 * pad) / span
-    let bx = act.anchor.x + DIAGRAM_GAP
-    let by = act.anchor.y + DIAGRAM_GAP
-    if (bx + side > rect.width) bx = act.anchor.x - DIAGRAM_GAP - side
-    if (by + side > rect.height) by = act.anchor.y - DIAGRAM_GAP - side
-    bx = clamp(bx, 0, Math.max(0, rect.width - side))
-    by = clamp(by, 0, Math.max(0, rect.height - side))
     const midX = bx + side / 2
     const midY = by + side / 2
     // Complex → box pixel: centre the bbox in the box; flip y (im grows up).
@@ -332,16 +335,11 @@ export class OrbitOverlay {
 
     const rgb = hexToRgb(this.accent)
 
-    // Panel: a faint inset slab + hairline border, then clip to it so nothing
-    // (a far iterate, the escape circle) spills onto the fractal.
+    // Clip to the plot square so nothing (a far iterate, the escape circle)
+    // spills out of the diagram and over the readout below.
     ctx.save()
     ctx.beginPath()
-    ctx.roundRect(bx, by, side, side, 4)
-    ctx.fillStyle = 'rgba(8, 11, 16, 0.66)'
-    ctx.fill()
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.10)'
-    ctx.lineWidth = 1
-    ctx.stroke()
+    ctx.rect(bx, by, side, side)
     ctx.clip()
 
     // The classic |z| = 2 circle: the textbook Mandelbrot escape radius, drawn
@@ -400,10 +398,6 @@ export class OrbitOverlay {
 
     ctx.restore()
   }
-}
-
-function clamp(value: number, lo: number, hi: number): number {
-  return Math.min(Math.max(value, lo), hi)
 }
 
 // Parse `#rgb` / `#rrggbb` into an `r, g, b` string for `rgba(...)`. The accent
