@@ -12,12 +12,14 @@ crate-type = ["cdylib", "rlib"]
 # binary links shared-memory atomics + bulk-memory + mutable-globals (see
 # `.cargo/config.toml`); wasm-opt must be told to *keep* those features enabled
 # or it errors out / silently drops the threading transform on the atomics
-# module. `-O4` is the most aggressive level (the default is a milder `-O`).
+# module. `--enable-simd` is added for the same reason now that the binary is
+# built with `+simd128` (P7, #83) — without it wasm-opt rejects the SIMD opcodes.
+# `-O4` is the most aggressive level (the default is a milder `-O`).
 # Verify in the build log that "Optimizing wasm binaries with `wasm-opt`"
 # appears — historically it has been skipped on atomics builds depending on the
 # wasm-pack version (P3, #79).
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O4", "--enable-threads", "--enable-bulk-memory", "--enable-mutable-globals"]
+wasm-opt = ["-O4", "--enable-threads", "--enable-bulk-memory", "--enable-mutable-globals", "--enable-simd"]
 
 [dependencies]
 fractal-core = { path = "../fractal-core" }

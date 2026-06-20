@@ -10,7 +10,15 @@
 # pinned stable toolchain (rust-toolchain.toml), untouched.
 [target.wasm32-unknown-unknown]
 rustflags = [
-  "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals",
+  # `+simd128` lets LLVM emit WASM SIMD where it helps (memcpy, the colorize /
+  # min-max passes, the DE derivative arithmetic) and unblocks a future
+  # hand-written two-pixel-lockstep kernel (P7, #83). The divergent escape loop
+  # itself won't auto-vectorise, so this is not a measurable win on its own. It
+  # does set an effective browser floor: a binary built with the feature emits
+  # SIMD opcodes and won't instantiate without it — SIMD is universal across
+  # evergreen browsers since 2023 (Safari 16.4+), only marginally above the
+  # shared-memory-threads floor this build already requires.
+  "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128",
   # Atomics alone do not make the memory shared; `--shared-memory` does,
   # and it requires a `--max-memory` cap. `--import-memory` lets the JS
   # glue create one SharedArrayBuffer-backed memory and hand the same
