@@ -45,6 +45,21 @@ mod viewport;
 /// (`≈ 4.3·10⁹`) stays well inside `f64` range.
 pub(crate) const BAILOUT_SQR: f64 = 65_536.0;
 
+/// Squared-distance threshold for the Brent periodicity check shared by both
+/// per-pixel kernels: an orbit that returns within `|Δz|² < 1e-28` (i.e.
+/// `|Δz| < 1e-14`) of an earlier saved point is on a short attracting cycle, so
+/// it is bounded forever — inside the set — and the kernel returns the NaN
+/// inside-set sentinel immediately instead of grinding the full `max_iter` loop.
+///
+/// Hoisted here for the **same** reason as [`BAILOUT_SQR`]: both Fields MUST
+/// agree bit-for-bit on which pixels are interior (ADR-0013), and they only do
+/// so if they detect periodicity against an identical threshold. The value is
+/// near `f64` epsilon for the O(1) magnitudes interior orbits settle at, so a
+/// genuinely escaping (exterior) point has essentially no chance of being
+/// mis-flagged as periodic — interior detection becomes epsilon-approximate, but
+/// the inside/outside partition is preserved in practice.
+pub(crate) const PERIODICITY_EPS_SQR: f64 = 1e-28;
+
 pub use complex::Complex64;
 pub use escape_distance::escape_distance;
 pub use escape_time::escape_time;

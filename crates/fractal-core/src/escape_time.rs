@@ -13,10 +13,18 @@
 //! index, which jumps by 1 at orbit boundaries) and monotonic in
 //! escape speed (faster escapers get smaller `nu`).
 //!
-//! If no escape is detected within `max_iter` iterations the orbit is
-//! treated as "inside the set" and the function returns [`f32::NAN`].
-//! Callers MUST detect inside-set points with [`f32::is_nan`], never
-//! with `==` — NaN compares unequal to itself.
+//! An orbit is "inside the set" — and the function returns [`f32::NAN`] —
+//! when it is detected to stay bounded, by *either* of two routes: it
+//! exhausts `max_iter` iterations without escaping, *or* a Brent
+//! periodicity check spots it returning to within `PERIODICITY_EPS_SQR`
+//! of an earlier orbit point (a short attracting cycle ⇒ bounded forever).
+//! The periodicity route makes inside-set detection epsilon-approximate —
+//! interior orbits resolve in a handful of iterations instead of the full
+//! loop — but the NaN sentinel and the inside/outside partition are
+//! unchanged in practice (the threshold is near `f64` epsilon, so a
+//! genuine escaper is not mis-flagged). Callers MUST detect inside-set
+//! points with [`f32::is_nan`], never with `==` — NaN compares unequal to
+//! itself.
 //!
 //! The function is family-agnostic — Slice 5's two modes share this
 //! one implementation, differing only in how the pipeline assigns
@@ -32,11 +40,19 @@
 //! immediately) and is unreachable for Mandelbrot mode (where `z_0`
 //! is always the origin).
 
-use crate::BAILOUT_SQR;
 use crate::complex::Complex64;
+use crate::{BAILOUT_SQR, PERIODICITY_EPS_SQR};
 
 pub fn escape_time(z0: Complex64, c: Complex64, max_iter: u32) -> f32 {
     let mut z = z0;
+    // Brent periodicity state: `z_old` is the orbit point saved at the last
+    // power-of-two iteration; `window` is the next iteration count at which it
+    // refreshes (so the comparison window doubles each time). An interior orbit
+    // converges to a short attracting cycle and eventually returns within
+    // `PERIODICITY_EPS_SQR` of `z_old` — detected in a handful of iterations
+    // rather than burning the full `max_iter` loop to reach the NaN sentinel.
+    let mut z_old = z0;
+    let mut window: u32 = 1;
     for i in 0..max_iter {
         let r2 = z.norm_sqr();
         if r2 > BAILOUT_SQR {
@@ -46,6 +62,19 @@ pub fn escape_time(z0: Complex64, c: Complex64, max_iter: u32) -> f32 {
             return (f64::from(i) + 1.0 - log_z.log2()) as f32;
         }
         z = z.square() + c;
+        // Periodicity: if the advanced `z` has returned within epsilon of the
+        // saved `z_old`, the orbit is cycling → bounded → inside the set. The
+        // delta is taken componentwise because `Complex64` exposes no `Sub`
+        // (its surface is deliberately minimal — see `complex.rs`).
+        let dre = z.re - z_old.re;
+        let dim = z.im - z_old.im;
+        if dre * dre + dim * dim < PERIODICITY_EPS_SQR {
+            return f32::NAN;
+        }
+        if i + 1 == window {
+            z_old = z;
+            window *= 2;
+        }
     }
     f32::NAN
 }
@@ -204,6 +233,41 @@ mod tests {
             (a - b).abs() < 1.0,
             "Julia neighbouring nu jumped: |{a} − {b}| = {}",
             (a - b).abs(),
+        );
+    }
+
+    // --- Brent periodicity check -------------------------------------------
+    //
+    // The periodicity route returns the *same* NaN inside-set sentinel the
+    // full-loop route would, just sooner — so its speedup is invisible to an
+    // output assertion (and is measured by the criterion bench instead). What
+    // these tests pin is that it does not change *which* pixels are interior:
+    // an interior orbit the cardioid/bulb cull cannot cover is still detected,
+    // and a genuinely escaping orbit is never mis-flagged as periodic.
+
+    #[test]
+    fn higher_order_bulb_interior_is_nan() {
+        // c ≈ −0.1226 + 0.7449i is the centre of the period-3 bulb — inside the
+        // Mandelbrot set but outside the main cardioid and period-2 bulb, so the
+        // O(1) cull (`pipeline::in_main_cardioid_or_bulb`) does not cover it. Its
+        // orbit converges to a period-3 cycle, which the kernel's periodicity
+        // check detects → NaN. (Bounded ⇒ NaN held before this change too; the
+        // point of the test is that the new early-exit keeps it interior.)
+        assert!(escape_time(ORIGIN, Complex64::new(-0.1226, 0.7449), MAX_ITER).is_nan());
+    }
+
+    #[test]
+    fn slow_exterior_escaper_is_not_falsely_flagged_periodic() {
+        // The one real correctness risk of periodicity checking: a near-parabolic
+        // *exterior* point that crawls through the channel just past the cardioid
+        // cusp (c = 0.26, ≈0.01 beyond the cusp at 0.25) before escaping. Its
+        // orbit moves slowly but never stalls — so with the near-`f64`-epsilon
+        // threshold it must still escape to a finite smooth count, not get
+        // mis-detected as a cycle and painted as interior.
+        let nu = escape_time(ORIGIN, Complex64::new(0.26, 0.0), 4096);
+        assert!(
+            nu.is_finite(),
+            "slow exterior escaper mis-flagged as interior: nu={nu}",
         );
     }
 }

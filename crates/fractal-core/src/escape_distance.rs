@@ -14,12 +14,16 @@
 //! boundary and grows smoothly away from it, so a hard clamp of the first
 //! few pixels of distance (the `Clamped` normalisation) draws hairlines.
 //!
-//! If no escape is detected within `max_iter` iterations the orbit is
-//! treated as "inside the set" and the function returns [`f32::NAN`] —
-//! the **same** inside/outside partition and sentinel contract as
-//! [`crate::escape_time`], so the two Fields agree on which pixels are
-//! interior. Callers MUST detect inside-set points with [`f32::is_nan`],
-//! never with `==`.
+//! An orbit is treated as "inside the set" — the function returns
+//! [`f32::NAN`] — when it is detected to stay bounded, by *either* route:
+//! exhausting `max_iter` without escaping, *or* the Brent periodicity check
+//! spotting it return to within `PERIODICITY_EPS_SQR` of an earlier orbit
+//! point (a short cycle ⇒ bounded). This is the **same** inside/outside
+//! partition and sentinel contract as [`crate::escape_time`] — both kernels
+//! share the bailout *and* the periodicity threshold, so the two Fields
+//! agree bit-for-bit on which pixels are interior (the detection is
+//! epsilon-approximate but the partition is preserved in practice). Callers
+//! MUST detect inside-set points with [`f32::is_nan`], never with `==`.
 //!
 //! Like `escape_time`, the kernel is **family-agnostic** (ADR-0013): the
 //! family difference lives entirely in the seeds the caller passes, never
@@ -34,8 +38,8 @@
 //! `z'_{n+1} = 2·z_n·z'_n + dc`, evaluated with the *current* `z_n`
 //! before `z` advances.
 
-use crate::BAILOUT_SQR;
 use crate::complex::Complex64;
+use crate::{BAILOUT_SQR, PERIODICITY_EPS_SQR};
 
 /// Estimate the distance from `z0` to the set boundary in complex-plane
 /// units, or [`f32::NAN`] if the orbit stays bounded for `max_iter`
@@ -52,7 +56,13 @@ pub fn escape_distance(
 ) -> f32 {
     let mut z = z0;
     let mut dz = dz0;
-    for _ in 0..max_iter {
+    // Brent periodicity state (see `escape_time`): the periodicity test is on
+    // `z` only — `dz` is irrelevant to whether the orbit is bounded — so an
+    // interior orbit converging to a short cycle returns the NaN inside-set
+    // sentinel in a handful of iterations rather than the full `max_iter` loop.
+    let mut z_old = z0;
+    let mut window: u32 = 1;
+    for i in 0..max_iter {
         let r2 = z.norm_sqr();
         if r2 > BAILOUT_SQR {
             let dz2 = dz.norm_sqr();
@@ -81,6 +91,17 @@ pub fn escape_distance(
         let dz_im = 2.0 * (z.re * dz.im + z.im * dz.re) + dc.im;
         dz = Complex64::new(dz_re, dz_im);
         z = z.square() + c;
+        // Periodicity check on the advanced `z` (componentwise delta — no `Sub`
+        // on `Complex64`): a returned orbit is a bounded interior point.
+        let dre = z.re - z_old.re;
+        let dim = z.im - z_old.im;
+        if dre * dre + dim * dim < PERIODICITY_EPS_SQR {
+            return f32::NAN;
+        }
+        if i + 1 == window {
+            z_old = z;
+            window *= 2;
+        }
     }
     f32::NAN
 }
@@ -224,5 +245,33 @@ mod tests {
         let j = escape_distance(p, c, ONE, ORIGIN, MAX_ITER); // Julia at z_0 = p
         assert!(m.is_finite() && j.is_finite());
         assert!(m != j, "seed pairs gave identical results: {m} == {j}");
+    }
+
+    // --- Brent periodicity check -------------------------------------------
+    //
+    // Mirrors the escape_time periodicity tests on the Distance Estimate kernel:
+    // the periodicity route returns the same NaN inside-set sentinel sooner (the
+    // speedup is bench-measured, not output-visible), so these pin only that the
+    // interior/exterior partition is unchanged.
+
+    #[test]
+    fn higher_order_bulb_interior_is_nan() {
+        // Period-3 bulb centre (c ≈ −0.1226 + 0.7449i): inside the set but
+        // outside the cardioid/period-2 cull's reach, converging to a period-3
+        // cycle the kernel's periodicity check detects → NaN distance.
+        assert!(mandelbrot_distance(Complex64::new(-0.1226, 0.7449)).is_nan());
+    }
+
+    #[test]
+    fn slow_exterior_escaper_is_not_falsely_flagged_periodic() {
+        // c = 0.26 crawls through the channel just past the cusp before escaping;
+        // it must still read a finite, positive distance, not be mis-detected as
+        // a bounded cycle and painted interior.
+        let d = escape_distance(ORIGIN, Complex64::new(0.26, 0.0), ORIGIN, ONE, 4096);
+        assert!(
+            d.is_finite(),
+            "slow exterior escaper mis-flagged interior: {d}"
+        );
+        assert!(d > 0.0, "exterior distance must be positive, got {d}");
     }
 }
