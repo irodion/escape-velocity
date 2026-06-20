@@ -69,34 +69,24 @@
         overflow: hidden;
         background: #000;
       }
-      /* Orbit visualizer overlay (E1, #94): a transparent canvas stacked over
-         the fractal. `inset: 0` fills the stage — which `#fractal` also fills —
-         so its pixel box matches the fractal exactly; `pointer-events: none`
-         lets pan/zoom/click pass through to the canvas below. */
-      canvas#orbit {
-        position: absolute;
-        inset: 0;
-        width: 100%;
-        height: 100%;
-        display: block;
-        pointer-events: none;
-      }
-      /* Pixel inspector HUD (E2, #95): a compact readout pinned to the stage's
-         bottom-right, shown only while the Inspect toggle is on. Bottom-right
-         clears the top-left toggle and the left drawer; `pointer-events: none`
-         lets a pan/zoom that strays under it pass through to the canvas. Mirrors
-         the instrument skin — translucent slab, hairline, mono, tabular figures. */
-      .inspector {
+      /* Unified probe panel (E1 + E2): the orbit visualizer and the pixel
+         inspector are one corner instrument — a translucent slab pinned to the
+         stage's bottom-right, mirroring the drawer/toggle skin (panel fill,
+         backdrop blur, hairline, the 3px instrument corner). Bottom-right clears
+         the top-left toggle and the left drawer; `pointer-events: none` lets a
+         pan/zoom that strays under it pass through to the canvas. Either toggle
+         summons the panel; each section hides on its own toggle, and `:has`
+         collapses the whole panel when neither section is shown — so main.ts
+         never touches the wrapper. */
+      .probe {
         position: absolute;
         right: max(0.9rem, env(safe-area-inset-right));
         bottom: max(0.9rem, env(safe-area-inset-bottom));
         z-index: 20;
-        display: grid;
-        grid-template-columns: auto auto minmax(0, 1fr);
-        align-items: center;
-        gap: 0.15rem 0.55rem;
+        display: flex;
+        flex-direction: column;
+        width: min(17rem, 84vw);
         padding: 0.6rem 0.7rem;
-        max-width: min(20rem, 72vw);
         color: var(--ink);
         background: var(--panel);
         -webkit-backdrop-filter: blur(14px) saturate(1.2);
@@ -104,12 +94,41 @@
         border: 1px solid var(--panel-edge);
         border-radius: var(--r);
         font-family: var(--font-mono);
+        pointer-events: none;
+      }
+      /* Fold the panel away entirely when neither section is on (both children
+         `hidden`), so an empty slab never floats in the corner. */
+      .probe:not(:has(> :not([hidden]))) { display: none; }
+
+      /* Orbit diagram (E1, #94): a square chart filling the panel width, drawn
+         by orbit.ts into its own local frame (the orbit's bbox fit into the
+         box — viewport-independent, so a pinned orbit survives pan/zoom). */
+      canvas#orbit {
+        display: block;
+        width: 100%;
+        aspect-ratio: 1 / 1;
+      }
+      canvas#orbit[hidden] { display: none; }
+
+      /* Pixel inspector readout (E2, #95): a compact key/value grid with the
+         painted-colour swatch. The panel carries the slab; this is just the
+         layout + the instrument's mono, tabular figures. */
+      .inspector {
+        display: grid;
+        grid-template-columns: auto auto minmax(0, 1fr);
+        align-items: center;
+        gap: 0.15rem 0.55rem;
         font-size: 0.82rem;
         line-height: 1.5;
         font-variant-numeric: tabular-nums;
-        pointer-events: none;
       }
       .inspector[hidden] { display: none; }
+      /* A hairline only when both sections show, parting diagram from readout. */
+      #orbit:not([hidden]) + .inspector:not([hidden]) {
+        margin-top: 0.6rem;
+        padding-top: 0.6rem;
+        border-top: 1px solid var(--hair);
+      }
       /* Swatch: the exact painted colour (set inline by inspector.ts), spanning
          the three readout rows down the left. */
       .inspector__swatch {
@@ -1087,10 +1106,15 @@
     </form>
     <div class="stage">
       <canvas id="fractal" width="800" height="600"></canvas>
-      <canvas id="orbit"></canvas>
-      <!-- Pixel inspector HUD (E2, #95). Populated by inspector.ts; shown only
-           while the Inspect toggle is on. -->
-      <div id="inspector" class="inspector" hidden aria-live="polite"></div>
+      <!-- Unified probe instrument (E1 + E2): the orbit diagram and the pixel
+           inspector share one corner panel. The orbit canvas is drawn by
+           orbit.ts; the readout is populated by inspector.ts. Each section
+           hides on its own toggle, and the panel auto-collapses (CSS `:has`)
+           when neither is shown. -->
+      <div class="probe">
+        <canvas id="orbit" hidden aria-hidden="true"></canvas>
+        <div id="inspector" class="inspector" hidden aria-live="polite"></div>
+      </div>
     </div>
     <div class="vignette"></div>
     <script type="module" src="/src/main.ts"></script>

@@ -61,8 +61,12 @@ function setup(initialEnabled = true) {
   const overlay = document.getElementById('overlay') as HTMLCanvasElement
   const { ctx, calls } = makeCtx()
   overlay.getContext = (() => ctx) as unknown as HTMLCanvasElement['getContext']
-  overlay.getBoundingClientRect = () =>
-    ({ width: 800, height: 600, left: 0, top: 0, right: 800, bottom: 600, x: 0, y: 0 }) as DOMRect
+  // The diagram now lives in a square corner panel; the overlay's box sizes the
+  // chart, while the cursor→complex mapping reads the *fractal surface's* box.
+  const rect = (w: number, h: number) =>
+    ({ width: w, height: h, left: 0, top: 0, right: w, bottom: h, x: 0, y: 0 }) as DOMRect
+  overlay.getBoundingClientRect = () => rect(240, 240)
+  surface.getBoundingClientRect = () => rect(800, 600)
 
   const store = { get: () => viewport() } as unknown as ViewportStore
   const drawer = { open: false }
