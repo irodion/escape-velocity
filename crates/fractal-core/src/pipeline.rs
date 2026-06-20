@@ -709,6 +709,9 @@ mod tests {
         Palette::Solar,
         Palette::Spectral,
         Palette::Cosmic,
+        // Hand-rolled CRT-monitor stop palettes.
+        Palette::Phosphor,
+        Palette::Amber,
     ];
 
     const ALL_MODES: &[NormalizationMode] = &[

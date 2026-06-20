@@ -28,6 +28,8 @@ const PALETTE_ENUM: Record<PaletteName, Palette> = {
   solar: Palette.Solar,
   spectral: Palette.Spectral,
   cosmic: Palette.Cosmic,
+  phosphor: Palette.Phosphor,
+  amber: Palette.Amber,
 }
 
 const NORMALISATION_ENUM: Record<NormalisationName, NormalizationMode> = {
@@ -75,4 +77,6 @@ export const PALETTE_ACCENT: Record<PaletteName, string> = {
   solar: '#ff8c42',
   spectral: '#2ec5c5',
   cosmic: '#c77dff',
+  phosphor: '#52e06a',
+  amber: '#e0a83c',
 }

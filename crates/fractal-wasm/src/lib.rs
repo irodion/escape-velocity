@@ -107,6 +107,8 @@ pub enum Palette {
     Solar = 12,
     Spectral = 13,
     Cosmic = 14,
+    Phosphor = 15,
+    Amber = 16,
 }
 
 #[wasm_bindgen]
@@ -170,6 +172,8 @@ impl From<Palette> for CorePalette {
             Palette::Solar => CorePalette::Solar,
             Palette::Spectral => CorePalette::Spectral,
             Palette::Cosmic => CorePalette::Cosmic,
+            Palette::Phosphor => CorePalette::Phosphor,
+            Palette::Amber => CorePalette::Amber,
         }
     }
 }

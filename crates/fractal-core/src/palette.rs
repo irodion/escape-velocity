@@ -62,6 +62,16 @@
 //! infinitely smooth gradient with no stop table; because every `c` is
 //! an integer, `colour(0) == colour(1)`, so they are seamlessly cyclic.
 //!
+//! [`Palette::Phosphor`] is a hand-rolled monochrome ramp evoking a
+//! green-on-black CRT monitor: the void stays black and the escape
+//! bands climb a single P1-phosphor hue from a faint scan-line glow to
+//! a blooming near-white highlight, the way an old tube's beam
+//! saturates its brightest pixels. It is non-cyclic.
+//!
+//! [`Palette::Amber`] is the P3-phosphor sibling of [`Palette::Phosphor`]
+//! — the same black → glow → bloom monitor ramp in the warm amber hue
+//! of the other classic terminal tube. Also non-cyclic.
+//!
 //! [`Palette::Grayscale`] is a hand-rolled two-stop ramp, included as
 //! a reference baseline.
 
@@ -84,6 +94,8 @@ pub enum Palette {
     Solar,
     Spectral,
     Cosmic,
+    Phosphor,
+    Amber,
 }
 
 /// Identifies how `nu` values are mapped into `[0, 1]` before palette
@@ -245,6 +257,31 @@ const KAHOL_LAVAN_STOPS: &[Stop] = &[
     (1.00, [255, 255, 255]),
 ];
 
+// Green-phosphor CRT monitor — a single hue from void black up through
+// a faint scan-line glow and the classic P1 phosphor green to a
+// blooming near-white highlight at the brightest escape rate.
+// Hand-rolled, non-cyclic.
+const PHOSPHOR_STOPS: &[Stop] = &[
+    (0.00, [0, 0, 0]),
+    (0.25, [2, 28, 8]),
+    (0.50, [10, 90, 28]),
+    (0.72, [40, 180, 60]),
+    (0.88, [102, 235, 110]),
+    (1.00, [200, 255, 190]),
+];
+
+// Amber CRT monitor — the P3-phosphor sibling of `PHOSPHOR_STOPS`: the
+// same ramp in the classic amber terminal hue (P3 ≈ #FFB000).
+// Hand-rolled, non-cyclic.
+const AMBER_STOPS: &[Stop] = &[
+    (0.00, [0, 0, 0]),
+    (0.25, [28, 12, 0]),
+    (0.50, [95, 48, 0]),
+    (0.72, [185, 110, 6]),
+    (0.88, [240, 176, 32]),
+    (1.00, [255, 232, 170]),
+];
+
 /// Parameters for a cosine procedural palette (Inigo Quilez):
 /// `colour(t) = a + b·cos(2π(c·t + d))`, evaluated per channel and
 /// clamped to `[0, 1]`. Every `c` is an integer, so `cos` completes a
@@ -310,6 +347,8 @@ impl Palette {
             Palette::Solar => PaletteRepr::Cosine(&SOLAR_COS),
             Palette::Spectral => PaletteRepr::Cosine(&SPECTRAL_COS),
             Palette::Cosmic => PaletteRepr::Cosine(&COSMIC_COS),
+            Palette::Phosphor => PaletteRepr::Stops(PHOSPHOR_STOPS),
+            Palette::Amber => PaletteRepr::Stops(AMBER_STOPS),
         }
     }
 
@@ -407,6 +446,8 @@ mod tests {
         Palette::Solar,
         Palette::Spectral,
         Palette::Cosmic,
+        Palette::Phosphor,
+        Palette::Amber,
     ];
 
     // The cosine palettes have no stop table, so the "endpoint equals
@@ -425,6 +466,8 @@ mod tests {
         Palette::Rainbow,
         Palette::Ocean,
         Palette::KaholLavan,
+        Palette::Phosphor,
+        Palette::Amber,
     ];
 
     fn stops_of(p: Palette) -> &'static [Stop] {

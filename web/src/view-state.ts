@@ -72,6 +72,8 @@ const PALETTES = [
   'solar',
   'spectral',
   'cosmic',
+  'phosphor',
+  'amber',
 ] as const satisfies readonly PaletteName[]
 const NORMALISATIONS = [
   'cycled',
