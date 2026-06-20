@@ -27,6 +27,8 @@ export type PaletteName =
   | 'solar'
   | 'spectral'
   | 'cosmic'
+  | 'phosphor'
+  | 'amber'
 export type NormalisationName =
   | 'cycled'
   | 'histogram'
