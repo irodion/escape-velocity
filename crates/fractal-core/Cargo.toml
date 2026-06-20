@@ -17,3 +17,14 @@ rayon = "1"
 # pan/zoom symmetry, the ADR-0011 reference-width rule), which generalise the
 # example-based tests in `viewport.rs` over randomised inputs.
 proptest = "1"
+# Micro-benchmark harness for the per-pixel kernels (P7, #83): the Brent
+# periodicity check returns the same NaN sentinel sooner, so its win is
+# invisible to the bit-identical output tests and is measured here instead.
+# `fractal-core` is pure Rust, so the bench runs natively on the pinned stable
+# toolchain with no wasm in the loop.
+criterion = "0.5"
+
+# Whole-frame compute timing for the kernels (see `benches/escape.rs`).
+[[bench]]
+name = "escape"
+harness = false

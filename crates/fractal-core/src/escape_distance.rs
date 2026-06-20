@@ -14,12 +14,17 @@
 //! boundary and grows smoothly away from it, so a hard clamp of the first
 //! few pixels of distance (the `Clamped` normalisation) draws hairlines.
 //!
-//! If no escape is detected within `max_iter` iterations the orbit is
-//! treated as "inside the set" and the function returns [`f32::NAN`] —
-//! the **same** inside/outside partition and sentinel contract as
-//! [`crate::escape_time`], so the two Fields agree on which pixels are
-//! interior. Callers MUST detect inside-set points with [`f32::is_nan`],
-//! never with `==`.
+//! An orbit is treated as "inside the set" — the function returns
+//! [`f32::NAN`] — when it is detected to stay bounded, by *either* route:
+//! exhausting `max_iter` without escaping, *or* the Brent periodicity check
+//! spotting it return to an *exactly equal* earlier orbit point (whereupon
+//! the deterministic recurrence repeats it forever ⇒ bounded). This is the
+//! **same** inside/outside partition and sentinel contract as
+//! [`crate::escape_time`] — both kernels share the bailout and the same
+//! bit-exact periodicity test, so the two Fields agree bit-for-bit on which
+//! pixels are interior, and the periodicity early-exit is output-identical to
+//! running the full loop. Callers MUST detect inside-set points with
+//! [`f32::is_nan`], never with `==`.
 //!
 //! Like `escape_time`, the kernel is **family-agnostic** (ADR-0013): the
 //! family difference lives entirely in the seeds the caller passes, never
@@ -52,7 +57,13 @@ pub fn escape_distance(
 ) -> f32 {
     let mut z = z0;
     let mut dz = dz0;
-    for _ in 0..max_iter {
+    // Brent periodicity state (see `escape_time`): the periodicity test is on
+    // `z` only — `dz` is irrelevant to whether the orbit is bounded — so an
+    // interior orbit converging to a short cycle returns the NaN inside-set
+    // sentinel in a handful of iterations rather than the full `max_iter` loop.
+    let mut z_old = z0;
+    let mut window: u32 = 1;
+    for i in 0..max_iter {
         let r2 = z.norm_sqr();
         if r2 > BAILOUT_SQR {
             let dz2 = dz.norm_sqr();
@@ -81,6 +92,20 @@ pub fn escape_distance(
         let dz_im = 2.0 * (z.re * dz.im + z.im * dz.re) + dc.im;
         dz = Complex64::new(dz_re, dz_im);
         z = z.square() + c;
+        // Bit-exact periodicity check on the advanced `z` (see `escape_time`):
+        // an orbit that returns to an exactly-equal earlier value repeats
+        // forever → bounded interior point. Exact equality (not `< epsilon`) is
+        // what keeps this output-identical to the full loop; an epsilon test
+        // would misclassify orbits grazing a repelling cycle as interior.
+        if z.re.to_bits() == z_old.re.to_bits() && z.im.to_bits() == z_old.im.to_bits() {
+            return f32::NAN;
+        }
+        if i + 1 == window {
+            z_old = z;
+            // `saturating_mul` keeps the window doubling total past `2^31` (see
+            // `escape_time` for the rationale); `i + 1` cannot overflow.
+            window = window.saturating_mul(2);
+        }
     }
     f32::NAN
 }
@@ -224,5 +249,49 @@ mod tests {
         let j = escape_distance(p, c, ONE, ORIGIN, MAX_ITER); // Julia at z_0 = p
         assert!(m.is_finite() && j.is_finite());
         assert!(m != j, "seed pairs gave identical results: {m} == {j}");
+    }
+
+    // --- Brent periodicity check -------------------------------------------
+    //
+    // Mirrors the escape_time periodicity tests on the Distance Estimate kernel:
+    // the periodicity route returns the same NaN inside-set sentinel sooner (the
+    // speedup is bench-measured, not output-visible), so these pin only that the
+    // interior/exterior partition is unchanged.
+
+    #[test]
+    fn higher_order_bulb_interior_is_nan() {
+        // Period-3 bulb centre (c ≈ −0.1226 + 0.7449i): inside the set but
+        // outside the cardioid/period-2 cull's reach, converging to a period-3
+        // cycle the kernel's periodicity check detects → NaN distance.
+        assert!(mandelbrot_distance(Complex64::new(-0.1226, 0.7449)).is_nan());
+    }
+
+    #[test]
+    fn slow_exterior_escaper_is_not_falsely_flagged_periodic() {
+        // c = 0.26 crawls through the channel just past the cusp before escaping;
+        // it must still read a finite, positive distance, not be mis-detected as
+        // a bounded cycle and painted interior.
+        let d = escape_distance(ORIGIN, Complex64::new(0.26, 0.0), ORIGIN, ONE, 4096);
+        assert!(
+            d.is_finite(),
+            "slow exterior escaper mis-flagged interior: {d}"
+        );
+        assert!(d > 0.0, "exterior distance must be positive, got {d}");
+    }
+
+    #[test]
+    fn repelling_near_cycle_exterior_escapes() {
+        // Mirror of the escape_time witness: a Julia point starting 2·EPSILON off
+        // the repelling fixed point of c = -2 escapes ~29 steps later, so it must
+        // read a finite, positive distance. An epsilon-proximity check would fire
+        // on the first step and mis-paint it interior; bit-exact detection does
+        // not.
+        let c = Complex64::new(-2.0 + 2.0 * f64::EPSILON, 0.0);
+        let d = julia_distance(Complex64::new(2.0, 0.0), c);
+        assert!(
+            d.is_finite(),
+            "repelling near-cycle point mis-flagged interior: {d}"
+        );
+        assert!(d > 0.0, "exterior distance must be positive, got {d}");
     }
 }

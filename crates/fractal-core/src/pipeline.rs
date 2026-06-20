@@ -70,6 +70,15 @@ const CLAMPED_DISTANCE_K: f32 = 1.5;
 /// untouched. Mandelbrot-only: the family is known at the dispatch seam
 /// (the kernels stay family-agnostic, ADR-0013), and the cardioid/bulb
 /// geometry does not transfer to Julia.
+///
+/// This cull is now a *pure O(1) fast-path on top of* the kernel's own
+/// interior detection: [`escape_time`] / [`escape_distance`] also early-exit
+/// bounded orbits via a Brent periodicity check, so even a `false` here (an
+/// interior pixel in a higher-order bulb, or any Julia interior) no longer
+/// burns the full `max_iter` loop. The cull still pays off — it skips the
+/// kernel call entirely for the set's two largest components, the bulk of its
+/// interior area — and stays output-identical, since both it and the kernel
+/// resolve to the same NaN sentinel.
 fn in_main_cardioid_or_bulb(c: Complex64) -> bool {
     // Main cardioid: with `q = (re − ¼)² + im²`, the point lies inside iff
     // `q·(q + (re − ¼)) ≤ ¼·im²`. (The cusp `c = 0.25` satisfies it with
