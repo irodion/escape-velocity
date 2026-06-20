@@ -17,13 +17,14 @@
 //! An orbit is treated as "inside the set" — the function returns
 //! [`f32::NAN`] — when it is detected to stay bounded, by *either* route:
 //! exhausting `max_iter` without escaping, *or* the Brent periodicity check
-//! spotting it return to within `PERIODICITY_EPS_SQR` of an earlier orbit
-//! point (a short cycle ⇒ bounded). This is the **same** inside/outside
-//! partition and sentinel contract as [`crate::escape_time`] — both kernels
-//! share the bailout *and* the periodicity threshold, so the two Fields
-//! agree bit-for-bit on which pixels are interior (the detection is
-//! epsilon-approximate but the partition is preserved in practice). Callers
-//! MUST detect inside-set points with [`f32::is_nan`], never with `==`.
+//! spotting it return to an *exactly equal* earlier orbit point (whereupon
+//! the deterministic recurrence repeats it forever ⇒ bounded). This is the
+//! **same** inside/outside partition and sentinel contract as
+//! [`crate::escape_time`] — both kernels share the bailout and the same
+//! bit-exact periodicity test, so the two Fields agree bit-for-bit on which
+//! pixels are interior, and the periodicity early-exit is output-identical to
+//! running the full loop. Callers MUST detect inside-set points with
+//! [`f32::is_nan`], never with `==`.
 //!
 //! Like `escape_time`, the kernel is **family-agnostic** (ADR-0013): the
 //! family difference lives entirely in the seeds the caller passes, never
@@ -38,8 +39,8 @@
 //! `z'_{n+1} = 2·z_n·z'_n + dc`, evaluated with the *current* `z_n`
 //! before `z` advances.
 
+use crate::BAILOUT_SQR;
 use crate::complex::Complex64;
-use crate::{BAILOUT_SQR, PERIODICITY_EPS_SQR};
 
 /// Estimate the distance from `z0` to the set boundary in complex-plane
 /// units, or [`f32::NAN`] if the orbit stays bounded for `max_iter`
@@ -91,11 +92,12 @@ pub fn escape_distance(
         let dz_im = 2.0 * (z.re * dz.im + z.im * dz.re) + dc.im;
         dz = Complex64::new(dz_re, dz_im);
         z = z.square() + c;
-        // Periodicity check on the advanced `z` (componentwise delta — no `Sub`
-        // on `Complex64`): a returned orbit is a bounded interior point.
-        let dre = z.re - z_old.re;
-        let dim = z.im - z_old.im;
-        if dre * dre + dim * dim < PERIODICITY_EPS_SQR {
+        // Bit-exact periodicity check on the advanced `z` (see `escape_time`):
+        // an orbit that returns to an exactly-equal earlier value repeats
+        // forever → bounded interior point. Exact equality (not `< epsilon`) is
+        // what keeps this output-identical to the full loop; an epsilon test
+        // would misclassify orbits grazing a repelling cycle as interior.
+        if z.re.to_bits() == z_old.re.to_bits() && z.im.to_bits() == z_old.im.to_bits() {
             return f32::NAN;
         }
         if i + 1 == window {
@@ -273,6 +275,22 @@ mod tests {
         assert!(
             d.is_finite(),
             "slow exterior escaper mis-flagged interior: {d}"
+        );
+        assert!(d > 0.0, "exterior distance must be positive, got {d}");
+    }
+
+    #[test]
+    fn repelling_near_cycle_exterior_escapes() {
+        // Mirror of the escape_time witness: a Julia point starting 2·EPSILON off
+        // the repelling fixed point of c = -2 escapes ~29 steps later, so it must
+        // read a finite, positive distance. An epsilon-proximity check would fire
+        // on the first step and mis-paint it interior; bit-exact detection does
+        // not.
+        let c = Complex64::new(-2.0 + 2.0 * f64::EPSILON, 0.0);
+        let d = julia_distance(Complex64::new(2.0, 0.0), c);
+        assert!(
+            d.is_finite(),
+            "repelling near-cycle point mis-flagged interior: {d}"
         );
         assert!(d > 0.0, "exterior distance must be positive, got {d}");
     }

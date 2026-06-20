@@ -16,15 +16,16 @@
 //! An orbit is "inside the set" — and the function returns [`f32::NAN`] —
 //! when it is detected to stay bounded, by *either* of two routes: it
 //! exhausts `max_iter` iterations without escaping, *or* a Brent
-//! periodicity check spots it returning to within `PERIODICITY_EPS_SQR`
-//! of an earlier orbit point (a short attracting cycle ⇒ bounded forever).
-//! The periodicity route makes inside-set detection epsilon-approximate —
-//! interior orbits resolve in a handful of iterations instead of the full
-//! loop — but the NaN sentinel and the inside/outside partition are
-//! unchanged in practice (the threshold is near `f64` epsilon, so a
-//! genuine escaper is not mis-flagged). Callers MUST detect inside-set
-//! points with [`f32::is_nan`], never with `==` — NaN compares unequal to
-//! itself.
+//! periodicity check spots the orbit return to an *exactly equal* earlier
+//! `f64` value (whereupon the deterministic recurrence repeats it forever,
+//! so it can never escape). The periodicity route only resolves interior
+//! orbits sooner — it is **output-identical** to running the full loop, so
+//! the NaN sentinel and the inside/outside partition are unchanged. Exact
+//! equality, not epsilon proximity, is essential: an orbit grazing a
+//! *repelling* cycle comes arbitrarily close to an earlier point before
+//! escaping, so an epsilon test would misclassify it as interior. Callers
+//! MUST detect inside-set points with [`f32::is_nan`], never with `==` —
+//! NaN compares unequal to itself.
 //!
 //! The function is family-agnostic — Slice 5's two modes share this
 //! one implementation, differing only in how the pipeline assigns
@@ -40,17 +41,17 @@
 //! immediately) and is unreachable for Mandelbrot mode (where `z_0`
 //! is always the origin).
 
+use crate::BAILOUT_SQR;
 use crate::complex::Complex64;
-use crate::{BAILOUT_SQR, PERIODICITY_EPS_SQR};
 
 pub fn escape_time(z0: Complex64, c: Complex64, max_iter: u32) -> f32 {
     let mut z = z0;
     // Brent periodicity state: `z_old` is the orbit point saved at the last
     // power-of-two iteration; `window` is the next iteration count at which it
     // refreshes (so the comparison window doubles each time). An interior orbit
-    // converges to a short attracting cycle and eventually returns within
-    // `PERIODICITY_EPS_SQR` of `z_old` — detected in a handful of iterations
-    // rather than burning the full `max_iter` loop to reach the NaN sentinel.
+    // converging to a short attracting cycle reaches an exactly-repeating `f64`
+    // value within a handful of iterations, which is detected here rather than
+    // burning the full `max_iter` loop to reach the NaN sentinel.
     let mut z_old = z0;
     let mut window: u32 = 1;
     for i in 0..max_iter {
@@ -62,13 +63,16 @@ pub fn escape_time(z0: Complex64, c: Complex64, max_iter: u32) -> f32 {
             return (f64::from(i) + 1.0 - log_z.log2()) as f32;
         }
         z = z.square() + c;
-        // Periodicity: if the advanced `z` has returned within epsilon of the
-        // saved `z_old`, the orbit is cycling → bounded → inside the set. The
-        // delta is taken componentwise because `Complex64` exposes no `Sub`
-        // (its surface is deliberately minimal — see `complex.rs`).
-        let dre = z.re - z_old.re;
-        let dim = z.im - z_old.im;
-        if dre * dre + dim * dim < PERIODICITY_EPS_SQR {
+        // Periodicity: if the advanced `z` has returned to an *exactly* equal
+        // earlier value, the deterministic recurrence will repeat it forever, so
+        // the orbit is bounded → inside the set. Bit-equality (not `< epsilon`)
+        // is what makes this output-identical to running the full loop: epsilon
+        // proximity cannot prove boundedness — an orbit grazing a *repelling*
+        // cycle comes arbitrarily close before escaping (e.g. z_0 = 2,
+        // c = -2 + 2·f64::EPSILON escapes ~29 steps later). Compared on bits
+        // because `Complex64` exposes no `Sub` (its surface is deliberately
+        // minimal — see `complex.rs`).
+        if z.re.to_bits() == z_old.re.to_bits() && z.im.to_bits() == z_old.im.to_bits() {
             return f32::NAN;
         }
         if i + 1 == window {
@@ -264,16 +268,32 @@ mod tests {
 
     #[test]
     fn slow_exterior_escaper_is_not_falsely_flagged_periodic() {
-        // The one real correctness risk of periodicity checking: a near-parabolic
-        // *exterior* point that crawls through the channel just past the cardioid
-        // cusp (c = 0.26, ≈0.01 beyond the cusp at 0.25) before escaping. Its
-        // orbit moves slowly but never stalls — so with the near-`f64`-epsilon
-        // threshold it must still escape to a finite smooth count, not get
-        // mis-detected as a cycle and painted as interior.
+        // A near-parabolic *exterior* point that crawls through the channel just
+        // past the cardioid cusp (c = 0.26, ≈0.01 beyond the cusp at 0.25) before
+        // escaping. Its orbit moves slowly but never repeats a value exactly, so
+        // it must still escape to a finite smooth count, not get mis-detected as a
+        // cycle and painted as interior.
         let nu = escape_time(ORIGIN, Complex64::new(0.26, 0.0), 4096);
         assert!(
             nu.is_finite(),
             "slow exterior escaper mis-flagged as interior: nu={nu}",
+        );
+    }
+
+    #[test]
+    fn repelling_near_cycle_exterior_escapes() {
+        // The case exact equality must get right where an epsilon test fails:
+        // z_0 = 2 sits on the *repelling* fixed point of c = -2 (orbit pinned at
+        // 2 forever), so c = -2 + 2·f64::EPSILON starts only 2·EPSILON off it.
+        // An epsilon-proximity check fires on the first step and paints it
+        // interior, but the repelling multiplier (≈4) blows that deviation up
+        // until the orbit escapes ~29 steps later. Bit-exact detection never
+        // fires, so the point reads its true finite escape count.
+        let c = Complex64::new(-2.0 + 2.0 * f64::EPSILON, 0.0);
+        let nu = escape_time(Complex64::new(2.0, 0.0), c, MAX_ITER);
+        assert!(
+            nu.is_finite(),
+            "repelling near-cycle point mis-flagged as interior: nu={nu}",
         );
     }
 }
