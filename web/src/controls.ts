@@ -109,7 +109,7 @@ export class Controls {
     if (!(maxIterRange instanceof HTMLInputElement) || maxIterRange.type !== 'range') {
       throw new Error('Controls: form is missing an <input type="range" name="max-iter">')
     }
-    const maxIterReadout = form.querySelector('output[data-for="max-iter"]')
+    const maxIterReadout = form.querySelector('output[for="max-iter"]')
     if (!(maxIterReadout instanceof HTMLOutputElement)) {
       throw new Error('Controls: form is missing an <output data-for="max-iter">')
     }
@@ -280,7 +280,13 @@ export class Controls {
   // step of a drag) for instant feedback, separate from the `change`-gated
   // recompute.
   private syncMaxIterReadout(): void {
-    this.maxIterReadout.textContent = String(this.maxIterFromSlider())
+    const count = String(this.maxIterFromSlider())
+    this.maxIterReadout.textContent = count
+    // The range is index-addressed (its value is a position in MAX_ITER_STOPS,
+    // not the count), so a screen reader would otherwise announce the raw index
+    // ("8 of 28") instead of "256". Mirror the count into aria-valuetext so the
+    // announced value matches the visible readout.
+    this.maxIterRange.setAttribute('aria-valuetext', count)
   }
 
   // Enforce the (Field × Normalisation mode) validity rule (ADR-0013): hide
