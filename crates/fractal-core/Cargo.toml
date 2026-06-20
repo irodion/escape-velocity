@@ -22,7 +22,7 @@ proptest = "1"
 # invisible to the bit-identical output tests and is measured here instead.
 # `fractal-core` is pure Rust, so the bench runs natively on the pinned stable
 # toolchain with no wasm in the loop.
-criterion = "0.5"
+criterion = "0.8"
 
 # Whole-frame compute timing for the kernels (see `benches/escape.rs`).
 [[bench]]
