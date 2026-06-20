@@ -53,8 +53,8 @@ function buildForm(): HTMLFormElement {
   form.innerHTML = `
     <label>
       Iterations:
-      <output data-for="max-iter">256</output>
-      <input type="range" name="max-iter" />
+      <output for="max-iter">256</output>
+      <input type="range" id="max-iter" name="max-iter" />
     </label>
     <label>
       Resolution:
@@ -171,7 +171,7 @@ describe('Controls', () => {
     // applySettings mirrors an external view (a pasted permalink applied via
     // `hashchange`, O1 #91) into the form, and must NOT re-enter `onChange`.
     const readout = (f: HTMLFormElement): string =>
-      f.querySelector('output[data-for="max-iter"]')?.textContent ?? ''
+      f.querySelector('output[for="max-iter"]')?.textContent ?? ''
 
     it('pushes every control to the snapshot without emitting', () => {
       const controls = new Controls(form, INITIAL, onChange)
@@ -292,7 +292,10 @@ describe('Controls', () => {
     const maxIterRange = inputByName(form, 'max-iter')
     expect(maxIterRange.value).toBe(String(iterIndex(256)))
     expect(maxIterRange.max).toBe(String(MAX_ITER_STOPS.length - 1))
-    expect(form.querySelector('output[data-for="max-iter"]')?.textContent).toBe('256')
+    expect(form.querySelector('output[for="max-iter"]')?.textContent).toBe('256')
+    // aria-valuetext mirrors the count so a screen reader announces "256",
+    // not the raw slider index (the range is index-addressed).
+    expect(maxIterRange.getAttribute('aria-valuetext')).toBe('256')
     expect(selectByName(form, 'render-scale').value).toBe('1')
     expect(selectByName(form, 'palette').value).toBe('viridis')
     expect(selectByName(form, 'normalisation').value).toBe('cycled')
@@ -328,7 +331,9 @@ describe('Controls', () => {
     setMaxIter(form, 384, 'input')
     // The intermediate stop now in MAX_ITER_STOPS — finer than the old
     // doubling <select>, which jumped 256 → 512 with nothing between.
-    expect(form.querySelector('output[data-for="max-iter"]')?.textContent).toBe('384')
+    expect(form.querySelector('output[for="max-iter"]')?.textContent).toBe('384')
+    // aria-valuetext tracks the readout on every drag step, not just at commit.
+    expect(inputByName(form, 'max-iter').getAttribute('aria-valuetext')).toBe('384')
     // Commit-not-live: dragging streams the readout but fires no recompute.
     expect(onChange).not.toHaveBeenCalled()
   })

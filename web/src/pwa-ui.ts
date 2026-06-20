@@ -26,6 +26,10 @@ export function mountPwaUi(lifecycle: PwaLifecycle, container: HTMLElement): voi
 
   const toast = document.createElement('div')
   toast.className = 'pwa-toast'
+  // role="status" (implicit aria-live="polite") so the update prompt and the
+  // transient offline-ready notice are announced to assistive tech — a bare
+  // div toggled from `hidden` is otherwise silent.
+  toast.setAttribute('role', 'status')
   toast.hidden = true
   const message = document.createElement('span')
   const reloadButton = document.createElement('button')

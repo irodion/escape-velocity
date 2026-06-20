@@ -76,6 +76,15 @@ describe('pwa-ui presenter', () => {
     expect(installEl().hidden).toBe(true)
   })
 
+  it('marks the toast as a polite live region so notices are announced', () => {
+    const fake = fakeLifecycle()
+    mountPwaUi(fake.lifecycle, document.body)
+    // role="status" carries an implicit aria-live="polite": the toast is
+    // toggled from `hidden`, so without it the update / offline notices reach
+    // sighted users only.
+    expect(toastEl().getAttribute('role')).toBe('status')
+  })
+
   it('surfaces a waiting update with a Reload that applies it', () => {
     const fake = fakeLifecycle()
     mountPwaUi(fake.lifecycle, document.body)

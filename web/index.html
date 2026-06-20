@@ -4,6 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="color-scheme" content="dark" />
+    <!-- Match the PWA manifest theme/background and the page ground (#05070b)
+         so an installed launch shows no near-black splash flash. -->
+    <meta name="theme-color" content="#05070b" />
     <title>Escape Velocity</title>
     <style>
       /* ─────────────────────────── design tokens ───────────────────────────
@@ -141,19 +144,27 @@
       canvas#fractal.dragging { cursor: all-scroll; }
 
       /* A faint vignette so the translucent panel edge always has something to
-         sit against, whatever the fractal happens to show. Pure decoration —
+         sit against, whatever the fractal happens to show. Its job only applies
+         while the drawer is open, so it's shown *only then* (gated on the
+         drawer's `.open` class below) — with the drawer closed the image is the
+         whole point and the corners stay clean. Pure decoration —
          pointer-events: none keeps it out of the way of canvas pan/zoom. */
       .vignette {
         position: fixed;
         inset: 0;
         z-index: 5;
         pointer-events: none;
+        opacity: 0;
         background: radial-gradient(
           120% 120% at 30% 40%,
           transparent 55%,
           rgba(0, 0, 0, 0.45) 100%
         );
+        transition: opacity 0.26s var(--ease);
       }
+      /* DOM order is form#controls → .stage → .vignette, so the general-sibling
+         combinator reaches the vignette when the drawer opens. */
+      form#controls.open ~ .vignette { opacity: 1; }
 
       /* ─────────────────────────── the toggle ───────────────────────────
          A *drawn* crosshair (SVG injected by drawer.ts) that echoes the
@@ -342,7 +353,15 @@
         border: none;
         cursor: text;
       }
-      .coord--c input:focus-visible { outline: none; color: var(--accent); }
+      /* Keep the accent tint, but add a non-colour cue (WCAG 2.4.7/1.4.1):
+         an underline rather than a border so the typeset `c = a + b·i` row
+         doesn't shift when a field takes focus. */
+      .coord--c input:focus-visible {
+        outline: none;
+        color: var(--accent);
+        text-decoration: underline;
+        text-underline-offset: 0.2em;
+      }
       .coord--c input::-webkit-outer-spin-button,
       .coord--c input::-webkit-inner-spin-button { appearance: none; margin: 0; }
       .coord--c input[type="number"] { -moz-appearance: textfield; }
@@ -426,6 +445,17 @@
         transition: color 0.15s var(--ease);
       }
       .field:focus-within .field__label { color: var(--accent); }
+      /* A non-colour focus cue for the borderless selects (WCAG 2.4.7/1.4.1):
+         a box-shadow lays a second accent line under the row's existing
+         hairline, so the underline visibly *thickens* on focus — a shape
+         change, not colour alone. box-shadow takes no layout space, so the
+         rows don't shift. Mirrors the box-shadow focus ring the range thumb
+         and toggle already use; the accent border-colour rides along as a
+         secondary cue. */
+      .field:focus-within {
+        border-bottom-color: var(--accent);
+        box-shadow: 0 1px 0 0 var(--accent);
+      }
 
       /* The wrapper carries the custom caret — a <select> can't host ::after.
          Block so the native control's `width: 100%` resolves against it. */
@@ -725,8 +755,15 @@
          by the pwa-ui presenter via the `hidden` attribute, so they take no
          space until the lifecycle calls for them. */
       #pwa-install {
-        align-self: flex-start;
-        margin: 0.6rem;
+        /* Fixed, not in-flow: an in-flow button below the canvas shrinks the
+           stage when `beforeinstallprompt` un-hides it, firing the
+           fit-to-window ResizeObserver and an unrequested refit + recompute
+           (the common trigger of bug #72). Bottom-left clears the top-left
+           toggle and the bottom-right toast / inspector / progress. */
+        position: fixed;
+        bottom: max(1rem, env(safe-area-inset-bottom));
+        left: max(1rem, env(safe-area-inset-left));
+        z-index: 40;
         padding: 0.55rem 1rem;
         font-family: var(--font-tech);
         font-size: 0.62rem;
@@ -743,6 +780,13 @@
       }
       #pwa-install:hover { color: var(--accent); border-color: var(--accent-dim); }
       #pwa-install[hidden], .pwa-toast[hidden] { display: none; }
+      /* The button is fixed bottom-left at a higher z-index than the drawer
+         (z-index 20), so while the drawer is open it would overlay the drawer's
+         bottom-left controls and intercept their clicks. Hide it for the
+         duration the drawer is open. (#pwa-install is a later sibling of
+         form#controls in the body, so the general-sibling combinator reaches
+         it.) */
+      form#controls.open ~ #pwa-install { display: none; }
       .pwa-toast {
         position: fixed;
         bottom: max(1rem, env(safe-area-inset-bottom));
@@ -762,7 +806,8 @@
         box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
       }
       .pwa-toast button {
-        padding: 0.35rem 0.7rem;
+        min-height: 2.4rem;       /* comfortable thumb target on a fixed corner element */
+        padding: 0.5rem 0.9rem;
         font-family: var(--font-tech);
         font-size: 0.58rem;
         font-weight: 500;
@@ -862,7 +907,7 @@
          the staggered reveal. Last in the cascade so it overrides the slide /
          reveal rules above it. */
       @media (prefers-reduced-motion: reduce) {
-        form#controls, #controls-toggle { transition: none; }
+        form#controls, #controls-toggle, .vignette { transition: none; }
         form#controls.open .console-head, form#controls.open .coords,
         form#controls.open .field { animation: none; }
         /* The depth meter snaps to its value instead of sliding on each commit. */
@@ -943,10 +988,10 @@
           <!-- Live readout of the slider's current stop. controls.ts drives
                the slider's min/max/value and this text from MAX_ITER_STOPS;
                the markup just supplies the elements. -->
-          <output class="field__readout" data-for="max-iter">256</output>
+          <output class="field__readout" for="max-iter">256</output>
         </span>
         <span class="field__control field__control--range">
-          <input type="range" name="max-iter" aria-label="Iterations" />
+          <input type="range" id="max-iter" name="max-iter" aria-label="Iterations" />
         </span>
       </label>
       <label class="field">

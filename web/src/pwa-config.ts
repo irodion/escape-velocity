@@ -37,8 +37,10 @@ export const pwaManifest: Partial<ManifestOptions> = {
   description:
     'An educational, open-source Mandelbrot & Julia fractal explorer — ' +
     'Rust + WebAssembly, multicore in the browser.',
-  theme_color: '#0b0b0f',
-  background_color: '#0b0b0f',
+  // Match the page ground (#05070b, index.html) and the in-page <meta
+  // name="theme-color"> so an installed launch shows no near-black splash flash.
+  theme_color: '#05070b',
+  background_color: '#05070b',
   display: 'standalone',
   start_url: '/',
   icons: [

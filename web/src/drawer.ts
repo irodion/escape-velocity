@@ -68,6 +68,11 @@ export function mountDrawer(
     // is the visible affordance; the label keeps assistive tech in step.
     toggle.innerHTML = open ? CLOSE_GLYPH : CROSSHAIR_GLYPH
     toggle.setAttribute('aria-label', open ? 'Close controls' : 'Open controls')
+    // A native tooltip naming the button: the drawn crosshair reads as
+    // "target/locate", so a first-time visitor facing a black fractal and one
+    // unlabelled glyph gets a plain-language hint on hover. Static noun (not the
+    // open/close verb) — it names *what the button reveals*.
+    toggle.title = 'Controls'
     // `inert` is the load-bearing a11y bit: a closed drawer is only
     // translated off-screen, so without it the (invisible) selects stay
     // tabbable and screen-reader-visible.
