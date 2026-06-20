@@ -73,7 +73,13 @@ pub fn escape_time(z0: Complex64, c: Complex64, max_iter: u32) -> f32 {
         }
         if i + 1 == window {
             z_old = z;
-            window *= 2;
+            // `saturating_mul` rather than `*= 2`: the doubling would overflow
+            // `u32` past `window == 2^31`. Unreachable in practice (it needs
+            // `max_iter > 2^31`), but the kernel stays total for any `max_iter`
+            // — saturating to `u32::MAX` just freezes `z_old` for the rest of
+            // the loop, valid Brent behaviour, instead of panicking (debug) or
+            // wrapping to 0 (release). `i + 1` cannot overflow: `i < max_iter`.
+            window = window.saturating_mul(2);
         }
     }
     f32::NAN

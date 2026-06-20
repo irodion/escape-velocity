@@ -100,7 +100,9 @@ pub fn escape_distance(
         }
         if i + 1 == window {
             z_old = z;
-            window *= 2;
+            // `saturating_mul` keeps the window doubling total past `2^31` (see
+            // `escape_time` for the rationale); `i + 1` cannot overflow.
+            window = window.saturating_mul(2);
         }
     }
     f32::NAN
