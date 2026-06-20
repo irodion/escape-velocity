@@ -111,7 +111,7 @@ export class Controls {
     }
     const maxIterReadout = form.querySelector('output[for="max-iter"]')
     if (!(maxIterReadout instanceof HTMLOutputElement)) {
-      throw new Error('Controls: form is missing an <output data-for="max-iter">')
+      throw new Error('Controls: form is missing an <output for="max-iter">')
     }
     if (!(renderScaleSelect instanceof HTMLSelectElement)) {
       throw new Error('Controls: form is missing a <select name="render-scale">')
