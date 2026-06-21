@@ -12,14 +12,20 @@ crate-type = ["cdylib", "rlib"]
 # binary links shared-memory atomics + bulk-memory + mutable-globals (see
 # `.cargo/config.toml`); wasm-opt must be told to *keep* those features enabled
 # or it errors out / silently drops the threading transform on the atomics
-# module. `--enable-simd` is added for the same reason now that the binary is
-# built with `+simd128` (P7, #83) — without it wasm-opt rejects the SIMD opcodes.
-# `-O4` is the most aggressive level (the default is a milder `-O`).
+# module. `-O4` is the most aggressive level (the default is a milder `-O`).
 # Verify in the build log that "Optimizing wasm binaries with `wasm-opt`"
 # appears — historically it has been skipped on atomics builds depending on the
 # wasm-pack version (P3, #79).
+#
+# NB: `+simd128` / `--enable-simd` was reverted (#83): the SIMD-required binary
+# would not instantiate on mobile browsers below the SIMD floor (older iOS /
+# in-app WebKit webviews), and the worker's top-level `await init()` rejection
+# does not surface as `worker.onerror`, so boot hung silently until the 5s
+# watchdog. It was never a measurable win on its own (the divergent escape loop
+# doesn't auto-vectorise). Reintroduce only behind runtime feature-detection
+# with a non-SIMD fallback binary.
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O4", "--enable-threads", "--enable-bulk-memory", "--enable-mutable-globals", "--enable-simd"]
+wasm-opt = ["-O4", "--enable-threads", "--enable-bulk-memory", "--enable-mutable-globals"]
 
 [dependencies]
 fractal-core = { path = "../fractal-core" }
