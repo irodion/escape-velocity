@@ -29,6 +29,8 @@ import {
 } from './handler.js'
 import type {
   Aborted,
+  BootError,
+  BootProgress,
   CancelRequest,
   ProbeRequest,
   ProgressResponse,
@@ -41,32 +43,9 @@ import type {
 // `self` is the DedicatedWorkerGlobalScope inside a module worker.
 const ctx = self as unknown as DedicatedWorkerGlobalScope
 
-// Cross-origin isolation gate (ADR-0008). The Slice 7B artifact links a
-// *shared* WebAssembly memory, which the browser only backs with a
-// `SharedArrayBuffer` when the document is cross-origin isolated (COOP:
-// same-origin + COEP: require-corp). Without it, `init()` cannot even
-// instantiate the module and the thread pool cannot spawn. Fail fast
-// here with a legible message at worker boot, rather than letting a
-// cryptic WebAssembly LinkError surface later — `ready` is never posted,
-// so no render is ever attempted against a pool that does not exist.
-if (!ctx.crossOriginIsolated) {
-  throw new Error(
-    'Render worker: the page is not cross-origin isolated, so ' +
-      'SharedArrayBuffer (required for WASM threads, ADR-0007) is ' +
-      'unavailable. Serve with Cross-Origin-Opener-Policy: same-origin ' +
-      'and Cross-Origin-Embedder-Policy: require-corp (ADR-0008).',
-  )
-}
-
-const wasm = await init()
-// Stand up the rayon thread pool before announcing readiness, so the
-// first `compute` already runs multicore. Size it to one *fewer* than the
-// logical-core count (`navigator.hardwareConcurrency`): the pool runs
-// alongside this coordinating worker and the main thread, so claiming every
-// core oversubscribes and can starve the compositor the wheel Preview is
-// composited on (P7, #83). `Math.max(1, …)` keeps a single-core device at a
-// pool of one, where rendering still works.
-await initThreadPool(Math.max(1, navigator.hardwareConcurrency - 1))
+// The WASM instance, assigned by `boot()` before any message is routed. The
+// message handler is only wired after boot succeeds, so every read sees it set.
+let wasm: Awaited<ReturnType<typeof init>>
 
 let state: WorkerState = createWorkerState()
 
@@ -98,12 +77,80 @@ function yieldToEventLoop(): Promise<void> {
   })
 }
 
-const ready: Ready = { kind: 'ready' }
-ctx.postMessage(ready)
+// Two-step bootstrap, instrumented so a failure or hang is legible rather than
+// a silent 5 s watchdog (#83). Each step runs in this module worker's top-level
+// async path, where a rejection does NOT reliably reach the main thread's
+// `worker.onerror` — so every failure is caught here and posted as a
+// {@link BootError} carrying the real error text and the stage that failed. On
+// the happy path the worker posts `{ kind: 'boot', stage: 'wasm' }` the moment
+// the module instantiates (so the client can localise a *hang* to the pool
+// step), wires the message handler, then announces `ready`.
+async function boot(): Promise<void> {
+  // Cross-origin isolation gate (ADR-0008). The Slice 7B artifact links a
+  // *shared* WebAssembly memory, which the browser only backs with a
+  // `SharedArrayBuffer` when the document is cross-origin isolated (COOP:
+  // same-origin + COEP: require-corp). Without it `init()` cannot instantiate
+  // and the pool cannot spawn. Fail fast with a legible message.
+  if (!ctx.crossOriginIsolated) {
+    postBootError(
+      'isolation',
+      'The page is not cross-origin isolated, so SharedArrayBuffer (required ' +
+        'for WASM threads, ADR-0007) is unavailable. Serve with ' +
+        'Cross-Origin-Opener-Policy: same-origin and ' +
+        'Cross-Origin-Embedder-Policy: require-corp (ADR-0008).',
+    )
+    return
+  }
 
-ctx.onmessage = (
+  try {
+    wasm = await init()
+  } catch (err) {
+    // The binary failed to instantiate — most often an unsupported required
+    // WASM feature on this browser (e.g. a SIMD-built binary on a browser below
+    // the SIMD floor), or a LinkError from a stripped isolation header.
+    postBootError('init', err)
+    return
+  }
+  // WASM is up. Tell the client, so if the next step hangs the watchdog can say
+  // so specifically rather than blaming instantiation.
+  const wasmUp: BootProgress = { kind: 'boot', stage: 'wasm' }
+  ctx.postMessage(wasmUp)
+
+  try {
+    // Stand up the rayon thread pool before announcing readiness, so the first
+    // `compute` already runs multicore. Size it to one *fewer* than the
+    // logical-core count: the pool runs alongside this coordinating worker and
+    // the main thread, so claiming every core oversubscribes and can starve the
+    // compositor the wheel Preview is composited on (P7, #83). `hardwareConcurrency`
+    // can be `undefined` on some mobile/privacy browsers; `|| 1` floors it so the
+    // arithmetic never yields `NaN` (which would spawn a broken pool), and
+    // `Math.max(1, …)` keeps a single-core device at a pool of one.
+    await initThreadPool(Math.max(1, (navigator.hardwareConcurrency || 1) - 1))
+  } catch (err) {
+    postBootError('thread-pool', err)
+    return
+  }
+
+  ctx.onmessage = handleMessage
+  const ready: Ready = { kind: 'ready' }
+  ctx.postMessage(ready)
+}
+
+// Post a boot failure for the client to surface (see {@link BootError}). The
+// worker is unusable after this, so no `ready` follows and the handler stays
+// unwired.
+function postBootError(stage: BootError['stage'], err: unknown): void {
+  const error: BootError = {
+    kind: 'boot-error',
+    stage,
+    message: err instanceof Error ? err.message : String(err),
+  }
+  ctx.postMessage(error)
+}
+
+function handleMessage(
   event: MessageEvent<RenderRequest | RecolorizeRequest | CancelRequest | ProbeRequest>,
-): void => {
+): void {
   const msg = event.data
 
   if (msg.kind === 'probe') {
@@ -196,3 +243,8 @@ function postError(epoch: number, err: unknown): void {
   }
   ctx.postMessage(error)
 }
+
+// Kick off the bootstrap. Fire-and-forget: `boot()` owns its own error
+// surfacing (every failure posts a `boot-error`), so there is nothing to await
+// or catch here.
+void boot()

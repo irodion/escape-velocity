@@ -1,5 +1,7 @@
 import type {
   Aborted,
+  BootError,
+  BootProgress,
   CancelRequest,
   Field,
   FractalKind,
@@ -49,6 +51,35 @@ const NOOP_PROGRESS: ProgressReporter = {
   begin: () => {},
   report: () => {},
   end: () => {},
+}
+
+/**
+ * Compose a human, on-screen message for a worker {@link BootError} (#83). The
+ * fatal panel is the only diagnostic a phone user can read without a console,
+ * so each stage names what it means in plain terms and appends the raw error
+ * text, which usually pins the exact cause (an unsupported WASM feature, a
+ * `SharedArrayBuffer` RangeError, a stripped isolation header).
+ */
+function bootErrorMessage(err: BootError): string {
+  const detail = err.message ? ` (${err.message})` : ''
+  switch (err.stage) {
+    case 'isolation':
+      return (
+        'The renderer needs cross-origin isolation (SharedArrayBuffer), which ' +
+        `this page is not serving${detail}.`
+      )
+    case 'init':
+      return (
+        'The WebAssembly renderer failed to load. This browser may be missing a ' +
+        'feature the build requires (for example WASM SIMD on older mobile ' +
+        `browsers), or an isolation header was stripped${detail}.`
+      )
+    case 'thread-pool':
+      return (
+        'The renderer loaded but its multithreaded worker pool failed to start ' +
+        `on this browser${detail}.`
+      )
+  }
 }
 
 /**
@@ -190,6 +221,13 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
   let inFlightKind: ClientRequest['kind'] | null = null
   let pending: ClientRequest | null = null
   let ready = false
+  // How far the worker's two-step boot got (#83). Flips to `true` when the
+  // worker posts `{ kind: 'boot', stage: 'wasm' }` — i.e. the WASM module
+  // instantiated. The watchdog reads it to localise a *hang*: WASM up but no
+  // `ready` means the rayon thread pool never came up; still false means the
+  // binary never instantiated (often an unsupported WASM feature on this
+  // browser). A `boot-error` gives the exact cause; this covers the silent hang.
+  let wasmInstantiated = false
   // Set once the worker is known to be unusable (it threw at the top level, or
   // never reached `ready`). A dead worker will never respond, so `issue` and
   // `flush` no-op rather than parking requests in a slot that can't drain.
@@ -227,10 +265,30 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
 
   worker.onmessage = (
     event: MessageEvent<
-      RenderResponse | Ready | RenderError | ProgressResponse | Aborted | ProbeResponse
+      | RenderResponse
+      | Ready
+      | RenderError
+      | ProgressResponse
+      | Aborted
+      | ProbeResponse
+      | BootProgress
+      | BootError
     >,
   ): void => {
     const msg = event.data
+    if (msg.kind === 'boot') {
+      // The worker's WASM module instantiated; the thread pool is next. Record
+      // it so a later watchdog can blame the pool, not instantiation (#83).
+      wasmInstantiated = true
+      return
+    }
+    if (msg.kind === 'boot-error') {
+      // A boot step threw and the worker caught it (a rejection in a module
+      // worker's top-level async path never reaches `worker.onerror` reliably).
+      // Surface the real cause instead of waiting out the watchdog.
+      reportFatal(bootErrorMessage(msg))
+      return
+    }
     if (msg.kind === 'probe-response') {
       // A read-only side query's reply (E2, #95): independent of the render
       // slot, so handled before the in-flight guard. Deliver only the newest
@@ -581,10 +639,18 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
       if (ready) {
         return
       }
+      // A timeout, not a thrown error — the worker hung rather than rejecting
+      // (a rejection would have arrived as `boot-error`). Localise it with the
+      // boot-stage heartbeat: if WASM instantiated, the rayon pool is what
+      // never came up; if not, instantiation itself stalled.
+      const where = wasmInstantiated
+        ? 'its multithreaded worker pool did not come up'
+        : 'the WebAssembly module did not finish loading'
       reportFatal(
-        `The renderer did not start within ${BOOT_TIMEOUT_MS / 1000}s. The page ` +
-          'may not be cross-origin isolated, which the multithreaded renderer ' +
-          'requires (SharedArrayBuffer).',
+        `The renderer did not start within ${BOOT_TIMEOUT_MS / 1000}s: ${where}. ` +
+          'This can be an unsupported browser, lost cross-origin isolation ' +
+          '(SharedArrayBuffer), or a stale cached build — try fully closing the ' +
+          'tab and reopening, or reload in a private window.',
       )
     }, BOOT_TIMEOUT_MS)
   }

@@ -516,6 +516,82 @@ describe('render-client', () => {
     }
   })
 
+  // --- #83: instrumented worker boot failures ------------------------------
+
+  // Post a raw worker→client message whose kind the typed `deliver` helper
+  // doesn't model (the boot heartbeat / boot-error arms).
+  function deliverRaw(worker: FakeWorker, data: unknown): void {
+    worker.onmessage?.({ data } as MessageEvent)
+  }
+
+  it('surfaces a thrown WASM instantiation failure with the raw error (#83)', () => {
+    const fatal = vi.fn()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { worker } = makeClient({ onFatal: fatal })
+
+    deliverRaw(worker, {
+      kind: 'boot-error',
+      stage: 'init',
+      message: 'CompileError: bad SIMD opcode',
+    })
+
+    expect(fatal).toHaveBeenCalledTimes(1)
+    const message = fatal.mock.calls[0]?.[0] as string
+    // Names the likely cause in plain terms and carries the raw detail through.
+    expect(message).toContain('WebAssembly')
+    expect(message).toContain('CompileError: bad SIMD opcode')
+  })
+
+  it('distinguishes a thread-pool boot failure from instantiation (#83)', () => {
+    const fatal = vi.fn()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { worker } = makeClient({ onFatal: fatal })
+
+    deliverRaw(worker, {
+      kind: 'boot-error',
+      stage: 'thread-pool',
+      message: 'RangeError',
+    })
+
+    const message = fatal.mock.calls[0]?.[0] as string
+    expect(message).toContain('worker pool')
+  })
+
+  it('a boot-error cancels the watchdog so it does not double-report (#83)', () => {
+    vi.useFakeTimers()
+    try {
+      const fatal = vi.fn()
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      const { worker } = makeClient({ onFatal: fatal })
+
+      deliverRaw(worker, { kind: 'boot-error', stage: 'isolation', message: '' })
+      vi.advanceTimersByTime(5000)
+
+      // The boot-error reported once; the watchdog must not fire a second time.
+      expect(fatal).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('the watchdog blames the thread pool once WASM has instantiated (#83)', () => {
+    vi.useFakeTimers()
+    try {
+      const fatal = vi.fn()
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      const { worker } = makeClient({ onFatal: fatal })
+
+      // WASM came up but `ready` never follows: the pool hung, not init.
+      deliverRaw(worker, { kind: 'boot', stage: 'wasm' })
+      vi.advanceTimersByTime(5000)
+
+      expect(fatal).toHaveBeenCalledTimes(1)
+      expect(fatal.mock.calls[0]?.[0]).toContain('worker pool did not come up')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   // --- P2 (#78): band cancellation + progress ------------------------------
 
   it('posts a cancel carrying the new epoch when a render supersedes one in flight', () => {
