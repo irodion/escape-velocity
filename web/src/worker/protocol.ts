@@ -101,6 +101,37 @@ export interface Ready {
 }
 
 /**
+ * A boot-stage heartbeat (#83). The worker bootstraps in two steps that can
+ * each fail or hang independently — instantiate the WASM module (`init()`),
+ * then stand up the rayon thread pool (`initThreadPool()`) — and only then
+ * posts {@link Ready}. Posting `{ stage: 'wasm' }` the instant `init()`
+ * resolves lets the client tell a stalled *thread-pool* boot (WASM is fine,
+ * the nested rayon workers never came up) apart from a stalled *instantiation*
+ * (the binary never loaded at all), so the boot-watchdog message names the
+ * real culprit instead of a generic "didn't start". Carries no payload.
+ */
+export interface BootProgress {
+  readonly kind: 'boot'
+  readonly stage: 'wasm'
+}
+
+/**
+ * A boot step *threw* (#83). The worker bootstrap (`init()` / `initThreadPool()`,
+ * and the cross-origin-isolation gate) runs in a module worker's top-level
+ * async path, where a rejection does NOT reliably fire the main thread's
+ * `worker.onerror` — so without this arm the failure is invisible and the
+ * client only learns something is wrong when the 5 s watchdog fires with a
+ * generic message. Posting the real error text + the stage that failed lets
+ * the client surface the actual cause (a SIMD-incompatible binary, a stripped
+ * COOP/COEP header, a `SharedArrayBuffer` RangeError) on the fatal panel.
+ */
+export interface BootError {
+  readonly kind: 'boot-error'
+  readonly stage: 'isolation' | 'init' | 'thread-pool'
+  readonly message: string
+}
+
+/**
  * A lightweight "a newer request exists" signal the client posts when it
  * supersedes a render that is already on the worker (P2, #78).
  *
