@@ -29,6 +29,8 @@ import type { ViewState } from './view-state.js'
 import { serialize } from './view-state.js'
 import type {
   Aborted,
+  BootError,
+  BootProgress,
   Ready,
   RenderError,
   RenderRequest,
@@ -128,10 +130,25 @@ export async function exportRenderedFrame(request: RenderRequest, filename: stri
         reject(error)
       }
       worker.onmessage = (
-        event: MessageEvent<Ready | RenderResponse | RenderError | Aborted>,
+        event: MessageEvent<
+          Ready | RenderResponse | RenderError | Aborted | BootProgress | BootError
+        >,
       ): void => {
         const msg = event.data
         switch (msg.kind) {
+          case 'boot':
+            // Non-terminal boot heartbeat (#83): WASM instantiated, the pool is
+            // next. Nothing to do on a one-shot export — wait for `ready`.
+            return
+          case 'boot-error':
+            // The worker bootstrap failed and reported it via postMessage (a
+            // module-worker top-level rejection does NOT reliably fire
+            // `worker.onerror`, #83), so without this arm the export would sit
+            // disabled until the 60s timeout. Reject now with the real cause.
+            settleReject(
+              new Error(`export render worker failed to boot (${msg.stage}): ${msg.message}`),
+            )
+            return
           case 'ready':
             // The worker buffers nothing of its own; dispatch the single render
             // only once it has booted its WASM instance and thread pool.
