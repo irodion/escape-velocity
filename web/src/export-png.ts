@@ -20,11 +20,13 @@
  * infrequent action and keeps the live pipeline untouched.
  *
  * The caller builds the `RenderRequest` (it owns the viewport + the form→wasm
- * enum mapping), reusing `computeBufferDims` so the export buffer rides the same
- * render-scale machinery — including the pixel-budget clamp — as every
- * on-screen render.
+ * enum mapping), sizing the buffer with `computeExportDims` — the same
+ * render-scale machinery as every on-screen render, but against the export's
+ * own pixel budget (`EXPORT_MAX_PIXELS`).
  */
 
+import type { BufferDims } from './render-buffer.js'
+import { computeBufferDims } from './render-buffer.js'
 import type { ViewState } from './view-state.js'
 import { serialize } from './view-state.js'
 import type {
@@ -46,6 +48,33 @@ import type {
 // dies without posting a terminal message), which would otherwise leave the
 // export buttons disabled forever with no way to retry.
 const EXPORT_TIMEOUT_MS = 60_000
+
+// Pixel budget for an export buffer (#157). Deliberately separate from the
+// on-screen `MAX_RENDER_PIXELS` (2.5M): that cap keeps interactive frames
+// responsive, and sharing it clamped ordinary desktop windows — a 2560×1440
+// window saved the same sub-window-size image from both buttons. An export runs
+// once on its own worker, so it can afford far more: 16M covers a 2560×1440
+// window at 2× (14.7M) and stays under iOS Safari's 4096² (16,777,216 px)
+// canvas-area limit, past which `rgbaToPngBlob` could not encode. Peak memory at
+// the cap is ~256 MB (f32 iterations + RGBA in WASM memory, the transfer copy,
+// the detached canvas), released when the one-shot worker terminates.
+export const EXPORT_MAX_PIXELS = 16_000_000
+
+/**
+ * Size an export buffer: the logical (CSS) size × the Resolution knob ×
+ * `multiplier` (1 or 2 for the two buttons), bounded by `EXPORT_MAX_PIXELS`.
+ * At the default Resolution of 1×, `1` saves the logical window size and `2`
+ * saves exactly twice it until the budget bites. The returned `scale` is the
+ * effective multiplier the caller applies to `zoom` (see `computeBufferDims`).
+ */
+export function computeExportDims(
+  logicalWidth: number,
+  logicalHeight: number,
+  renderScale: number,
+  multiplier: number,
+): BufferDims {
+  return computeBufferDims(logicalWidth, logicalHeight, renderScale * multiplier, EXPORT_MAX_PIXELS)
+}
 
 /**
  * Build a download filename embedding the shareable permalink (O1, #91), so a
