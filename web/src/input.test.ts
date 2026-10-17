@@ -117,7 +117,7 @@ function mount(
     if (source === 'gesture') onChange(next)
   })
   const phase = createGesturePhaseStore()
-  const controller = new InputController(canvas, store, onInvalidate, undefined, phase)
+  const controller = new InputController(canvas, store, phase, onInvalidate)
   return { controller, store, phase }
 }
 
@@ -334,16 +334,42 @@ describe('InputController', () => {
     expect(canvas.style.transform).toBe('')
   })
 
-  it('publishes preview while pinching, dragging never (the pan hands over to the pinch)', () => {
+  it('publishes dragging for the first finger, then preview once a second makes it a pinch', () => {
     viewport.zoom_around.mockReturnValue(makeZoomResult(2))
     const { phase } = mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(pe('pointerdown', { pointerId: 1, clientX: 100, clientY: 100 }))
     expect(phase.get()).toBe('dragging')
     canvas.dispatchEvent(pe('pointerdown', { pointerId: 2, clientX: 200, clientY: 100 }))
-    expect(phase.get()).toBe('idle') // the pan dropped; nothing scaled yet
+    // The pan handed over to the pinch, which owns the canvas before it scales.
+    expect(phase.get()).toBe('preview')
     canvas.dispatchEvent(pe('pointermove', { pointerId: 2, clientX: 300, clientY: 100 }))
     expect(phase.get()).toBe('preview')
+  })
+
+  it('ignores a wheel notch mid-drag (it would scale the drag and later undo the pan)', () => {
+    viewport.zoom_around.mockReturnValue(makeZoomResult(1.25))
+    viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
+    const { phase } = mount(canvas, viewport, onChange)
+
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 100 }))
+    const wheel = new WheelEvent('wheel', {
+      deltaY: -100,
+      clientX: 200,
+      clientY: 150,
+      bubbles: true,
+      cancelable: true,
+    })
+    canvas.dispatchEvent(wheel)
+    expect(wheel.defaultPrevented).toBe(true) // still no page scroll
+    expect(viewport.zoom_around).not.toHaveBeenCalled()
+    expect(canvas.style.transform).toBe('')
+    expect(phase.get()).toBe('dragging')
+
+    canvas.dispatchEvent(pe('pointermove', { clientX: 160, clientY: 100 }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 160, clientY: 100 }))
+    vi.advanceTimersByTime(WHEEL_SETTLE_MS)
+    expect(onChange).toHaveBeenCalledTimes(1) // the pan's commit, and no Settle after it
   })
 
   it('a plain tap neither discards in-flight work nor commits a pan (B3, #74)', () => {
@@ -371,7 +397,7 @@ describe('InputController', () => {
     // position — staying presentation-free about what either means.
     const onClick = vi.fn()
     const store = createViewportStore(viewport as unknown as Viewport)
-    new InputController(canvas, store, undefined, onClick)
+    new InputController(canvas, store, createGesturePhaseStore(), undefined, onClick)
 
     // A plain in-deadzone tap: altKey false, CSS position relative to the box.
     canvas.dispatchEvent(pe('pointerdown', { clientX: 120, clientY: 80 }))

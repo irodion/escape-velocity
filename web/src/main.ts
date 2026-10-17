@@ -525,6 +525,7 @@ canvas.addEventListener('pointerdown', () => {
 input = new InputController(
   canvas,
   store,
+  gesture,
   // While a wheel Preview is active, drop any in-flight render so a
   // premature Settle's frame can't paint mid-scrub and clear the Preview
   // transform out from under the gesture (ADR-0012).

@@ -1,5 +1,5 @@
 import type { Viewport } from '../wasm/fractal_wasm.js'
-import { createGesturePhaseStore, type GesturePhaseStore } from './gesture-phase.js'
+import type { GesturePhaseStore } from './gesture-phase.js'
 import type { ViewportStore } from './viewport-store.js'
 import {
   applyZoomNotch,
@@ -269,11 +269,13 @@ export class InputController {
     this.publishPhase()
   }
 
-  // Publish the gesture phase from this controller's own state. A drag wins
-  // over a Preview: a wheel notch during a mouse drag leaves both live, and
-  // the image is off either way.
+  // Publish the gesture phase from this controller's own state. The states
+  // don't overlap: a pan starts by tearing down any Preview, a pinch by
+  // dropping the pan, and the wheel is ignored mid-drag. A pinch counts as a
+  // Preview from its second finger, before its first move scales anything.
   private publishPhase(): void {
-    this.phase.set(this.dragState !== null ? 'dragging' : this.previewShown ? 'preview' : 'idle')
+    const previewing = this.previewShown || this.pinch !== null
+    this.phase.set(this.dragState !== null ? 'dragging' : previewing ? 'preview' : 'idle')
   }
 
   // Apply `preview` as the canvas's CSS transform.
@@ -321,6 +323,7 @@ export class InputController {
       pointerB,
       lastDistance: this.distanceBetween(pointerA, pointerB),
     }
+    this.publishPhase()
   }
 
   private readonly handlePointerMove = (event: PointerEvent): void => {
@@ -546,6 +549,10 @@ export class InputController {
 
   private readonly handleWheel = (event: WheelEvent): void => {
     event.preventDefault()
+    // A notch mid-drag (mouse button held) is ignored: a Preview transform
+    // under a live drag would scale its pointer deltas, and the Settle would
+    // later commit the zoomed-but-unpanned viewport over the pan's commit.
+    if (this.dragState !== null) return
     // Whether a Preview transform is already applied (a scrub is visually
     // active). This gates only whether the Preview re-bases below — it no
     // longer gates the in-flight discard.
@@ -623,6 +630,7 @@ export class InputController {
       this.store.set(this.zoomPreview.viewport, 'gesture')
     }
     this.pinch = null
+    this.publishPhase()
     // Lock out new gestures until every finger lifts: the kept Preview transform
     // would otherwise desync a pinch begun by a finger re-landing before the
     // Settle frame paints (see `pinchLockout`).
@@ -648,6 +656,7 @@ export class InputController {
     this.pinch = null
     this.scrubRect = null
     this.hidePreview()
+    this.publishPhase()
   }
 
   /**
@@ -665,6 +674,10 @@ export class InputController {
   constructor(
     private readonly canvas: HTMLCanvasElement,
     private readonly store: ViewportStore,
+    // Where the controller publishes its gesture phase (#159); main.ts shares
+    // it with the modules that must hold off mid-gesture. Required, so a call
+    // site can't silently publish to a store nobody reads.
+    private readonly phase: GesturePhaseStore,
     // Called while a zoom Preview is active to discard any in-flight
     // render so it can't paint stale pixels mid-scrub/pinch (ADR-0012). Injected
     // (rather than importing the render client) to keep this controller
@@ -681,10 +694,6 @@ export class InputController {
       cssY: number,
       modifiers: { altKey: boolean },
     ) => void = () => {},
-    // Where the controller publishes its gesture phase (#159); main.ts shares
-    // it with the modules that must hold off mid-gesture. Tests that don't
-    // read it get a private one.
-    private readonly phase: GesturePhaseStore = createGesturePhaseStore(),
   ) {
     this.currentViewport = store.get()
     // Any viewport write the controller did *not* author (a refit, a

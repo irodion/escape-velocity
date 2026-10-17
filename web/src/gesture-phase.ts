@@ -5,8 +5,9 @@
  *    store's viewport.
  *  - `dragging` — a one-pointer pan is in progress; the canvas buffer holds the
  *    drag snapshot shifted by the pointer.
- *  - `preview`  — a zoom Preview (wheel scrub or pinch, ADR-0012) is CSS-scaling
- *    the frame, including a Settled zoom whose fresh frame hasn't painted yet.
+ *  - `preview`  — a zoom Preview (ADR-0012): a pinch in progress, or a wheel
+ *    scrub CSS-scaling the frame, including a Settled zoom whose fresh frame
+ *    hasn't painted yet.
  *
  * In any phase but `idle` the image on screen doesn't line up with the store's
  * viewport, so a hover readout (the orbit overlay, the pixel inspector) or a
