@@ -698,18 +698,16 @@ window.addEventListener('hashchange', () => {
 // state off-screen on a dedicated one-shot worker (see export-png.ts) rather
 // than grabbing the on-screen canvas, so the saved pixels always match the
 // permalink the filename embeds — even mid-render, when the canvas still shows
-// the previous frame. `multiplier` scales the on-screen Resolution knob:
-// `1` renders at the Resolution setting; `2` supersamples for a sharper export
-// (twice the sample density). The export has its own pixel budget
-// (`EXPORT_MAX_PIXELS`, #157), so on a big window a 1× export can be sharper
-// than the on-screen frame, which `MAX_RENDER_PIXELS` clamps for responsiveness.
+// the previous frame. `multiplier` scales the logical window size: `1` saves
+// the window size, `2` saves twice it — regardless of the Resolution knob, and
+// against the export's own pixel budget (`EXPORT_MAX_PIXELS`, #157) rather than
+// the on-screen `MAX_RENDER_PIXELS`, which clamps for responsiveness.
 const EXPORT_SUPERSAMPLE = 2
 const buildExportRequest = (multiplier: number): RenderRequest => {
   const viewport = store.get()
   const { width, height, scale } = computeExportDims(
     viewport.width(),
     viewport.height(),
-    current.renderScale,
     multiplier,
   )
   return {

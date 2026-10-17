@@ -55,25 +55,25 @@ describe('computeExportDims', () => {
     [1920, 1080],
     [2560, 1440],
   ])('saves a %i×%i window at exactly 1× and 2× the logical size', (w, h) => {
-    expect(computeExportDims(w, h, 1, 1)).toEqual({ width: w, height: h, scale: 1 })
-    expect(computeExportDims(w, h, 1, 2)).toEqual({ width: w * 2, height: h * 2, scale: 2 })
-  })
-
-  it('stacks the multiplier on the Resolution knob', () => {
-    expect(computeExportDims(1280, 720, 0.5, 1)).toEqual({ width: 640, height: 360, scale: 0.5 })
-    expect(computeExportDims(1280, 720, 2, 2)).toEqual({ width: 5120, height: 2880, scale: 4 })
+    expect(computeExportDims(w, h, 1)).toEqual({ width: w, height: h, scale: 1 })
+    expect(computeExportDims(w, h, 2)).toEqual({ width: w * 2, height: h * 2, scale: 2 })
   })
 
   it('clamps to the export budget, preserving the aspect ratio', () => {
     // 3440×1440 ultrawide at 2× = 6880×2880 ≈ 19.8M px > budget.
-    const dims = computeExportDims(3440, 1440, 1, 2)
+    const dims = computeExportDims(3440, 1440, 2)
     expect(dims.width * dims.height).toBeLessThanOrEqual(EXPORT_MAX_PIXELS)
     expect(dims.width * dims.height).toBeGreaterThan(EXPORT_MAX_PIXELS * 0.999)
     expect(dims.scale).toBeLessThan(2)
     expect(dims.width / dims.height).toBeCloseTo(3440 / 1440, 2)
   })
 
-  it('stays under the iOS Safari canvas-area limit', () => {
-    expect(EXPORT_MAX_PIXELS).toBeLessThanOrEqual(4096 * 4096)
+  it.each([
+    [3440, 1440],
+    [3840, 2160],
+    [7680, 4320],
+  ])('keeps a %i×%i 2× export under the iOS Safari 4096² canvas-area limit', (w, h) => {
+    const dims = computeExportDims(w, h, 2)
+    expect(dims.width * dims.height).toBeLessThanOrEqual(4096 * 4096)
   })
 })
