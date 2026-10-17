@@ -70,16 +70,18 @@ function setup(initialEnabled = true) {
 
   const store = { get: () => viewport() } as unknown as ViewportStore
   const drawer = { open: false }
+  const gesture = { active: false }
   const overlayInstance = new OrbitOverlay(
     overlay,
     surface,
     store,
     { mode: 'mandelbrot', cRe: -0.7, cIm: 0.27015, maxIter: 64, enabled: initialEnabled },
     () => drawer.open,
+    () => gesture.active,
   )
   // Dots/markers are drawn with arc(); use the tally as a proxy for "drew".
   const drew = (): number => calls.arc ?? 0
-  return { overlayInstance, drew, surface, drawer }
+  return { overlayInstance, drew, surface, drawer, gesture }
 }
 
 describe('OrbitOverlay', () => {
@@ -92,6 +94,16 @@ describe('OrbitOverlay', () => {
 
   it('draws the orbit under the cursor on hover', () => {
     const { overlayInstance: _overlay, drew, surface } = setup()
+    surface.dispatchEvent(new MouseEvent('mousemove', { clientX: 200, clientY: 150 }))
+    expect(drew()).toBeGreaterThan(0)
+  })
+
+  it('ignores hover while a gesture owns the canvas', () => {
+    const { drew, surface, gesture } = setup()
+    gesture.active = true
+    surface.dispatchEvent(new MouseEvent('mousemove', { clientX: 200, clientY: 150 }))
+    expect(drew()).toBe(0)
+    gesture.active = false
     surface.dispatchEvent(new MouseEvent('mousemove', { clientX: 200, clientY: 150 }))
     expect(drew()).toBeGreaterThan(0)
   })
