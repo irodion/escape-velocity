@@ -330,7 +330,7 @@ describe('handleRender', () => {
     expect(transfer).toContain(response.rgba.buffer)
   })
 
-  it('a recolorize with no complete frame throws the WASM refusal for the worker to report', () => {
+  it('a recolorize with no complete frame throws the WASM refusal', () => {
     wasm.colorize.mockImplementationOnce(() => {
       throw new Error('colorize: no complete frame to colour; render one first')
     })
@@ -422,10 +422,8 @@ describe('handleProbe (E2, #95)', () => {
     expect((wasm.probe_pixel.mock.calls[0] as number[]).slice(0, 2)).toEqual([1, 0])
   })
 
-  it('returns an inside sentinel when WASM has no complete frame to read', () => {
+  it('returns no response when WASM has no complete frame to read', () => {
     wasm.probe_pixel.mockReturnValueOnce(undefined)
-    const response = handleProbe(probeRequest({ seq: 3 }))
-    expect(response).toMatchObject({ kind: 'probe-response', seq: 3, inside: true })
-    expect(Number.isNaN(response.raw)).toBe(true)
+    expect(handleProbe(probeRequest({ seq: 3 }))).toBeUndefined()
   })
 })

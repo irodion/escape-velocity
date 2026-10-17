@@ -146,7 +146,7 @@ impl NormCache {
     /// Whether this cache entry is valid for a probe against `(palette,
     /// mode)`. Palette matters because `Cycled`'s period is the palette's.
     fn matches(&self, palette: Palette, mode: NormalizationMode) -> bool {
-        self.palette as u32 == palette as u32 && self.mode as u32 == mode as u32
+        self.palette == palette && self.mode == mode
     }
 }
 
@@ -156,7 +156,7 @@ impl NormCache {
 /// layer; no further boundary validation is needed inside the
 /// `From` impls below.
 #[wasm_bindgen]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Palette {
     Grayscale = 0,
     Viridis = 1,
@@ -178,7 +178,7 @@ pub enum Palette {
 }
 
 #[wasm_bindgen]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NormalizationMode {
     Cycled = 0,
     Histogram = 1,
@@ -480,6 +480,14 @@ pub fn compute_band(
     let frame = next_frame(FRAME.get(), width, height, max_iter, y0, y1).map_err(JsError::new)?;
     let core_kind = core_fractal_kind("compute_band", kind, c_re, c_im)?;
     let w = width as usize;
+    // Record the band's rows as unfilled before touching the buffer, so a trap
+    // partway through (an allocation failure in `resize` aborts) leaves the
+    // frame incomplete — refused by every read — rather than still claiming
+    // the frame the buffer held before.
+    FRAME.set(Some(Frame {
+        rows_done: y0,
+        ..frame
+    }));
     ITER_BUFFER.with(|cell| {
         let mut iters = cell.borrow_mut();
         if y0 == 0 {
@@ -511,18 +519,18 @@ pub fn compute_band(
     Ok(())
 }
 
-/// Width in pixels of the frame in the iteration buffer (`0` before the
-/// first band) — the size of the image [`colorize`] paints.
+/// Width in pixels of the complete frame in the iteration buffer — the size
+/// of the image [`colorize`] paints — or `0` while there is none.
 #[wasm_bindgen]
 pub fn frame_width() -> u32 {
-    FRAME.get().map_or(0, |frame| frame.width)
+    complete_frame().map_or(0, |frame| frame.width)
 }
 
-/// Height in pixels of the frame in the iteration buffer (`0` before the
-/// first band); see [`frame_width`].
+/// Height in pixels of the complete frame in the iteration buffer, or `0`
+/// while there is none; see [`frame_width`].
 #[wasm_bindgen]
 pub fn frame_height() -> u32 {
-    FRAME.get().map_or(0, |frame| frame.height)
+    complete_frame().map_or(0, |frame| frame.height)
 }
 
 /// Colorize the cached iteration buffer with the given palette and
@@ -545,9 +553,10 @@ pub fn colorize(palette: Palette, mode: NormalizationMode) -> Result<*const u8, 
         RGBA_BUFFER.with(|cell| {
             let mut buf = cell.borrow_mut();
             // Fill the persistent RGBA buffer in place (P4, #80): `colorize_into`
-            // clears and reserves, reusing the prior frame's allocation instead of
-            // swapping in a fresh `Vec` (which would free the old one and let wasm
-            // linear memory ratchet under per-frame churn).
+            // resizes it without clearing (every byte is overwritten), reusing the
+            // prior frame's allocation instead of swapping in a fresh `Vec` (which
+            // would free the old one and let wasm linear memory ratchet under
+            // per-frame churn).
             let coloring = fractal_core::colorize_into(
                 &iters,
                 palette.into(),
@@ -644,7 +653,9 @@ pub fn colorize_len() -> usize {
 // Native tests of the buffer-ownership rules. Only success paths cross the
 // exports here: on a non-wasm target, building a `JsError` calls into JS and
 // panics, so the refusals are asserted through `next_frame` / `complete_frame`
-// and `probe_pixel`'s `None` instead.
+// and `probe_pixel`'s `None` instead. Each test starts from empty buffers
+// because libtest runs every test on its own thread, and the buffers are
+// thread-locals.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,6 +751,7 @@ mod tests {
         band(0, 1);
         assert!(complete_frame().is_none());
         assert!(probe(0, 0).is_none());
+        assert_eq!((frame_width(), frame_height()), (0, 0));
 
         band(1, H);
         assert_eq!(complete_frame(), Some(frame(H)));

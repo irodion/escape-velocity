@@ -154,27 +154,18 @@ export function handleRecolorize(
  * `(x, y)` into the frame so an edge or slightly-stale coordinate can never
  * index out of range.
  *
- * Tolerant by construction, because hover probes fire constantly: with no
- * complete frame to read (before the first, or just after a render was
- * abandoned partway) `probe_pixel` returns `undefined`, and this reports an
- * "inside" sentinel rather than throwing.
+ * Returns `undefined` when there is no complete frame to read (just after a
+ * render was abandoned partway): the worker then sends no reply, and the
+ * inspector keeps its last reading rather than showing one that describes no
+ * frame.
  */
-export function handleProbe(msg: ProbeRequest): ProbeResponse {
+export function handleProbe(msg: ProbeRequest): ProbeResponse | undefined {
   // `probe_pixel` returns a wasm-bindgen class wrapping WASM memory; read its
   // fields into a plain response (the class can't survive `postMessage`) and
   // free it so the handle doesn't leak across the constant hover traffic.
   const result = probe_pixel(msg.x | 0, msg.y | 0, msg.palette, msg.mode)
   if (result === undefined) {
-    return {
-      kind: 'probe-response',
-      seq: msg.seq,
-      raw: NaN,
-      t: NaN,
-      inside: true,
-      r: 0,
-      g: 0,
-      b: 0,
-    }
+    return undefined
   }
   try {
     return {

@@ -69,3 +69,14 @@ boundary.
 - [ADR-0001](0001-cpu-side-wasm-compute.md) — what compute() actually does.
 - [ADR-0005](0005-core-and-wasm-crate-workspace.md) — both functions live in
   `fractal-core`; the WASM binding crate is a pass-through.
+
+## Update — 2026-10-17 (#158)
+
+The ownership protocol the Negative consequences anticipated is settled: the
+WASM side owns the iteration buffer and JS holds **no** handle to it. The
+binding records which frame the buffer holds and how many of its bands have
+landed; `colorize` and the inspector's `probe_pixel` read it in place and
+refuse while the frame is incomplete (a render abandoned partway), so the
+invalidation rule is enforced in Rust rather than by JS dropping a stale
+pointer. The seam is unchanged: compute and colorize are still separate
+calls, and a palette change still re-runs only colorize.

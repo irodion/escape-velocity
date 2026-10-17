@@ -66,7 +66,9 @@ export interface RecolorizeRequest {
  * that never enters the render-client's single-slot coalescing and never
  * supersedes a render. The worker echoes `seq` back so the client can drop a
  * probe response older than the latest it issued (hover fires many). `x` / `y`
- * are render-buffer pixel coordinates (row-major `y * width + x`).
+ * are render-buffer pixel coordinates (row-major `y * width + x`). With no
+ * complete frame to read (just after a render was abandoned partway) the
+ * worker sends no reply at all.
  */
 export interface ProbeRequest {
   readonly kind: 'probe'

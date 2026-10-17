@@ -151,8 +151,19 @@ function handleMessage(
     // it neither bumps `latestSeen` nor supersedes a render; it just reads the
     // cached frame and replies. The client only issues one when that frame is
     // what's on screen (not mid-render, no active Preview); WASM refuses a
-    // partial frame regardless.
-    ctx.postMessage(handleProbe(msg))
+    // partial frame regardless, and then there is no reply.
+    //
+    // A probe has no error arm — an `error` carries an epoch and would free the
+    // client's render slot — so a throw here is logged and the reading dropped,
+    // rather than escaping to `onerror`, which the client treats as fatal.
+    try {
+      const response = handleProbe(msg)
+      if (response !== undefined) {
+        ctx.postMessage(response)
+      }
+    } catch (err) {
+      console.error('pixel probe failed:', err)
+    }
     return
   }
 
