@@ -455,8 +455,9 @@ store.subscribe((_viewport, source) => {
 })
 
 // Orbit visualizer (E1, #94). A presentation-only overlay: it reads the
-// authoritative viewport from the store (subscribing for re-projection on every
-// commit) and is fed the compute parameters by `applySettings`/`hashchange`
+// authoritative viewport from the store to map the cursor to a complex point,
+// but never subscribes — the orbit diagram is viewport-independent (see
+// orbit.ts) — and is fed the compute parameters by `applySettings`/`hashchange`
 // below. Constructed before the InputController so its `pin` is in scope for the
 // controller's click callback. The drawer-open guard makes a light-dismiss
 // click (and `Escape`) defer to the drawer rather than pin/un-pin.

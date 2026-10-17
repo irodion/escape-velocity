@@ -1,6 +1,6 @@
 //! Colour palettes and normalisation modes for smooth Mandelbrot output.
 //!
-//! The smooth-iteration count `nu` from [`crate::escape_time`] is a
+//! The smooth-iteration count `nu` from [`crate::escape_time()`] is a
 //! continuous real number; turning it into a pixel involves two
 //! decisions:
 //!

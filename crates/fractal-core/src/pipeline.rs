@@ -104,10 +104,9 @@ fn in_main_cardioid_or_bulb(c: Complex64) -> bool {
 /// regardless of Field (ADR-0013's shared sentinel).
 ///
 /// - [`Field::EscapeTime`] emits the smooth continuous escape-time count
-///   `nu` — the existing, unchanged hot path (see
-///   [`compute_escape_time`]).
+///   `nu` — the existing, unchanged hot path (see `fill_escape_time`).
 /// - [`Field::DistanceEstimate`] emits the boundary distance estimate
-///   `d`, in **pixel units** (see [`compute_distance_estimate`]).
+///   `d`, in **pixel units** (see `fill_distance_estimate`).
 ///
 /// The Field match is hoisted out of the per-pixel work, exactly like the
 /// `kind` match below it, so a frame carries one rule end-to-end.
@@ -191,7 +190,7 @@ pub fn compute_rows_into(
 ///
 /// The per-pixel escape-time calls are independent, so the work fans out
 /// across a `rayon` parallel iterator over pixel **rows** — `out` is split
-/// into `width`-sized row chunks by [`par_chunks_mut`], and each chunk is
+/// into `width`-sized row chunks by `par_chunks_mut`, and each chunk is
 /// filled in place. `par_chunks_mut` is an *indexed* parallel iterator, so
 /// rayon writes straight into `out` with no per-split intermediate buffers and
 /// no concatenating copy (the cost the old `flat_map_iter → collect` paid every
@@ -252,14 +251,12 @@ fn fill_escape_time(
 /// Field-blind). Dividing a `NaN` plane-distance leaves `NaN`, so the
 /// inside-set sentinel survives the conversion untouched.
 ///
-/// Family dispatch mirrors [`compute_escape_time`] and passes the
+/// Family dispatch mirrors [`fill_escape_time`] and passes the
 /// per-family derivative seeds (ADR-0013): Mandelbrot differentiates
 /// w.r.t. `c` (`dz_0 = 0`, `dc = 1`), Julia w.r.t. `z_0` (`dz_0 = 1`,
-/// `dc = 0`). The kernel itself stays family-agnostic. Slice 2 (#61)
-/// ships the Mandelbrot path as the headline; the Julia arm rides the
-/// same family-agnostic kernel so selecting Distance Estimate in Julia
-/// mode renders correctly rather than panicking — Slice 3 (#62) adds its
-/// dedicated witness tests and acceptance.
+/// `dc = 0`). The kernel itself stays family-agnostic, so both families
+/// share one code path; each has its own witness tests below (Mandelbrot
+/// #61, Julia #62).
 fn fill_distance_estimate(
     viewport: &Viewport,
     max_iter: u32,
@@ -383,7 +380,7 @@ pub fn colorize(nus: &[f32], palette: Palette, mode: NormalizationMode, max_iter
 /// only pass over the buffer. (On a genuine size change `resize` zero-fills only
 /// the grown tail, which the writers then overwrite too.)
 ///
-/// The palette is baked into a [`ColorLut`] once here (not re-dispatched per
+/// The palette is baked into a `ColorLut` once here (not re-dispatched per
 /// pixel), and the per-pixel work fans out across a `rayon` parallel iterator
 /// (P5, #81): `out` is split into 4-byte pixel chunks by `par_chunks_exact_mut`,
 /// zipped with `nus`, and each chunk filled independently. `par_chunks_exact_mut`
@@ -651,7 +648,7 @@ impl FrameColoring {
 }
 
 /// Trace pixel `index` of `nus` through the pre-built `coloring`, reusing the
-/// exact [`normalize_value`] mapping and palette LUT [`colorize_into`] applied —
+/// exact `normalize_value` mapping and palette LUT [`colorize_into`] applied —
 /// so the inspector's `t` and swatch agree with the on-screen frame to the bit.
 ///
 /// `index` must be in `0..nus.len()` (the caller validates at the WASM
