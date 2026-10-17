@@ -1,7 +1,7 @@
 /**
  * PNG export (O2, #92).
  *
- * Both export buttons (`1×` at the on-screen resolution, `2×` supersampled)
+ * Both export buttons (`1×` at the window size, `2×` at twice it)
  * render the *requested* state off-screen via `exportRenderedFrame` rather than
  * grabbing the on-screen canvas bitmap. Grabbing the canvas looked cheaper, but
  * it is only correct when the canvas is already showing the latest committed
@@ -11,41 +11,76 @@
  * pixels under a filename naming a different view. Rendering the requested state
  * makes the pixels and the filename describe the same frame, always.
  *
- * It deliberately does NOT reuse the live `render-client` singleton: that client
- * has a global epoch + a single in-flight slot (see its module doc; the factory
- * refactor is #86), so dispatching an export render through it would supersede —
- * and visually clobber — the frame the user is looking at. Instead a dedicated
+ * It deliberately does NOT reuse the live render client: that client has one
+ * epoch counter + a single in-flight slot (see `createRenderClient`), and its
+ * worker caches the last frame's iteration buffer (`WorkerState`), so
+ * dispatching an export render through it would supersede — and visually
+ * clobber — the frame the user is looking at, and evict the cache a recolorize
+ * depends on. Instead a dedicated
  * one-shot worker boots, renders exactly one request, and is terminated. The
  * cost is a brief second WASM boot per export, which is fine for an explicit,
  * infrequent action and keeps the live pipeline untouched.
  *
  * The caller builds the `RenderRequest` (it owns the viewport + the form→wasm
- * enum mapping), reusing `computeBufferDims` so the export buffer rides the same
- * render-scale machinery — including the pixel-budget clamp — as every
- * on-screen render.
+ * enum mapping), sizing the buffer with `computeExportDims` — the same
+ * scale-and-budget machinery as every on-screen render, but independent of the
+ * Resolution knob and against the export's own pixel budget
+ * (`EXPORT_MAX_PIXELS`).
  */
 
+import type { BufferDims } from './render-buffer.js'
+import { computeBufferDims } from './render-buffer.js'
 import type { ViewState } from './view-state.js'
 import { serialize } from './view-state.js'
 import type {
   Aborted,
   BootError,
   BootProgress,
+  ProgressResponse,
   Ready,
   RenderError,
   RenderRequest,
   RenderResponse,
 } from './worker/protocol.js'
 
-// Hard ceiling on a single export render before we give up and free the UI.
-// Generous: the export boots a fresh WASM instance + thread pool and then runs
-// one full (possibly deep, 2× supersampled) frame — far slower than the warm
-// on-screen pipeline. The point is not to bound a slow-but-progressing render
-// but to recover from a worker that never settles (a stuck boot — the same
-// failure the live client guards with its own boot watchdog — or a worker that
-// dies without posting a terminal message), which would otherwise leave the
-// export buttons disabled forever with no way to retry.
-const EXPORT_TIMEOUT_MS = 60_000
+// Inactivity watchdog for an export render: give up and free the UI once the
+// worker has gone this long without posting anything. Every message (boot
+// heartbeat, `ready`, each band's `progress`) re-arms it, so it never bounds a
+// slow-but-progressing render — a deep, 16M px frame can legitimately run well
+// past a minute in total (#157). What it catches is a worker that never settles
+// (a stuck boot — the same failure the live client guards with its own boot
+// watchdog — or a worker that dies without posting a terminal message), which
+// would otherwise leave the export buttons disabled forever with no way to retry.
+const EXPORT_STALL_TIMEOUT_MS = 60_000
+
+// Pixel budget for an export buffer (#157). Deliberately separate from the
+// on-screen `MAX_RENDER_PIXELS` (2.5M): that cap keeps interactive frames
+// responsive, and sharing it clamped ordinary desktop windows — a 2560×1440
+// window saved the same sub-window-size image from both buttons. An export runs
+// once on its own worker, so it can afford far more: 16M covers a 2560×1440
+// window at 2× (14.7M) and stays under iOS Safari's 4096² (16,777,216 px)
+// canvas-area limit, past which `rgbaToPngBlob` could not encode. At the cap the
+// worker holds ~128 MB (f32 iterations + RGBA in WASM memory), freed by
+// terminating it before the encode; the main thread then holds ~128 MB (the
+// transferred RGBA + the detached canvas) until the PNG is built.
+export const EXPORT_MAX_PIXELS = 16_000_000
+
+/**
+ * Size an export buffer: the logical (CSS) window size × `multiplier` (1 or 2
+ * for the two buttons), bounded by `EXPORT_MAX_PIXELS`. Independent of the
+ * on-screen Resolution knob (a speed/sharpness trade-off for interaction), so
+ * the two buttons always mean "the window size" and "twice it" — stacking the
+ * knob let Resolution 2× push both past the budget onto the same clamped size.
+ * The returned `scale` is the effective multiplier the caller applies to `zoom`
+ * (see `computeBufferDims`).
+ */
+export function computeExportDims(
+  logicalWidth: number,
+  logicalHeight: number,
+  multiplier: number,
+): BufferDims {
+  return computeBufferDims(logicalWidth, logicalHeight, multiplier, EXPORT_MAX_PIXELS)
+}
 
 /**
  * Build a download filename embedding the shareable permalink (O1, #91), so a
@@ -102,25 +137,41 @@ function rgbaToPngBlob(
     return Promise.reject(new Error('failed to acquire 2d context for PNG export'))
   }
   ctx.putImageData(new ImageData(rgba, width, height), 0, 0)
-  return canvasToPngBlob(canvas)
+  // Zero the backing store once encoded rather than waiting for GC: WebKit
+  // counts live canvases against a per-page memory cap, and at the export
+  // budget each one is ~64 MB, so a few quick exports could exhaust it.
+  return canvasToPngBlob(canvas).finally(() => {
+    canvas.width = 0
+    canvas.height = 0
+  })
 }
 
 /**
  * Render `request` on a dedicated one-shot worker and save the result as a PNG.
  * The worker boots its own WASM + thread pool, renders exactly one frame, and
- * is terminated in `finally` whether the render succeeds or fails.
+ * is terminated as soon as the frame (or a failure) arrives — before the PNG
+ * encode, so its WASM memory and pool threads are not held through it.
  */
 export async function exportRenderedFrame(request: RenderRequest, filename: string): Promise<void> {
   // Same worker entry as the live pipeline — Vite bundles it as its own chunk.
   const worker = new Worker(new URL('./worker/worker.ts', import.meta.url), { type: 'module' })
+  let response: RenderResponse
   try {
-    const response = await new Promise<RenderResponse>((resolve, reject) => {
-      // Every terminal path clears this so the timer never outlives the Promise;
-      // the timeout itself rejects, which (via the `finally` below) terminates
-      // the worker and lets `runExport` re-enable the buttons.
-      const timer = setTimeout(() => {
-        reject(new Error(`export render timed out after ${EXPORT_TIMEOUT_MS / 1000}s`))
-      }, EXPORT_TIMEOUT_MS)
+    response = await new Promise<RenderResponse>((resolve, reject) => {
+      // The stall watchdog: re-armed by every non-terminal message, cleared by
+      // every terminal path so the timer never outlives the Promise. Firing
+      // rejects, which (via the `finally` below) terminates the worker and lets
+      // `runExport` re-enable the buttons.
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const arm = (): void => {
+        clearTimeout(timer)
+        timer = setTimeout(() => {
+          reject(
+            new Error(`export render stalled: no progress for ${EXPORT_STALL_TIMEOUT_MS / 1000}s`),
+          )
+        }, EXPORT_STALL_TIMEOUT_MS)
+      }
+      arm()
       const settleResolve = (value: RenderResponse): void => {
         clearTimeout(timer)
         resolve(value)
@@ -131,7 +182,13 @@ export async function exportRenderedFrame(request: RenderRequest, filename: stri
       }
       worker.onmessage = (
         event: MessageEvent<
-          Ready | RenderResponse | RenderError | Aborted | BootProgress | BootError
+          | Ready
+          | RenderResponse
+          | RenderError
+          | Aborted
+          | BootProgress
+          | BootError
+          | ProgressResponse
         >,
       ): void => {
         const msg = event.data
@@ -139,12 +196,14 @@ export async function exportRenderedFrame(request: RenderRequest, filename: stri
           case 'boot':
             // Non-terminal boot heartbeat (#83): WASM instantiated, the pool is
             // next. Nothing to do on a one-shot export — wait for `ready`.
+            arm()
             return
           case 'boot-error':
             // The worker bootstrap failed and reported it via postMessage (a
             // module-worker top-level rejection does NOT reliably fire
             // `worker.onerror`, #83), so without this arm the export would sit
-            // disabled until the 60s timeout. Reject now with the real cause.
+            // disabled until the stall watchdog fired. Reject now with the real
+            // cause.
             settleReject(
               new Error(`export render worker failed to boot (${msg.stage}): ${msg.message}`),
             )
@@ -152,7 +211,13 @@ export async function exportRenderedFrame(request: RenderRequest, filename: stri
           case 'ready':
             // The worker buffers nothing of its own; dispatch the single render
             // only once it has booted its WASM instance and thread pool.
+            arm()
             worker.postMessage(request)
+            return
+          case 'progress':
+            // A band finished: the render is alive, so push the watchdog out.
+            // A one-shot export shows no progress bar.
+            arm()
             return
           case 'response':
             settleResolve(msg)
@@ -165,7 +230,6 @@ export async function exportRenderedFrame(request: RenderRequest, filename: stri
             // unexpected — surface it rather than hanging.
             settleReject(new Error('export render was aborted'))
             return
-          // `progress` heartbeats are ignored — a one-shot export shows no bar.
         }
       }
       worker.onerror = (event: ErrorEvent): void => {
@@ -173,9 +237,9 @@ export async function exportRenderedFrame(request: RenderRequest, filename: stri
         settleReject(new Error(event.message || 'export render worker failed to start'))
       }
     })
-    const blob = await rgbaToPngBlob(response.rgba, response.width, response.height)
-    downloadBlob(blob, filename)
   } finally {
     worker.terminate()
   }
+  const blob = await rgbaToPngBlob(response.rgba, response.width, response.height)
+  downloadBlob(blob, filename)
 }

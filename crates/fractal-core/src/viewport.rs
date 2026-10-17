@@ -77,7 +77,7 @@ impl Viewport {
     /// Complex-plane size of one pixel. Identical on both axes
     /// (square pixels in the complex plane).
     ///
-    /// Keyed to the fixed [`REFERENCE_WIDTH`], not `self.width`, so the
+    /// Keyed to the fixed `REFERENCE_WIDTH` (800 px), not `self.width`, so the
     /// scale depends only on `zoom` — a wider/taller buffer reveals more
     /// of the plane rather than shrinking the per-pixel step (ADR-0011).
     pub fn pixel_scale(&self) -> f64 {
@@ -181,7 +181,7 @@ impl Viewport {
     /// `center` and `zoom` exactly.
     ///
     /// Under the ADR-0011 convention `pixel_scale` is keyed to
-    /// [`REFERENCE_WIDTH`], so it does **not** change with the new
+    /// `REFERENCE_WIDTH` (800 px), so it does **not** change with the new
     /// dimensions — resizing the buffer changes how much of the plane is
     /// sampled, not the per-pixel step.
     ///

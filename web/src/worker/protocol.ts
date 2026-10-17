@@ -122,7 +122,7 @@ export interface BootProgress {
  * `worker.onerror` — so without this arm the failure is invisible and the
  * client only learns something is wrong when the 5 s watchdog fires with a
  * generic message. Posting the real error text + the stage that failed lets
- * the client surface the actual cause (a SIMD-incompatible binary, a stripped
+ * the client surface the actual cause (a WASM feature the browser lacks, a stripped
  * COOP/COEP header, a `SharedArrayBuffer` RangeError) on the fatal panel.
  */
 export interface BootError {

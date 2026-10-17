@@ -6,13 +6,10 @@
 //! quantity `compute` emits, chosen *before* any normalisation or palette
 //! applies.
 //!
-//! - **Escape Time**: the smooth continuous count `nu` — the existing
-//!   default, and the only Field `compute` actually produces today.
+//! - **Escape Time**: the smooth continuous count `nu` — the default.
 //! - **Distance Estimate**: an estimate of each pixel's distance to the
-//!   set boundary. Its maths (a separate `escape_distance` kernel that
-//!   tracks the orbit derivative) lands in Slice 2 (#61); this slice
-//!   wires the axis end-to-end with Escape Time alone, so `compute` does
-//!   not yet produce a Distance Estimate buffer.
+//!   set boundary, in pixel units, from a separate `escape_distance`
+//!   kernel that tracks the orbit derivative (Mandelbrot #61, Julia #62).
 //!
 //! Like [`crate::FractalKind`], the Field is matched once per render in
 //! `compute` and is otherwise invisible downstream: `colorize` only ever
@@ -28,7 +25,7 @@ pub enum Field {
     /// Smooth (continuous) escape-time count `nu`. The default.
     #[default]
     EscapeTime,
-    /// Distance-to-boundary estimate `d`. Wired here, computed in #61.
+    /// Distance-to-boundary estimate `d`, in pixel units.
     DistanceEstimate,
 }
 
