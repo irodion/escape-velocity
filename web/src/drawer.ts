@@ -20,13 +20,14 @@
  * test in `drawer.test.ts`.
  */
 
-// A deliberate *click* on the fractal travels less than this many CSS pixels
-// between press and release. Past it, the gesture is a pan-drag — which must
-// leave the drawer open so the user can reframe the view while tuning a
-// control. A wheel-zoom fires no mouse press at all, so it never reaches the
-// dismiss path. ~4px tolerates the hand-jitter of a "stationary" click
-// without swallowing a real drag.
-const CLICK_SLOP_PX = 4
+import { CLICK_SLOP_PX } from './input.js'
+
+// A deliberate *click* on the fractal travels no more than `CLICK_SLOP_PX` CSS
+// pixels between press and release. Past it, the gesture is a pan-drag — which
+// must leave the drawer open so the user can reframe the view while tuning a
+// control. The slop is the input controller's own click-vs-pan threshold, so a
+// press that dismisses never also pans. A wheel-zoom fires no mouse press at
+// all, so it never reaches the dismiss path.
 
 // The toggle's glyph is *drawn*, not an emoji: a crosshair that echoes the
 // canvas's `crosshair` cursor (the affordance points at what it controls),
@@ -122,20 +123,21 @@ export function mountDrawer(
   // Click-away: a deliberate click/tap on the fractal dismisses an open drawer.
   // We can't use a plain `click` listener — the canvas's pan also fires
   // `click` after a drag returns near its origin, and the browser's own
-  // click-distance tolerance isn't tunable. So we arm on `pointerdown` and
-  // only dismiss if the pointer barely moved by `pointerup` (a pan travels
-  // farther; a wheel-zoom fires no pointer press), giving an explicit,
-  // testable click-vs-drag split. Pointer events (not mouse) match the
-  // canvas's pan wiring in `input.ts` (U1, #88), so a touch tap dismisses the
-  // drawer just like a mouse click — no reliance on synthesised mouse events.
-  // The drawer's own controls and the toggle sit in higher z-index layers, so
-  // presses on them never reach here.
+  // click-distance tolerance isn't tunable. So we arm on `pointerdown`,
+  // disarm once the pointer strays past the slop (even if it comes back), and
+  // dismiss on `pointerup` only if still armed and still near the press (a
+  // fast flick may move no further than its release; a wheel-zoom fires no
+  // pointer press), giving an explicit, testable click-vs-drag split. Pointer
+  // events (not mouse) match the canvas's pan wiring in `input.ts` (U1, #88),
+  // so a touch tap dismisses the drawer just like a mouse click — no reliance
+  // on synthesised mouse events. The drawer's own controls and the toggle sit
+  // in higher z-index layers, so presses on them never reach here.
   //
-  // Both this listener and `input.ts`'s pan see the same press: a true
-  // click closes the drawer here and commits a zero-delta (no-op) pan
-  // there; a drag leaves the drawer open and pans. They stay decoupled —
-  // the drawer never learns about the viewport, the input layer never
-  // learns about the drawer.
+  // Both this listener and `input.ts`'s pan see the same press, split the same
+  // way: a click closes the drawer here and commits nothing there; a drag
+  // (including one that returns to its start) leaves the drawer open and pans.
+  // They stay decoupled — the drawer never learns about the viewport, the
+  // input layer never learns about the drawer.
   //
   // Only a *single*-pointer tap dismisses. A second concurrent pointer means a
   // multi-touch gesture — a pinch-zoom (U1, #88) — not a tap: arming is
@@ -165,16 +167,20 @@ export function mountDrawer(
       }
       activePointers.add(event.pointerId)
     })
+    const movedFar = (event: PointerEvent): boolean =>
+      Math.abs(event.clientX - downX) > CLICK_SLOP_PX ||
+      Math.abs(event.clientY - downY) > CLICK_SLOP_PX
+    // Past the slop the press is a pan, and stays one even if it returns.
+    dismissSurface.addEventListener('pointermove', (event) => {
+      if (event.pointerId === armedPointerId && movedFar(event)) armedPointerId = null
+    })
     const release = (event: PointerEvent): void => {
       activePointers.delete(event.pointerId)
       // Only the armed pointer's release dismisses (a dangling release from a
       // drag off-canvas, or a non-armed pinch finger, is ignored).
       if (event.pointerId !== armedPointerId) return
       armedPointerId = null
-      const movedFar =
-        Math.abs(event.clientX - downX) > CLICK_SLOP_PX ||
-        Math.abs(event.clientY - downY) > CLICK_SLOP_PX
-      if (movedFar) return
+      if (movedFar(event)) return
       setOpen(false)
       // Hand focus back to the toggle: closing makes the drawer `inert`, so
       // a keyboard focus that was sitting on a control inside it can't be

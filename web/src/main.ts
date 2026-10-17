@@ -531,7 +531,7 @@ input = new InputController(
   // transform out from under the gesture (ADR-0012).
   discardInFlight,
   // A click (no drag) routes by modifier, reusing the controller's canonical
-  // click-vs-pan classification (the deadzone branch):
+  // click-vs-pan classification (`CLICK_SLOP_PX`):
   //  - Alt-click in Mandelbrot mode picks the Julia constant at the clicked
   //    point and switches to Julia (O2, #92).
   //  - any other click seeds/pins the orbit at that point (E1, #94).
