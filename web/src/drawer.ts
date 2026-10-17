@@ -20,13 +20,14 @@
  * test in `drawer.test.ts`.
  */
 
-// A deliberate *click* on the fractal travels less than this many CSS pixels
-// between press and release. Past it, the gesture is a pan-drag — which must
-// leave the drawer open so the user can reframe the view while tuning a
-// control. A wheel-zoom fires no mouse press at all, so it never reaches the
-// dismiss path. ~4px tolerates the hand-jitter of a "stationary" click
-// without swallowing a real drag.
-const CLICK_SLOP_PX = 4
+import { CLICK_SLOP_PX } from './input.js'
+
+// A deliberate *click* on the fractal travels no more than `CLICK_SLOP_PX` CSS
+// pixels between press and release. Past it, the gesture is a pan-drag — which
+// must leave the drawer open so the user can reframe the view while tuning a
+// control. The slop is the input controller's own click-vs-pan threshold, so a
+// press that dismisses never also pans. A wheel-zoom fires no mouse press at
+// all, so it never reaches the dismiss path.
 
 // The toggle's glyph is *drawn*, not an emoji: a crosshair that echoes the
 // canvas's `crosshair` cursor (the affordance points at what it controls),

@@ -78,7 +78,7 @@ function pe(
 // Minimal 2D context stub. jsdom does not implement canvas painting,
 // so `canvas.getContext('2d')` returns null by default. The controller's
 // canvas-API touchpoints are `drawImage` (to snapshot the canvas into the
-// offscreen buffer on pointerdown, to blit it back on pointermove, and to
+// offscreen buffer when a drag starts, to blit it back on pointermove, and to
 // restore it on a pan→pinch switch) and `fillRect` (the black edge fill), so
 // the stub only needs to spy on those two.
 function makeCtxStub(): {
@@ -242,16 +242,15 @@ describe('InputController', () => {
     expect(onChange).toHaveBeenCalledWith(refitPanned)
   })
 
-  it('snapshots the canvas on pointerdown and paints it at the drag offset on pointermove', () => {
+  it('snapshots the canvas when the drag starts and paints it at the drag offset', () => {
     viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
     mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
+    canvas.dispatchEvent(pe('pointermove', { clientX: 130, clientY: 70 }))
     // Snapshot is a `drawImage` blit of the on-screen canvas into the
     // offscreen buffer (GPU path), not a `getImageData` readback (#82).
     expect(offscreenCtxStub.drawImage).toHaveBeenCalledWith(canvas, 0, 0)
-
-    canvas.dispatchEvent(pe('pointermove', { clientX: 130, clientY: 70 }))
     // dx=30, dy=20; rect matches internal so no scaling. Each pointermove
     // re-paints the full canvas (fillRect black, then drawImage of the
     // offscreen snapshot at the offset) — no CSS transform applied.
@@ -391,29 +390,33 @@ describe('InputController', () => {
     expect(canvas.classList.contains('dragging')).toBe(false)
   })
 
-  it('jitter inside the deadzone neither discards in-flight work nor draws (B3, #74)', () => {
-    // Displayed at 5× the logical grid, so 2 CSS px is 0.4 logical px: inside
-    // the deadzone. A trackpad or pen click jitters like this.
-    setRect(canvas, { width: 4000, height: 3000 })
+  it('a press that stays inside the click slop is a click: it starts nothing (B3, #74)', () => {
+    // A trackpad tap, pen tap or touch jitters a few CSS px. Inside
+    // `CLICK_SLOP_PX` it takes no snapshot, discards nothing, draws nothing
+    // and commits nothing — it only reports the click.
     const onInvalidate = vi.fn()
-    mount(canvas, viewport, onChange, onInvalidate)
+    const onClick = vi.fn()
+    mount(canvas, viewport, onChange, onInvalidate, onClick)
 
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
-    canvas.dispatchEvent(pe('pointermove', { clientX: 102, clientY: 49 }))
-    canvas.dispatchEvent(pe('pointerup', { clientX: 102, clientY: 49 }))
+    canvas.dispatchEvent(pe('pointermove', { clientX: 103, clientY: 46 }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 104, clientY: 47 }))
 
+    expect(onClick).toHaveBeenCalledWith(104, 47, { altKey: false })
     expect(onInvalidate).not.toHaveBeenCalled()
+    expect(offscreenCtxStub.drawImage).not.toHaveBeenCalled()
     expect(ctxStub.drawImage).not.toHaveBeenCalled()
     expect(onChange).not.toHaveBeenCalled()
   })
 
-  it('a drag released back inside the deadzone re-renders what it discarded (#180)', () => {
-    // The first move out of the deadzone discards the in-flight render. A
-    // release back at the start is a click, which commits no pan — so the
-    // controller must re-request the current viewport, or the canvas keeps
-    // showing the frame from before the press.
+  it('a drag released back at its start commits, re-rendering what it discarded (#180)', () => {
+    // The drag discarded the in-flight render when it left the click slop. A
+    // release back at the start is still a drag — not a click — and must
+    // commit, or the canvas keeps the frame from before the press.
     const onInvalidate = vi.fn()
     const onClick = vi.fn()
+    const unpanned = { sentinel: 'unpanned' } as unknown as Viewport
+    viewport.pan_by_pixels.mockReturnValue(unpanned)
     mount(canvas, viewport, onChange, onInvalidate, onClick)
 
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
@@ -421,44 +424,35 @@ describe('InputController', () => {
     expect(onInvalidate).toHaveBeenCalledTimes(1)
     canvas.dispatchEvent(pe('pointerup', { clientX: 100, clientY: 50 }))
 
-    expect(onClick).toHaveBeenCalledWith(100, 50, { altKey: false })
-    expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
+    expect(onClick).not.toHaveBeenCalled()
+    expect(viewport.pan_by_pixels).toHaveBeenCalledWith(0, 0)
     expect(onChange).toHaveBeenCalledTimes(1)
-    expect(onChange).toHaveBeenCalledWith(viewport)
-    // The drag preview is undone: the snapshot is back at the origin.
-    expect(ctxStub.drawImage).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), 0, 0)
+    expect(onChange).toHaveBeenCalledWith(unpanned)
   })
 
-  it('skips the re-render when the click consumer wrote the store itself', () => {
-    // An Alt-click's Julia c-pick resets the view through the store, which
-    // re-renders; re-committing on top would restart that render for nothing.
-    const julia = makeViewportDouble()
-    let store: ViewportStore | undefined
-    const onClick = vi.fn(() => store?.set(julia as unknown as Viewport, 'mode-reset'))
-    ;({ store } = mount(canvas, viewport, onChange, undefined, onClick))
+  it('snapshots the frame on screen when the drag starts, not at the press (#184)', () => {
+    // A render that paints while the press sits inside the click slop must be
+    // the frame the drag shifts, so the snapshot waits for the drag to start.
+    viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
+    mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
-    canvas.dispatchEvent(pe('pointermove', { clientX: 130, clientY: 70 }))
-    canvas.dispatchEvent(pe('pointerup', { clientX: 100, clientY: 50, altKey: true }))
+    canvas.dispatchEvent(pe('pointermove', { clientX: 102, clientY: 51 }))
+    expect(offscreenCtxStub.drawImage).not.toHaveBeenCalled()
 
-    expect(onClick).toHaveBeenCalledTimes(1)
-    expect(onChange).not.toHaveBeenCalled()
-    expect(store.get()).toBe(julia)
+    canvas.dispatchEvent(pe('pointermove', { clientX: 130, clientY: 70 }))
+    expect(offscreenCtxStub.drawImage).toHaveBeenCalledTimes(1)
+    expect(offscreenCtxStub.drawImage).toHaveBeenCalledWith(canvas, 0, 0)
   })
 
-  it('a tap inside the wheel Settle window commits the zoom it tore down', () => {
-    // The press clears the unsettled Preview, so the canvas shows the pre-zoom
-    // frame while `currentViewport` holds the zoom. A tap commits nothing of
-    // its own, so without a commit the next gesture would start from a zoom
-    // the screen and the store never showed.
+  it('a tap during a wheel scrub leaves the Preview and its Settle alone', () => {
+    // The click is mapped through the box as displayed, so a Preview it tore
+    // down would put a different point under the finger than the one tapped.
+    // Left alone, the scrub Settles on its own timer with no extra render.
     const zoomed = makeZoomResult(0.8)
     viewport.zoom_around.mockReturnValue(zoomed)
-    let viewAtClick: Viewport | undefined
-    let store: ViewportStore | undefined
-    const onClick = vi.fn(() => {
-      viewAtClick = store?.get()
-    })
-    ;({ store } = mount(canvas, viewport, onChange, undefined, onClick))
+    const onClick = vi.fn()
+    const { phase } = mount(canvas, viewport, onChange, undefined, onClick)
 
     canvas.dispatchEvent(
       new WheelEvent('wheel', {
@@ -469,20 +463,43 @@ describe('InputController', () => {
         cancelable: true,
       }),
     )
+    const transform = canvas.style.transform
+    expect(transform).not.toBe('')
     canvas.dispatchEvent(pe('pointerdown', { clientX: 120, clientY: 80 }))
     canvas.dispatchEvent(pe('pointerup', { clientX: 120, clientY: 80 }))
 
-    // The click maps through the frame that was on screen, then the zoom lands.
-    expect(viewAtClick).toBe(viewport)
+    expect(onClick).toHaveBeenCalledTimes(1)
+    expect(canvas.style.transform).toBe(transform)
+    expect(phase.get()).toBe('preview')
+    expect(onChange).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(WHEEL_SETTLE_MS)
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledWith(zoomed)
-    // The Settle timer was cancelled by the press, so it adds no second render.
-    vi.advanceTimersByTime(WHEEL_SETTLE_MS)
+  })
+
+  it('a cancelled press is not a click; a cancelled pan commits where it was last shown', () => {
+    // `pointercancel` means the OS took the pointer. A press that never left
+    // the click slop reports nothing. A started pan commits from the last
+    // tracked move, not the cancel's own coordinates (which can be zeroed).
+    const onClick = vi.fn()
+    viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
+    mount(canvas, viewport, onChange, undefined, onClick)
+
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
+    canvas.dispatchEvent(pe('pointercancel', { clientX: 100, clientY: 50 }))
+    expect(onClick).not.toHaveBeenCalled()
+    expect(onChange).not.toHaveBeenCalled()
+
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
+    canvas.dispatchEvent(pe('pointermove', { clientX: 130, clientY: 70 }))
+    canvas.dispatchEvent(pe('pointercancel', { clientX: 0, clientY: 0 }))
+    expect(onClick).not.toHaveBeenCalled()
+    expect(viewport.pan_by_pixels).toHaveBeenCalledWith(30, 20)
     expect(onChange).toHaveBeenCalledTimes(1)
   })
 
   it('threads the tap position and modifier-key state to the click consumer (O2, #92)', () => {
-    // The deadzone click branch feeds the orbit pin (E1) and the Julia c-picker
+    // The click branch feeds the orbit pin (E1) and the Julia c-picker
     // (O2): the picker needs the Alt-key flag to distinguish a c-pick from a
     // plain orbit-pin click, so the controller reports it alongside the CSS
     // position — staying presentation-free about what either means.
@@ -490,7 +507,7 @@ describe('InputController', () => {
     const store = createViewportStore(viewport as unknown as Viewport)
     new InputController(canvas, store, createGesturePhaseStore(), undefined, onClick)
 
-    // A plain in-deadzone tap: altKey false, CSS position relative to the box.
+    // A plain in-slop tap: altKey false, CSS position relative to the box.
     canvas.dispatchEvent(pe('pointerdown', { clientX: 120, clientY: 80 }))
     canvas.dispatchEvent(pe('pointerup', { clientX: 120, clientY: 80 }))
     expect(onClick).toHaveBeenLastCalledWith(120, 80, { altKey: false })
@@ -840,22 +857,21 @@ describe('InputController', () => {
     )
     expect(onChange).not.toHaveBeenCalled()
 
-    // Pan starts before the Settle fires: no render is issued here (firing the
-    // zoom's Settle would paint an intermediate frame mid-drag). The pointerdown
-    // no longer discards in-flight work — that is deferred to the first real
-    // pointermove (B3, #74) — so the count still reflects only the wheel notch's
-    // own discard (B2).
+    // A press alone starts nothing: the Preview and its pending Settle stay, and
+    // nothing more is discarded (B3, #74) — the count is the notch's own (B2).
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
-    expect(onChange).not.toHaveBeenCalled()
+    expect(canvas.style.transform).not.toBe('')
     expect(onInvalidate).toHaveBeenCalledTimes(1)
+
+    // The drag starts before the Settle fires: it tears the Preview down without
+    // rendering (firing the zoom's Settle would paint an intermediate frame
+    // mid-drag) and discards any in-flight render (bringing the total to two).
+    canvas.dispatchEvent(pe('pointermove', { clientX: 115, clientY: 60 }))
+    expect(canvas.style.transform).toBe('')
+    expect(onInvalidate).toHaveBeenCalledTimes(2)
+    expect(onChange).not.toHaveBeenCalled()
     // The cancelled Settle can't fire later either.
     vi.advanceTimersByTime(WHEEL_SETTLE_MS)
-    expect(onChange).not.toHaveBeenCalled()
-
-    // The drag actually begins: the first pointermove discards any in-flight
-    // render so it can't clobber the pan snapshot (bringing the total to two).
-    canvas.dispatchEvent(pe('pointermove', { clientX: 115, clientY: 60 }))
-    expect(onInvalidate).toHaveBeenCalledTimes(2)
     expect(onChange).not.toHaveBeenCalled()
 
     // Pointerup issues the single render: the zoomed viewport, panned. The pan
@@ -917,9 +933,13 @@ describe('InputController', () => {
     )
     expect(canvas.style.transform).not.toBe('')
 
-    // A pan starting before the fresh frame paints must clear the transform,
-    // or the pan delta on pointerup would be scaled by the live transform.
+    // A press alone leaves it (it may be a click); a pan starting before the
+    // fresh frame paints must clear it, or the pan delta on pointerup would be
+    // scaled by the live transform.
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
+    expect(canvas.style.transform).not.toBe('')
+    expect(phase.get()).toBe('dragging')
+    canvas.dispatchEvent(pe('pointermove', { clientX: 130, clientY: 70 }))
     expect(canvas.style.transform).toBe('')
     expect(phase.get()).toBe('dragging')
   })
@@ -1020,14 +1040,15 @@ describe('InputController', () => {
     )
     expect(viewport.zoom_around).not.toHaveBeenCalled()
 
-    // Drag on a 0×0 canvas: cleanup still happens (class removed,
-    // dragState reset implicitly via second pointerdown not crashing),
-    // but no pan_by_pixels / onChange.
+    // Drag on a 0×0 canvas: cleanup still happens (class removed) and no
+    // pan_by_pixels, but the viewport is still committed unpanned — the drag
+    // discarded the in-flight render, which must run again.
     canvas.dispatchEvent(pe('pointerdown', { clientX: 0, clientY: 0 }))
     canvas.dispatchEvent(pe('pointermove', { clientX: 30, clientY: 20 }))
     canvas.dispatchEvent(pe('pointerup', { clientX: 30, clientY: 20 }))
     expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
-    expect(onChange).not.toHaveBeenCalled()
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith(viewport)
     expect(canvas.classList.contains('dragging')).toBe(false)
     expect(ctxStub.drawImage).not.toHaveBeenCalled()
   })
