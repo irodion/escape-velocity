@@ -105,9 +105,9 @@ async function boot(): Promise<void> {
   try {
     wasm = await init()
   } catch (err) {
-    // The binary failed to instantiate — most often an unsupported required
-    // WASM feature on this browser (e.g. a SIMD-built binary on a browser below
-    // the SIMD floor), or a LinkError from a stripped isolation header.
+    // The binary failed to instantiate — most often a required WASM feature
+    // this browser lacks (the build needs threads: atomics + shared memory), or
+    // a LinkError from a stripped isolation header.
     postBootError('init', err)
     return
   }

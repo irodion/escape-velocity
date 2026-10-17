@@ -20,7 +20,7 @@
 //! spotting it return to an *exactly equal* earlier orbit point (whereupon
 //! the deterministic recurrence repeats it forever ⇒ bounded). This is the
 //! **same** inside/outside partition and sentinel contract as
-//! [`crate::escape_time`] — both kernels share the bailout and the same
+//! [`crate::escape_time()`] — both kernels share the bailout and the same
 //! bit-exact periodicity test, so the two Fields agree bit-for-bit on which
 //! pixels are interior, and the periodicity early-exit is output-identical to
 //! running the full loop. Callers MUST detect inside-set points with

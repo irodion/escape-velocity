@@ -42,6 +42,17 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+      - name: cargo doc (deny warnings)
+        # A rename that leaves a doc link dangling is the most common doc drift
+        # here (#164). Two passes: the public docs as published (which also
+        # flags public docs linking private items), and with private items so
+        # links in internal docs — most of this codebase's prose — are checked.
+        run: |
+          cargo doc --workspace --no-deps
+          cargo doc --workspace --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: -D warnings
+
       - name: cargo-deny (advisories + licenses)
         # RUSTSEC advisories and GPL-compatible license enforcement for the
         # Rust tree (policy in deny.toml); the `vet` job covers npm. Scoped to
