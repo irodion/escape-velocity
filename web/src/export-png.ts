@@ -11,10 +11,12 @@
  * pixels under a filename naming a different view. Rendering the requested state
  * makes the pixels and the filename describe the same frame, always.
  *
- * It deliberately does NOT reuse the live `render-client` singleton: that client
- * has a global epoch + a single in-flight slot (see its module doc; the factory
- * refactor is #86), so dispatching an export render through it would supersede —
- * and visually clobber — the frame the user is looking at. Instead a dedicated
+ * It deliberately does NOT reuse the live render client: that client has one
+ * epoch counter + a single in-flight slot (see `createRenderClient`), and its
+ * worker caches the last frame's iteration buffer (`WorkerState`), so
+ * dispatching an export render through it would supersede — and visually
+ * clobber — the frame the user is looking at, and evict the cache a recolorize
+ * depends on. Instead a dedicated
  * one-shot worker boots, renders exactly one request, and is terminated. The
  * cost is a brief second WASM boot per export, which is fine for an explicit,
  * infrequent action and keeps the live pipeline untouched.

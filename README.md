@@ -26,7 +26,9 @@ for the core experience.
 - Escape-time iteration written in Rust, compiled to WASM, run on the **CPU**
   (the GPU is a possible later slice, not a commitment — see
   [ADR-0001](docs/decisions/0001-cpu-side-wasm-compute.md)).
-- A deliberately thin TypeScript UI: one `<canvas>` and a handful of controls.
+- A vanilla TypeScript UI, no framework: the canvas, a controls drawer with a
+  coordinate readout and zoom-depth meter, presentation-only overlays (orbit
+  visualizer, pixel inspector), shareable permalinks, and PNG export.
 - Shipped as an installable, offline-capable Progressive Web App.
 
 ## How it is built
@@ -53,6 +55,10 @@ See the [roadmap](#roadmap) for the slice sequence.
 | Hosting        | Cloudflare Pages (`_headers` sets COOP/COEP).                                     | [0008](docs/decisions/0008-host-on-cloudflare-pages.md) |
 | PWA            | Late dedicated slice, via `vite-plugin-pwa`.                                      | [0009](docs/decisions/0009-pwa-as-late-slice.md) |
 | License        | GPL-3.0.                                                                          | [0010](docs/decisions/0010-gpl-3-license.md) |
+| Zoom scale     | Per-pixel scale keyed to a fixed 800 px reference width; a bigger window shows more plane. | [0011](docs/decisions/0011-zoom-keyed-to-reference-width.md) |
+| Zoom feedback  | Instant CSS-transform Preview while zooming; one debounced Settle computes the frame. | [0012](docs/decisions/0012-instant-zoom-feedback-transform-preview.md) |
+| Field          | Escape Time or Distance Estimate, chosen at compute time; `colorize` stays Field-blind. | [0013](docs/decisions/0013-distance-estimate-as-a-field.md) |
+| Input          | Pointer Events throughout; two-finger pinch-zoom reuses the Preview/Settle.       | [0014](docs/decisions/0014-pointer-events-and-pinch-zoom.md) |
 
 Every row is backed by an [ADR](docs/decisions/) that records the context, the
 decision, and the trade-offs — including the options we rejected.
@@ -76,13 +82,18 @@ slices all the same.
 | 7   | rayon multicore (WASM threads)   | ✅     | Multicore speedup; deep zooms feel fast.                        |
 | 8   | PWA                              | ✅     | Installable, works offline.                                     |
 
+**Shipped since the roadmap:**
+
+- Touch / pinch zoom (U1, #88; ADR-0014)
+- Shareable permalinks (view encoded in the URL hash) + coordinate readout (O1, #91)
+- Click-the-Mandelbrot-to-pick-`c` for Julia mode, and PNG export (O2, #92)
+- Distance Estimate as a second Field (#61, #62; ADR-0013)
+- Orbit visualizer (E1, #94), pixel inspector (E2, #95), zoom-depth meter (E5, #98)
+
 **Backlog** — genuine future slices, deliberately out of the shipped roadmap:
 
-- Click-the-Mandelbrot-to-pick-`c` (the pedagogically magical Julia UX)
 - GPU compute slice (a deliberate fork — see ADR-0001)
-- Touch / pinch zoom
-- Shareable URL state (viewport encoded in the hash)
-- Live side-by-side Mandelbrot + Julia with hover-preview
+- Live side-by-side Mandelbrot + Julia with hover-preview (E3, #96)
 
 ## Watch-list
 

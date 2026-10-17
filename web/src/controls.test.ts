@@ -1,10 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Controls, pickJuliaSettings } from './controls.js'
 import {
+  FIELDS,
   type FieldName,
+  FRACTAL_MODES,
   type FractalMode,
   MAX_ITER_STOPS,
+  NORMALISATIONS,
   type NormalisationName,
+  PALETTES,
   type PaletteName,
   type Settings,
 } from './settings.js'
@@ -30,10 +34,22 @@ const INITIAL: Settings = {
   inspect: false,
 }
 
-// Build the same form layout the production index.html ships. Slices
-// 3 and 4 pin the option lists in their PRDs (render-scale: 0.5×/1×/2×
-// quality multipliers; palette: five matplotlib-derived names;
-// normalisation: cycled or histogram). Iterations is a log slider — an
+// One `<option>` per name, in array order, marking `selected` like the
+// production markup. Labels are irrelevant to `Controls` (it reads `value`),
+// so the name doubles as the label.
+const options = (names: readonly string[], selected: string): string =>
+  names
+    .map(
+      (name) => `<option value="${name}"${name === selected ? ' selected' : ''}>${name}</option>`,
+    )
+    .join('')
+
+// Build the same form layout the production index.html ships. The enum
+// `<select>`s (Field, Palette, Coloring, Fractal) take their options from the
+// settings.ts arrays (#162) rather than a hand copy — index.html is pinned to
+// those same arrays by settings.test.ts, so the fixture can't drift from
+// production (it once lacked the CRT palettes). Render-scale keeps its
+// 0.5×/1×/2× quality multipliers inline. Iterations is a log slider — an
 // `<input type="range">` whose value is an index into MAX_ITER_STOPS, plus
 // an `<output>` readout — replacing the original 64..8192 doubling
 // `<select>`; the constructor drives its min/max/value. Slice 5C adds
@@ -67,46 +83,25 @@ function buildForm(): HTMLFormElement {
     <label>
       Field:
       <select name="field">
-        <option value="escape-time" selected>Escape Time</option>
-        <option value="distance-estimate">Distance Estimate</option>
+        ${options(FIELDS, 'escape-time')}
       </select>
     </label>
     <label>
       Palette:
       <select name="palette">
-        <option value="grayscale">Grayscale</option>
-        <option value="viridis" selected>Viridis</option>
-        <option value="magma">Magma</option>
-        <option value="inferno">Inferno</option>
-        <option value="plasma">Plasma</option>
-        <option value="turbo">Turbo</option>
-        <option value="cubehelix">Cubehelix</option>
-        <option value="twilight">Twilight</option>
-        <option value="earth-and-sky">Earth &amp; Sky</option>
-        <option value="rainbow">Rainbow</option>
-        <option value="kahol-lavan">Kahol&ndash;Lavan</option>
-        <option value="ocean">Ocean</option>
-        <option value="solar">Solar</option>
-        <option value="spectral">Spectral</option>
-        <option value="cosmic">Cosmic</option>
+        ${options(PALETTES, 'viridis')}
       </select>
     </label>
     <label>
       Coloring:
       <select name="normalisation">
-        <option value="cycled" selected>Cycled</option>
-        <option value="histogram">Match palette to image</option>
-        <option value="linear">Linear</option>
-        <option value="sqrt">Square root</option>
-        <option value="logarithmic">Logarithmic</option>
-        <option value="clamped">Clamped (filaments)</option>
+        ${options(NORMALISATIONS, 'cycled')}
       </select>
     </label>
     <label>
       Fractal:
       <select name="mode">
-        <option value="mandelbrot" selected>Mandelbrot</option>
-        <option value="julia">Julia</option>
+        ${options(FRACTAL_MODES, 'mandelbrot')}
       </select>
     </label>
     <label>

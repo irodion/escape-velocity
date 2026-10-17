@@ -71,8 +71,8 @@ function bootErrorMessage(err: BootError): string {
     case 'init':
       return (
         'The WebAssembly renderer failed to load. This browser may be missing a ' +
-        'feature the build requires (for example WASM SIMD on older mobile ' +
-        `browsers), or an isolation header was stripped${detail}.`
+        'feature the build requires (for example WebAssembly threads on an older ' +
+        `browser), or an isolation header was stripped${detail}.`
       )
     case 'thread-pool':
       return (
