@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildFilename } from './export-png.js'
+import { buildFilename, computeExportDims, EXPORT_MAX_PIXELS } from './export-png.js'
 import type { ViewState } from './view-state.js'
 import { serialize } from './view-state.js'
 
@@ -44,5 +44,36 @@ describe('buildFilename', () => {
     const name = buildFilename(SAMPLE)
     // re=-0.743 → `re--0.743`: the value's own minus is untouched.
     expect(name).toContain('re--0.743')
+  })
+})
+
+describe('computeExportDims', () => {
+  // Ordinary desktop windows (logical CSS px) that the old shared 2.5M on-screen
+  // budget clamped (#157): at 2560×1440 both buttons saved the same 0.82× image.
+  it.each([
+    [1512, 982],
+    [1920, 1080],
+    [2560, 1440],
+  ])('saves a %i×%i window at exactly 1× and 2× the logical size', (w, h) => {
+    expect(computeExportDims(w, h, 1)).toEqual({ width: w, height: h, scale: 1 })
+    expect(computeExportDims(w, h, 2)).toEqual({ width: w * 2, height: h * 2, scale: 2 })
+  })
+
+  it('clamps to the export budget, preserving the aspect ratio', () => {
+    // 3440×1440 ultrawide at 2× = 6880×2880 ≈ 19.8M px > budget.
+    const dims = computeExportDims(3440, 1440, 2)
+    expect(dims.width * dims.height).toBeLessThanOrEqual(EXPORT_MAX_PIXELS)
+    expect(dims.width * dims.height).toBeGreaterThan(EXPORT_MAX_PIXELS * 0.999)
+    expect(dims.scale).toBeLessThan(2)
+    expect(dims.width / dims.height).toBeCloseTo(3440 / 1440, 2)
+  })
+
+  it.each([
+    [3440, 1440],
+    [3840, 2160],
+    [7680, 4320],
+  ])('keeps a %i×%i 2× export under the iOS Safari 4096² canvas-area limit', (w, h) => {
+    const dims = computeExportDims(w, h, 2)
+    expect(dims.width * dims.height).toBeLessThanOrEqual(4096 * 4096)
   })
 })

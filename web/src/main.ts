@@ -10,7 +10,7 @@ import { registerSW } from 'virtual:pwa-register'
 import init, { Viewport } from '../wasm/fractal_wasm.js'
 import { Controls, nearestMaxIterStop, pickJuliaSettings } from './controls.js'
 import { mountDrawer } from './drawer.js'
-import { buildFilename, exportRenderedFrame } from './export-png.js'
+import { buildFilename, computeExportDims, exportRenderedFrame } from './export-png.js'
 import { showFatal } from './fatal.js'
 import { defaultModeForField, isModeValidForField } from './field-modes.js'
 import { InputController } from './input.js'
@@ -698,19 +698,17 @@ window.addEventListener('hashchange', () => {
 // state off-screen on a dedicated one-shot worker (see export-png.ts) rather
 // than grabbing the on-screen canvas, so the saved pixels always match the
 // permalink the filename embeds — even mid-render, when the canvas still shows
-// the previous frame. `multiplier` scales the on-screen Resolution knob:
-// `1` reproduces the on-screen frame faithfully; `2` supersamples for a sharper
-// export (twice the on-screen sample density). Both ride the same
-// `computeBufferDims` machinery as every render, so the pixel budget
-// (`MAX_RENDER_PIXELS`) still clamps a huge window's export.
+// the previous frame. `multiplier` scales the logical window size: `1` saves
+// the window size, `2` saves twice it — regardless of the Resolution knob, and
+// against the export's own pixel budget (`EXPORT_MAX_PIXELS`, #157) rather than
+// the on-screen `MAX_RENDER_PIXELS`, which clamps for responsiveness.
 const EXPORT_SUPERSAMPLE = 2
 const buildExportRequest = (multiplier: number): RenderRequest => {
   const viewport = store.get()
-  const { width, height, scale } = computeBufferDims(
+  const { width, height, scale } = computeExportDims(
     viewport.width(),
     viewport.height(),
-    current.renderScale * multiplier,
-    MAX_RENDER_PIXELS,
+    multiplier,
   )
   return {
     kind: 'render',
