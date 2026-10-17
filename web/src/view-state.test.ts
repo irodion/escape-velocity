@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { FIELDS, FRACTAL_MODES, NORMALISATIONS, PALETTES } from './settings.js'
 import type { ViewState } from './view-state.js'
 import { formatCoords, parse, serialize, zoomDepth } from './view-state.js'
 
@@ -51,6 +52,28 @@ describe('serialize / parse', () => {
   })
 })
 
+// Every member of every enum axis survives the URL round-trip. Driven by the
+// settings.ts arrays (#162), so a newly added name is covered automatically and
+// a permalink can never silently fall back to the default for a valid value.
+describe('enum round-trip', () => {
+  it.each(PALETTES)('palette %s', (palette) => {
+    const view = { ...SAMPLE, palette }
+    expect(parse(serialize(view))).toEqual(view)
+  })
+  it.each(NORMALISATIONS)('normalisation %s', (normalisation) => {
+    const view = { ...SAMPLE, normalisation }
+    expect(parse(serialize(view))).toEqual(view)
+  })
+  it.each(FRACTAL_MODES)('mode %s', (mode) => {
+    const view = { ...SAMPLE, mode }
+    expect(parse(serialize(view))).toEqual(view)
+  })
+  it.each(FIELDS)('field %s', (field) => {
+    const view = { ...SAMPLE, field }
+    expect(parse(serialize(view))).toEqual(view)
+  })
+})
+
 describe('parse tolerance', () => {
   it('returns null for an empty hash', () => {
     expect(parse('')).toBeNull()
@@ -88,12 +111,6 @@ describe('parse tolerance', () => {
     expect(parse('#pal=chartreuse&norm=cycled')).toEqual({ normalisation: 'cycled' })
     expect(parse('#kind=hexagon')).toBeNull()
     expect(parse('#field=escape-time')).toEqual({ field: 'escape-time' })
-  })
-
-  it('accepts every documented enum member', () => {
-    expect(parse('#pal=kahol-lavan')?.palette).toBe('kahol-lavan')
-    expect(parse('#norm=logarithmic')?.normalisation).toBe('logarithmic')
-    expect(parse('#kind=julia')?.mode).toBe('julia')
   })
 
   it('parses the orbit toggle as a strict 1/0 boolean, dropping anything else', () => {

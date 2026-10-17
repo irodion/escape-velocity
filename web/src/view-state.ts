@@ -1,4 +1,5 @@
 import type { FieldName, FractalMode, NormalisationName, PaletteName } from './settings.js'
+import { FIELDS, FRACTAL_MODES, NORMALISATIONS, PALETTES } from './settings.js'
 
 /**
  * The shareable view tuple (O1, #91): everything that decides *what frame the
@@ -50,42 +51,6 @@ const KEY = {
   orbit: 'orb',
 } as const
 
-// Allow-lists for the enum-valued fields — `parse` accepts a value only if it
-// is a member, so a stale or hand-edited hash can never push an unknown string
-// into `Controls` (whose constructor throws on an option that has no matching
-// `<option>`). `satisfies` makes a typo here a compile error; a value missing
-// from a list degrades safely (that field falls back to the default) rather
-// than crashing, which is the tolerance O1 requires of external input.
-const PALETTES = [
-  'grayscale',
-  'viridis',
-  'magma',
-  'inferno',
-  'plasma',
-  'turbo',
-  'cubehelix',
-  'twilight',
-  'earth-and-sky',
-  'rainbow',
-  'kahol-lavan',
-  'ocean',
-  'solar',
-  'spectral',
-  'cosmic',
-  'phosphor',
-  'amber',
-] as const satisfies readonly PaletteName[]
-const NORMALISATIONS = [
-  'cycled',
-  'histogram',
-  'linear',
-  'sqrt',
-  'logarithmic',
-  'clamped',
-] as const satisfies readonly NormalisationName[]
-const MODES = ['mandelbrot', 'julia'] as const satisfies readonly FractalMode[]
-const FIELDS = ['escape-time', 'distance-estimate'] as const satisfies readonly FieldName[]
-
 /**
  * Serialise a view into a URL hash string (leading `#` included), ready for
  * `history.replaceState`. Numbers use JS's shortest round-tripping form
@@ -133,6 +98,12 @@ export function parse(hash: string): Partial<ViewState> | null {
     const value = num(key)
     return value !== undefined && value > 0 ? value : undefined
   }
+  // Enum-valued fields accept only a member of the axis's name list (from
+  // settings.ts, where each union is derived from its list, so the list is
+  // complete by construction). A stale or hand-edited hash therefore can never
+  // push an unknown string into `Controls` (whose constructor throws on an
+  // option with no matching `<option>`); the field drops to the default
+  // instead — the tolerance O1 requires of external input.
   const oneOf = <T extends string>(key: string, allowed: readonly T[]): T | undefined => {
     const raw = params.get(key)
     return raw !== null && (allowed as readonly string[]).includes(raw) ? (raw as T) : undefined
@@ -152,7 +123,7 @@ export function parse(hash: string): Partial<ViewState> | null {
   const maxIter = positive(KEY.maxIter)
   const palette = oneOf(KEY.palette, PALETTES)
   const normalisation = oneOf(KEY.normalisation, NORMALISATIONS)
-  const mode = oneOf(KEY.mode, MODES)
+  const mode = oneOf(KEY.mode, FRACTAL_MODES)
   const field = oneOf(KEY.field, FIELDS)
   const cRe = num(KEY.cRe)
   const cIm = num(KEY.cIm)
