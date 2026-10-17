@@ -136,6 +136,35 @@ describe('mountDrawer', () => {
     expect(drawer.classList.contains('open')).toBe(true)
   })
 
+  it('stays open on a drag that returns to its start (a pan, not a click)', () => {
+    const { drawer, toggle, surface } = setup()
+    toggle.click()
+    // The input controller pans once a press leaves the slop, even if it ends
+    // back at its start, so the drawer must not read it as a click either.
+    surface.dispatchEvent(
+      new PointerEvent('pointerdown', { clientX: 100, clientY: 100, button: 0, bubbles: true }),
+    )
+    surface.dispatchEvent(
+      new PointerEvent('pointermove', { clientX: 160, clientY: 120, bubbles: true }),
+    )
+    surface.dispatchEvent(
+      new PointerEvent('pointerup', { clientX: 101, clientY: 100, button: 0, bubbles: true }),
+    )
+    expect(drawer.classList.contains('open')).toBe(true)
+
+    // A press that jitters inside the slop is still a click.
+    surface.dispatchEvent(
+      new PointerEvent('pointerdown', { clientX: 100, clientY: 100, button: 0, bubbles: true }),
+    )
+    surface.dispatchEvent(
+      new PointerEvent('pointermove', { clientX: 103, clientY: 98, bubbles: true }),
+    )
+    surface.dispatchEvent(
+      new PointerEvent('pointerup', { clientX: 102, clientY: 99, button: 0, bubbles: true }),
+    )
+    expect(drawer.classList.contains('open')).toBe(false)
+  })
+
   it('is a no-op when the fractal is clicked while the drawer is already closed', () => {
     const { drawer, surface } = setup()
     // Drawer starts closed; a canvas click must not toggle it open or
