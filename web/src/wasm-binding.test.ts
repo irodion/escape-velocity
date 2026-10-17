@@ -20,8 +20,10 @@ describe('wasm binding (Slice 7B)', () => {
   it('exposes the render surface the worker depends on', () => {
     expect(typeof wasm.compute_band).toBe('function')
     expect(typeof wasm.colorize).toBe('function')
-    expect(typeof wasm.compute_len).toBe('function')
     expect(typeof wasm.colorize_len).toBe('function')
+    expect(typeof wasm.frame_width).toBe('function')
+    expect(typeof wasm.frame_height).toBe('function')
+    expect(typeof wasm.probe_pixel).toBe('function')
     expect(typeof wasm.Viewport).toBe('function')
   })
 })
