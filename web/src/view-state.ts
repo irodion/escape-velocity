@@ -1,5 +1,13 @@
-import type { FieldName, FractalMode, NormalisationName, PaletteName } from './settings.js'
-import { FIELDS, FRACTAL_MODES, NORMALISATIONS, PALETTES } from './settings.js'
+import {
+  FIELDS,
+  type FieldName,
+  FRACTAL_MODES,
+  type FractalMode,
+  NORMALISATIONS,
+  type NormalisationName,
+  PALETTES,
+  type PaletteName,
+} from './settings.js'
 
 /**
  * The shareable view tuple (O1, #91): everything that decides *what frame the

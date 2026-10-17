@@ -1,16 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { defaultModeForField, isModeValidForField } from './field-modes.js'
-import type { FieldName, NormalisationName } from './settings.js'
+import { FIELDS, NORMALISATIONS, type NormalisationName } from './settings.js'
 
-const FIELDS: FieldName[] = ['escape-time', 'distance-estimate']
-const MODES: NormalisationName[] = [
-  'cycled',
-  'histogram',
-  'linear',
-  'sqrt',
-  'logarithmic',
-  'clamped',
-]
 const UNIVERSAL: NormalisationName[] = ['histogram', 'linear', 'sqrt', 'logarithmic']
 
 describe('isModeValidForField', () => {
@@ -34,7 +25,7 @@ describe('isModeValidForField', () => {
 
   it('each Field admits at least one valid mode', () => {
     for (const field of FIELDS) {
-      expect(MODES.some((mode) => isModeValidForField(field, mode))).toBe(true)
+      expect(NORMALISATIONS.some((mode) => isModeValidForField(field, mode))).toBe(true)
     }
   })
 })

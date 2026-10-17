@@ -5,8 +5,8 @@
  * This is a leaf module with no runtime imports — `controls.ts` (the DOM
  * wiring), `field-modes.ts` (the Field × Normalisation policy),
  * `settings-transition.ts` (the change classifier), `wasm-enums.ts` (the
- * name → wasm-enum tables), and `main.ts` all import their vocabulary from
- * here. Keeping the types in a leaf is what breaks the old
+ * name → wasm-enum tables), `view-state.ts` (the permalink codec's
+ * allow-lists), and `main.ts` all import their vocabulary from here. Keeping the types in a leaf is what breaks the old
  * `controls → field-modes → controls` import cycle: `field-modes.ts` now
  * depends on this module instead of reaching back into `controls.ts`.
  */
