@@ -1,8 +1,24 @@
+/**
+ * The render worker's deep module: turns a protocol message into an RGBA
+ * response, with zero DOM / `self` / `postMessage` coupling. Every dependency
+ * is on the imported WASM functions, the `InitOutput` memory handle passed in,
+ * and the protocol types — so the whole module is exercisable in isolation
+ * with mocked WASM.
+ *
+ * It holds no state. The ADR-0002 iteration-buffer cache lives in the WASM
+ * module (#158), which records which frame its buffer holds and refuses to
+ * colour or probe one whose bands haven't all landed — so a render abandoned
+ * partway can never be painted, and there is nothing here to reset. The
+ * banded render path (P2, #78) keeps its side effects out too: yield,
+ * abort-check and progress arrive as injected {@link RenderHooks} rather than
+ * touching `self` / `postMessage`.
+ */
 import {
   colorize,
   colorize_len,
   compute_band,
-  compute_len,
+  frame_height,
+  frame_width,
   type InitOutput,
   probe_pixel,
   Viewport,
@@ -14,56 +30,6 @@ import type {
   RenderRequest,
   RenderResponse,
 } from './protocol.js'
-
-/**
- * The render worker's deep module: owns the ADR-0002 iteration-buffer
- * cache (lifted out of `web/src/render.ts`) and turns a protocol
- * message into an RGBA response, with zero DOM / `self` / `postMessage`
- * coupling. Every dependency is on the imported WASM functions, the
- * `InitOutput` memory handle passed in, and the protocol types — so the
- * whole module is exercisable in isolation with mocked WASM.
- *
- * The cache lives here for the same reason it lived in `render.ts`: the
- * "iteration buffer is still valid" invariant is a property of this
- * layer's interaction with WASM. The instant `compute` runs again the
- * underlying `Vec<f32>` is rewritten and any cached pointer is
- * invalidated, so keeping the cache adjacent to the only call site that
- * re-runs `compute` keeps that lifetime locally inspectable.
- *
- * State is threaded explicitly rather than held at module scope: the
- * worker bootstrap (#30) keeps a single `WorkerState` and feeds each
- * message's result back in, which keeps this module free of mutable
- * top-level state and makes each `handleRender` / `handleRecolorize` call
- * independently testable. The banded render path (P2, #78) keeps the same
- * isolation by taking its side effects — yield, abort-check, progress — as
- * injected {@link RenderHooks} rather than touching `self` / `postMessage`.
- */
-export interface WorkerState {
-  /** Pointer into WASM linear memory for the cached iteration buffer,
-   *  or `null` before the first render. */
-  readonly cachedIterPtr: number | null
-  /** Element count of the cached iteration buffer (one f32 per pixel). */
-  readonly cachedIterLen: number
-  /** `maxIter` the cached buffer was computed with — fed back into
-   *  `colorize` on a recolorize so normalisation matches the buffer. */
-  readonly cachedMaxIter: number
-  /** Canvas dimensions of the cached render. A `RecolorizeRequest`
-   *  carries no dimensions (resolution changes are compute-class and go
-   *  through render), so the recolorize response echoes these cached
-   *  dims back to the client. */
-  readonly cachedWidth: number
-  readonly cachedHeight: number
-}
-
-export function createWorkerState(): WorkerState {
-  return {
-    cachedIterPtr: null,
-    cachedIterLen: 0,
-    cachedMaxIter: 0,
-    cachedWidth: 0,
-    cachedHeight: 0,
-  }
-}
 
 /** How many bands to split a frame into (P2, #78). The worker yields to its
  *  event loop between bands and can abandon the rest when a newer viewport
@@ -105,18 +71,18 @@ export interface RenderHooks {
 
 /**
  * Render a frame in cancellable bands (P2, #78), returning the RGBA
- * response + updated cache state + transfer list, or `{ aborted: true }` if
- * a newer request superseded it mid-flight.
+ * response + transfer list, or `{ aborted: true }` if a newer request
+ * superseded it mid-flight.
  *
  * It reconstructs a fresh `Viewport` from the flat primitives (cheap; no
  * shared state to leak across realms) and computes the iteration buffer one
- * band at a time via {@link compute_band}, which accumulates into the shared
- * WASM buffer. Between bands it reports progress, yields (so a queued
+ * band at a time via {@link compute_band}, which fills the WASM module's
+ * buffer in place. Between bands it reports progress, yields (so a queued
  * `cancel` is seen), and bails the instant `shouldAbort()` turns true — so a
  * doomed deep render stops within a band instead of blocking the worker for
  * seconds. Once every band is in, it `colorize`s the whole buffer **once**
- * (keeping the global-normalisation modes correct — no per-band seams) and
- * caches the `(ptr, len, maxIter, dims)` handle for a later recolorize.
+ * (keeping the global-normalisation modes correct — no per-band seams); the
+ * frame stays cached in WASM for a later recolorize or probe.
  *
  * The RGBA bytes are copied OUT of WASM linear memory into a fresh
  * `Uint8ClampedArray` before transfer: transferring a view that aliases WASM
@@ -127,27 +93,12 @@ export async function handleRender(
   msg: RenderRequest,
   wasm: InitOutput,
   hooks: RenderHooks,
-): Promise<
-  { state: WorkerState; response: RenderResponse; transfer: Transferable[] } | { aborted: true }
-> {
+): Promise<{ response: RenderResponse; transfer: Transferable[] } | { aborted: true }> {
   const viewport = new Viewport(msg.centerRe, msg.centerIm, msg.zoom, msg.width, msg.height)
   const bands = planBands(msg.height)
-  // `compute_band` returns the (stable) buffer pointer on every call; the
-  // first band (y0 === 0) sizes the buffer to the whole frame so it never
-  // moves while later bands fill in. Read the final pointer for colorize.
-  let iterPtr = 0
   for (let i = 0; i < bands.length; i += 1) {
     const [y0, y1] = bands[i]
-    iterPtr = compute_band(
-      viewport,
-      msg.maxIter,
-      msg.fractalKind,
-      msg.cRe,
-      msg.cIm,
-      msg.field,
-      y0,
-      y1,
-    )
+    compute_band(viewport, msg.maxIter, msg.fractalKind, msg.cRe, msg.cIm, msg.field, y0, y1)
     hooks.onProgress(y1, msg.height)
     // Yield + abort-check between bands only — not after the last band, which
     // flows straight into colorize, and not before the first, which can never
@@ -160,15 +111,7 @@ export async function handleRender(
     }
   }
 
-  const iterLen = compute_len()
-  const nextState: WorkerState = {
-    cachedIterPtr: iterPtr,
-    cachedIterLen: iterLen,
-    cachedMaxIter: msg.maxIter,
-    cachedWidth: msg.width,
-    cachedHeight: msg.height,
-  }
-  const rgba = paint(wasm, iterPtr, iterLen, msg.maxIter, msg.palette, msg.mode)
+  const rgba = paint(wasm, msg.palette, msg.mode)
   const response: RenderResponse = {
     kind: 'response',
     epoch: msg.epoch,
@@ -176,83 +119,54 @@ export async function handleRender(
     width: msg.width,
     height: msg.height,
   }
-  return { state: nextState, response, transfer: [rgba.buffer] }
+  return { response, transfer: [rgba.buffer] }
 }
 
 /**
  * Re-colorize the cached iteration buffer with a new palette / mode — the
- * ADR-0002 fast path, no recompute. Reuses the cached `(ptr, len, maxIter)`
- * and echoes the cached dimensions (a recolorize carries none). Throws a
- * clear programmer-error if no render has populated the cache yet, the same
- * guard `render.ts` carried. Synchronous: there is no per-band work to
- * cancel, so the worker runs it straight through.
+ * ADR-0002 fast path, no recompute — echoing the cached frame's dimensions (a
+ * recolorize carries none). Throws the WASM `colorize` error when there is no
+ * complete frame to colour (before the first render, or after one was
+ * abandoned partway); the worker reports it as a recoverable `error`.
+ * Synchronous: there is no per-band work to cancel, so the worker runs it
+ * straight through.
  */
 export function handleRecolorize(
-  state: WorkerState,
   msg: RecolorizeRequest,
   wasm: InitOutput,
 ): { response: RenderResponse; transfer: Transferable[] } {
-  if (state.cachedIterPtr === null) {
-    throw new Error('recolorize: no cached iteration buffer — call render(...) first')
-  }
-  const rgba = paint(
-    wasm,
-    state.cachedIterPtr,
-    state.cachedIterLen,
-    state.cachedMaxIter,
-    msg.palette,
-    msg.mode,
-  )
+  const rgba = paint(wasm, msg.palette, msg.mode)
   const response: RenderResponse = {
     kind: 'response',
     epoch: msg.epoch,
     rgba,
-    width: state.cachedWidth,
-    height: state.cachedHeight,
+    width: frame_width(),
+    height: frame_height(),
   }
   return { response, transfer: [rgba.buffer] }
 }
 
 /**
  * Read one pixel of the cached Field buffer for the pixel inspector (E2,
- * #95). Reuses the ADR-0002 recolorize cache `(ptr, len, maxIter, dims)` —
- * no recompute — and traces the pixel through the probe's `palette` / `mode`
- * via the WASM `probe_pixel`, which reuses the normalisation context the last
- * `colorize` cached so a hover is O(1) for the global / Histogram modes.
+ * #95) — no recompute. The WASM `probe_pixel` traces it through the probe's
+ * `palette` / `mode`, reusing the normalisation context the last `colorize`
+ * cached so a hover is O(1) for the global / Histogram modes, and clamps
+ * `(x, y)` into the frame so an edge or slightly-stale coordinate can never
+ * index out of range.
  *
- * Tolerant by construction, because hover probes fire constantly: with no
- * cached buffer yet (before the first frame, or just after an aborted render
- * dropped the cache) it reports an "inside" sentinel rather than throwing, and
- * it clamps `(x, y)` into the cached dimensions so an edge or slightly-stale
- * coordinate can never index out of range.
+ * Returns `undefined` when there is no complete frame to read (just after a
+ * render was abandoned partway): the worker then sends no reply, and the
+ * inspector keeps its last reading rather than showing one that describes no
+ * frame.
  */
-export function handleProbe(state: WorkerState, msg: ProbeRequest): ProbeResponse {
-  if (state.cachedIterPtr === null) {
-    return {
-      kind: 'probe-response',
-      seq: msg.seq,
-      raw: NaN,
-      t: NaN,
-      inside: true,
-      r: 0,
-      g: 0,
-      b: 0,
-    }
-  }
-  const x = Math.min(Math.max(msg.x | 0, 0), state.cachedWidth - 1)
-  const y = Math.min(Math.max(msg.y | 0, 0), state.cachedHeight - 1)
-  const index = y * state.cachedWidth + x
+export function handleProbe(msg: ProbeRequest): ProbeResponse | undefined {
   // `probe_pixel` returns a wasm-bindgen class wrapping WASM memory; read its
   // fields into a plain response (the class can't survive `postMessage`) and
   // free it so the handle doesn't leak across the constant hover traffic.
-  const result = probe_pixel(
-    state.cachedIterPtr,
-    state.cachedIterLen,
-    index,
-    msg.palette,
-    msg.mode,
-    state.cachedMaxIter,
-  )
+  const result = probe_pixel(msg.x | 0, msg.y | 0, msg.palette, msg.mode)
+  if (result === undefined) {
+    return undefined
+  }
   try {
     return {
       kind: 'probe-response',
@@ -270,18 +184,15 @@ export function handleProbe(state: WorkerState, msg: ProbeRequest): ProbeRespons
 }
 
 /**
- * Colorize `(iterPtr, iterLen)` and return the RGBA bytes copied out of
- * WASM linear memory into a standalone buffer fit for transfer.
+ * Colorize the cached frame and return the RGBA bytes copied out of WASM
+ * linear memory into a standalone buffer fit for transfer.
  */
 function paint(
   wasm: InitOutput,
-  iterPtr: number,
-  iterLen: number,
-  maxIter: number,
   palette: RenderRequest['palette'],
   mode: RenderRequest['mode'],
 ): Uint8ClampedArray<ArrayBuffer> {
-  const rgbaPtr = colorize(iterPtr, iterLen, palette, mode, maxIter)
+  const rgbaPtr = colorize(palette, mode)
   const rgbaLen = colorize_len()
   // `view` aliases WASM linear memory, whose buffer is `ArrayBufferLike`
   // (it becomes `SharedArrayBuffer` once the rayon slice enables shared

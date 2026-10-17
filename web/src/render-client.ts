@@ -347,10 +347,10 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     }
     if (msg.kind === 'error') {
       // A render/recolorize threw inside the worker (a boundary-validation
-      // JsError, or the recolorize-before-render guard). The worker stays
-      // alive and idle, so this is recoverable: free the slot, log, and
-      // dispatch whatever queued — a single dropped frame, not a permanent
-      // freeze. The canvas keeps its last good frame.
+      // JsError, or WASM refusing to colour a missing or partial frame). The
+      // worker stays alive and idle, so this is recoverable: free the slot,
+      // log, and dispatch whatever queued — a single dropped frame, not a
+      // permanent freeze. The canvas keeps its last good frame.
       console.error(`render worker error (epoch ${msg.epoch}): ${msg.message}`)
       flush()
       return
@@ -585,9 +585,9 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
    * change can never strand a pending compute. A recolorize is only
    * dispatched as a standalone request when the worker already holds a
    * computed buffer (the in-flight or last-completed render); reaching
-   * the worker with no cached buffer would throw there (the
-   * programmer-error guard in the handler), which the fold rule makes
-   * unreachable in normal dispatch ordering.
+   * the worker with no complete frame cached would throw there (WASM
+   * `colorize` refuses it), which the fold rule makes unreachable in
+   * normal dispatch ordering.
    */
   function recolorize(
     ctx: CanvasRenderingContext2D,

@@ -13,7 +13,7 @@
  *
  * It deliberately does NOT reuse the live render client: that client has one
  * epoch counter + a single in-flight slot (see `createRenderClient`), and its
- * worker caches the last frame's iteration buffer (`WorkerState`), so
+ * worker's WASM instance caches the last frame's iteration buffer, so
  * dispatching an export render through it would supersede — and visually
  * clobber — the frame the user is looking at, and evict the cache a recolorize
  * depends on. Instead a dedicated

@@ -16,17 +16,12 @@
  * band sequence via `handleRender`, a `recolorize` takes the synchronous
  * fast path via `handleRecolorize`, and a `cancel` just advances the
  * "latest epoch seen" so an in-flight banded render can abandon itself (P2,
- * #78). It threads the cache state across calls and echoes back the transfer
- * list so the RGBA buffer moves zero-copy to the client.
+ * #78). It echoes back the transfer list so the RGBA buffer moves zero-copy
+ * to the client. The frame cache a recolorize or probe reads lives in the WASM
+ * instance itself (#158), so the worker keeps no render state of its own.
  */
 import init, { initThreadPool } from '../../wasm/fractal_wasm.js'
-import {
-  createWorkerState,
-  handleProbe,
-  handleRecolorize,
-  handleRender,
-  type WorkerState,
-} from './handler.js'
+import { handleProbe, handleRecolorize, handleRender } from './handler.js'
 import type {
   Aborted,
   BootError,
@@ -46,8 +41,6 @@ const ctx = self as unknown as DedicatedWorkerGlobalScope
 // The WASM instance, assigned by `boot()` before any message is routed. The
 // message handler is only wired after boot succeeds, so every read sees it set.
 let wasm: Awaited<ReturnType<typeof init>>
-
-let state: WorkerState = createWorkerState()
 
 // The highest epoch this worker has *seen* on any incoming message. A banded
 // render compares its own epoch against this between bands: once a newer
@@ -156,9 +149,21 @@ function handleMessage(
   if (msg.kind === 'probe') {
     // A read-only side query (E2, #95). It carries a `seq`, not an `epoch`, so
     // it neither bumps `latestSeen` nor supersedes a render; it just reads the
-    // current cache and replies. The client only issues one when the cache is
-    // stable (not mid-render, no active Preview), so the buffer it reads is whole.
-    ctx.postMessage(handleProbe(state, msg))
+    // cached frame and replies. The client only issues one when that frame is
+    // what's on screen (not mid-render, no active Preview); WASM refuses a
+    // partial frame regardless, and then there is no reply.
+    //
+    // A probe has no error arm — an `error` carries an epoch and would free the
+    // client's render slot — so a throw here is logged and the reading dropped,
+    // rather than escaping to `onerror`, which the client treats as fatal.
+    try {
+      const response = handleProbe(msg)
+      if (response !== undefined) {
+        ctx.postMessage(response)
+      }
+    } catch (err) {
+      console.error('pixel probe failed:', err)
+    }
     return
   }
 
@@ -177,9 +182,10 @@ function handleMessage(
   if (msg.kind === 'recolorize') {
     // Fast path (ADR-0002): no per-band work to cancel, run it straight
     // through. Per the client's single-in-flight contract a recolorize never
-    // races a render, so the cached buffer it reads is whole.
+    // races a render; one that followed an abandoned render finds a partial
+    // frame, which WASM refuses to colour, and gets a recoverable `error`.
     try {
-      const result = handleRecolorize(state, msg, wasm)
+      const result = handleRecolorize(msg, wasm)
       ctx.postMessage(result.response, result.transfer)
     } catch (err) {
       postError(msg.epoch, err)
@@ -209,31 +215,24 @@ async function runRender(msg: RenderRequest): Promise<void> {
       },
     })
     if ('aborted' in result) {
-      // Superseded mid-flight. The abandoned render already clobbered the
-      // shared iteration buffer with partial bands, so the cached (ptr, len)
-      // no longer describes a complete frame — drop it so a later recolorize
-      // can't re-tint partial data (it will hit the no-cache guard and surface
-      // a recoverable error instead). The superseding render, the usual next
-      // request, rebuilds the buffer regardless.
-      state = createWorkerState()
+      // Superseded mid-flight. The abandoned bands leave a partial frame in
+      // the WASM buffer, which it refuses to colour or probe until a render
+      // completes one — usually the superseding render, the next request.
       // Post `aborted` (not a response) so the client frees its in-flight slot
       // and dispatches the request that overtook us.
       const aborted: Aborted = { kind: 'aborted', epoch: msg.epoch }
       ctx.postMessage(aborted)
       return
     }
-    state = result.state
     ctx.postMessage(result.response, result.transfer)
   } catch (err) {
     // A throw inside the band loop (a `JsError` from the WASM `Viewport` /
     // `compute_band` boundary validation) or after it (colorize / the RGBA
-    // copy). Drop the cache for the same reason as the abort path above: once
-    // the first band ran, the buffer was resized in place and may have moved,
-    // so the previous frame's (ptr, len) would send a recolorize or probe into
-    // stale memory. Then post an `error` arm echoing the epoch instead of
-    // letting the throw post nothing — a silent no-response wedges the
-    // client's single-slot pipeline permanently (see `RenderError`).
-    state = createWorkerState()
+    // copy). There is no cache to drop: a rejected band leaves the WASM buffer
+    // as it was, and a frame left partial is refused like an aborted one. Post
+    // an `error` arm echoing the epoch instead of letting the throw post
+    // nothing — a silent no-response wedges the client's single-slot pipeline
+    // permanently (see `RenderError`).
     postError(msg.epoch, err)
   }
 }
