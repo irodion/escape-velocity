@@ -39,9 +39,9 @@ export type NormalisationName =
 export type FractalMode = 'mandelbrot' | 'julia'
 /**
  * The Field axis (ADR-0013): the per-pixel scalar `compute` emits —
- * `escape-time` (the default) or `distance-estimate` (#61, #62). `main.ts`
- * maps these tag strings to the wasm-bindgen `Field` discriminants at the
- * WASM seam.
+ * `escape-time` (the default) or `distance-estimate` (#61, #62).
+ * `wasm-enums.ts` maps these tag strings to the wasm-bindgen `Field`
+ * discriminants at the WASM seam.
  */
 export type FieldName = 'escape-time' | 'distance-estimate'
 

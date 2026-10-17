@@ -462,8 +462,9 @@ pub fn compute_band(
 /// `Uint8ClampedArray` view.
 ///
 /// `iter_ptr` / `len` must be the pair previously returned by
-/// [`compute_band`] + [`compute_len`]. Slice 4's render-layer cache lets
-/// this be called repeatedly against the same `(iter_ptr, len)` pair
+/// [`compute_band`] + [`compute_len`]. The worker's cached pair (its
+/// `WorkerState`, see the module doc) lets this be called repeatedly
+/// against the same `(iter_ptr, len)` pair
 /// — the fast-path payoff of ADR-0002: a palette or normalisation
 /// change repaints in milliseconds because no iteration runs.
 #[wasm_bindgen]

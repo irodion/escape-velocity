@@ -26,9 +26,9 @@ for the core experience.
 - Escape-time iteration written in Rust, compiled to WASM, run on the **CPU**
   (the GPU is a possible later slice, not a commitment — see
   [ADR-0001](docs/decisions/0001-cpu-side-wasm-compute.md)).
-- A vanilla TypeScript UI, no framework: the canvas, a controls drawer, and
-  presentation-only overlays (orbit visualizer, pixel inspector, zoom-depth
-  meter), plus shareable permalinks and PNG export.
+- A vanilla TypeScript UI, no framework: the canvas, a controls drawer with a
+  coordinate readout and zoom-depth meter, presentation-only overlays (orbit
+  visualizer, pixel inspector), shareable permalinks, and PNG export.
 - Shipped as an installable, offline-capable Progressive Web App.
 
 ## How it is built
