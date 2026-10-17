@@ -1,4 +1,5 @@
 import type { Viewport } from '../wasm/fractal_wasm.js'
+import type { GesturePhaseStore } from './gesture-phase.js'
 import type { ViewportStore } from './viewport-store.js'
 import {
   applyZoomNotch,
@@ -137,12 +138,21 @@ export const PAN_DEADZONE_PX = 0.5
  * compute — accumulated across notches by the `zoom-preview` module.
  * No store write fires during the scrub; the single recompute is deferred
  * to a **Settle** `WHEEL_SETTLE_MS` after the wheel goes quiet. The fresh
- * frame replaces the Preview when it paints — `render-client`'s `paint`
- * clears the transform in the same tick, an atomic swap (so this file
- * never clears it). A new gesture (a pan `pointerdown`) inside the pending
- * Settle window tears the Preview down without rendering: the accumulated
- * zoom rides in the pan's start viewport, so the pan's pointerup issues a
- * single render rather than the zoom and the pan each issuing one.
+ * frame replaces the Preview when it paints — `render-client`'s `paint` calls
+ * {@link InputController.onRenderPainted} in the same tick as `putImageData`,
+ * which clears the transform: an atomic swap. A new gesture (a pan
+ * `pointerdown`) inside the pending Settle window tears the Preview down
+ * without rendering: the accumulated zoom rides in the pan's start viewport,
+ * so the pan's pointerup issues a single render rather than the zoom and the
+ * pan each issuing one.
+ *
+ * ## Gesture phase
+ *
+ * The controller publishes which gesture owns the canvas — `idle`, `dragging`
+ * or `preview` — to the injected {@link GesturePhaseStore} (#159), so other
+ * modules can hold off without reading the canvas's `.dragging` class or
+ * inline `transform`. Both stay this file's business: the class drives the
+ * drag cursor, the transform draws the Preview.
  */
 export class InputController {
   private currentViewport: Viewport
@@ -169,6 +179,10 @@ export class InputController {
   // frame paints continues the same matrix; it re-bases to identity once the
   // paint has cleared the canvas transform (see `handleWheel`).
   private zoomPreview: ZoomPreview | null = null
+  // Whether the Preview is currently applied as the canvas's CSS transform.
+  // Outlives `zoomPreview`'s gesture: a Settle keeps it until the fresh frame
+  // paints (`onRenderPainted`).
+  private previewShown = false
   private settleTimer: ReturnType<typeof setTimeout> | undefined
   // The canvas's *untransformed* layout box, captured at the start of a
   // scrub/pinch. `getBoundingClientRect` reflects the live CSS transform, so
@@ -245,6 +259,38 @@ export class InputController {
       invalidated: false,
     }
     this.canvas.classList.add('dragging')
+    this.publishPhase()
+  }
+
+  // End the one-pointer drag's bookkeeping (not its commit; see `endDrag`).
+  private dropDrag(): void {
+    this.dragState = null
+    this.canvas.classList.remove('dragging')
+    this.publishPhase()
+  }
+
+  // Publish the gesture phase from this controller's own state. The states
+  // don't overlap: a pan starts by tearing down any Preview, a pinch by
+  // dropping the pan, and the wheel is ignored mid-drag. A pinch counts as a
+  // Preview from its second finger, before its first move scales anything.
+  private publishPhase(): void {
+    const previewing = this.previewShown || this.pinch !== null
+    this.phase.set(this.dragState !== null ? 'dragging' : previewing ? 'preview' : 'idle')
+  }
+
+  // Apply `preview` as the canvas's CSS transform.
+  private showPreview(preview: ZoomPreview): void {
+    this.canvas.style.transform = zoomPreviewTransform(preview)
+    this.previewShown = true
+    this.publishPhase()
+  }
+
+  // Remove the Preview transform, if one is applied.
+  private hidePreview(): void {
+    if (!this.previewShown) return
+    this.canvas.style.transform = ''
+    this.previewShown = false
+    this.publishPhase()
   }
 
   // Switch an in-progress (or just-started) pan into a two-finger pinch.
@@ -261,8 +307,7 @@ export class InputController {
         ctx.fillRect(0, 0, this.canvas.width, this.canvas.height)
         ctx.drawImage(this.dragState.snapshot, 0, 0)
       }
-      this.dragState = null
-      this.canvas.classList.remove('dragging')
+      this.dropDrag()
     }
     // Drop any in-flight render so a late frame can't paint mid-pinch and clear
     // the Preview transform out from under the gesture (ADR-0012, as the wheel
@@ -278,6 +323,7 @@ export class InputController {
       pointerB,
       lastDistance: this.distanceBetween(pointerA, pointerB),
     }
+    this.publishPhase()
   }
 
   private readonly handlePointerMove = (event: PointerEvent): void => {
@@ -354,7 +400,7 @@ export class InputController {
 
     this.zoomPreview = applyZoomNotch(this.zoomPreview, pixelX, pixelY, cssX, cssY, factor)
     this.currentViewport = this.zoomPreview.viewport
-    this.canvas.style.transform = zoomPreviewTransform(this.zoomPreview)
+    this.showPreview(this.zoomPreview)
   }
 
   // Shared by `pointerup` and `pointercancel`: a cancel tears the gesture down
@@ -402,8 +448,7 @@ export class InputController {
     if (this.dragState === null) return
     const { startClientX, startClientY } = this.dragState
 
-    this.dragState = null
-    this.canvas.classList.remove('dragging')
+    this.dropDrag()
 
     const rect = this.canvas.getBoundingClientRect()
     // Cleanup above runs unconditionally; only the viewport update is
@@ -504,10 +549,14 @@ export class InputController {
 
   private readonly handleWheel = (event: WheelEvent): void => {
     event.preventDefault()
-    // A Preview transform is already applied (a scrub is visually active)
-    // exactly when the canvas transform is non-empty. This gates only whether
-    // the Preview re-bases below — it no longer gates the in-flight discard.
-    const previewActive = this.canvas.style.transform !== ''
+    // A notch mid-drag (mouse button held) is ignored: a Preview transform
+    // under a live drag would scale its pointer deltas, and the Settle would
+    // later commit the zoomed-but-unpanned viewport over the pan's commit.
+    if (this.dragState !== null) return
+    // Whether a Preview transform is already applied (a scrub is visually
+    // active). This gates only whether the Preview re-bases below — it no
+    // longer gates the in-flight discard.
+    const previewActive = this.previewShown
     // Discard any in-flight render on *every* notch, the first included. A
     // render already in flight when the scrub begins — a pan commit, a resize
     // refit, or a slider change, all slowest exactly at deep zoom / high
@@ -546,7 +595,7 @@ export class InputController {
 
     this.zoomPreview = applyZoomNotch(preview, pixelX, pixelY, cssX, cssY, factor)
     this.currentViewport = this.zoomPreview.viewport
-    this.canvas.style.transform = zoomPreviewTransform(this.zoomPreview)
+    this.showPreview(this.zoomPreview)
 
     if (this.settleTimer !== undefined) {
       clearTimeout(this.settleTimer)
@@ -557,7 +606,7 @@ export class InputController {
   /**
    * Commit the accumulated wheel zoom: `set` the store once (source
    * `'gesture'`) for the final viewport, which triggers the recompute. The
-   * fresh frame's paint clears the Preview transform (`render-client`), so
+   * fresh frame's paint clears the Preview transform (`onRenderPainted`), so
    * `zoomPreview` is intentionally kept here — a notch arriving before that
    * paint continues the same matrix. The store subscription skips this
    * `'gesture'` write, so it does not tear the kept Preview down.
@@ -571,8 +620,8 @@ export class InputController {
   /**
    * Commit the accumulated pinch zoom on release. Like {@link settleZoom} it
    * writes the store once (`'gesture'`) and intentionally keeps `zoomPreview`
-   * and the CSS transform — `render-client`'s paint clears the transform when
-   * the fresh frame lands (an atomic swap), so clearing it here would flash the
+   * and the CSS transform — the fresh frame's paint clears it
+   * (`onRenderPainted`, an atomic swap), so clearing it here would flash the
    * old, unscaled frame for a tick. Only the pinch bookkeeping is dropped; the
    * gesture is over, so a leftover finger starts nothing until it lifts.
    */
@@ -581,6 +630,7 @@ export class InputController {
       this.store.set(this.zoomPreview.viewport, 'gesture')
     }
     this.pinch = null
+    this.publishPhase()
     // Lock out new gestures until every finger lifts: the kept Preview transform
     // would otherwise desync a pinch begun by a finger re-landing before the
     // Settle frame paints (see `pinchLockout`).
@@ -605,14 +655,29 @@ export class InputController {
     this.zoomPreview = null
     this.pinch = null
     this.scrubRect = null
-    if (this.canvas.style.transform !== '') {
-      this.canvas.style.transform = ''
-    }
+    this.hidePreview()
+    this.publishPhase()
+  }
+
+  /**
+   * A fresh *render* is being painted onto the canvas (not a recolorize: that
+   * re-tints the cached frame without moving it). The render client calls this
+   * synchronously right before `putImageData`, so ending the Preview here makes
+   * the Preview→true-frame swap atomic, in one tick (ADR-0012). `zoomPreview`
+   * is kept, as at a Settle; with the transform gone, the next wheel notch
+   * re-bases it to the new frame.
+   */
+  onRenderPainted(): void {
+    this.hidePreview()
   }
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
     private readonly store: ViewportStore,
+    // Where the controller publishes its gesture phase (#159); main.ts shares
+    // it with the modules that must hold off mid-gesture. Required, so a call
+    // site can't silently publish to a store nobody reads.
+    private readonly phase: GesturePhaseStore,
     // Called while a zoom Preview is active to discard any in-flight
     // render so it can't paint stale pixels mid-scrub/pinch (ADR-0012). Injected
     // (rather than importing the render client) to keep this controller

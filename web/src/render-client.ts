@@ -172,6 +172,20 @@ export interface RenderClientDeps {
    * is not wired (tests, headless), in which case probe responses are dropped.
    */
   readonly onProbeResult?: (probe: PixelProbe) => void
+  /**
+   * Whether a gesture currently owns the canvas (`main.ts` reads the
+   * InputController's gesture phase, #159). `probe` refuses while it does:
+   * mid-gesture the image on screen is shifted or scaled away from the cached
+   * frame. Defaults to never.
+   */
+  readonly isGestureActive?: () => boolean
+  /**
+   * Called synchronously right before a *render* response is painted — not a
+   * recolorize. `main.ts` wires the InputController's `onRenderPainted`, which
+   * ends a live zoom Preview, so the Preview→true-frame swap is atomic
+   * (ADR-0012). Defaults to a no-op.
+   */
+  readonly onRenderPainted?: () => void
 }
 
 /**
@@ -201,8 +215,8 @@ export interface RenderClient {
    * Read one render-buffer pixel `(x, y)` of the cached frame for the
    * inspector (E2, #95). The result lands on a later `onProbeResult`. Returns
    * `false` without sending when the cached buffer is not stable — booting, a
-   * compute in flight rewriting it, or a Preview transform live mid-gesture — so
-   * the caller can keep its last reading rather than pairing it with a fresh
+   * compute in flight rewriting it, or a gesture owning the canvas — so the
+   * caller can keep its last reading rather than pairing it with a fresh
    * coordinate.
    */
   readonly probe: (x: number, y: number, palette: Palette, mode: NormalizationMode) => boolean
@@ -215,9 +229,9 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
   let latestEpoch = 0
   let inFlight = false
   // The kind of the request currently on the worker, captured at dispatch.
-  // `paint` reads it to decide whether the response may clear the Preview
-  // transform: only a `render` carries fresh geometry that ends a scrub; a
-  // `recolorize` re-tints the cached buffer without moving it (see `paint`).
+  // `paint` reads it to decide whether the response ends a zoom Preview: only
+  // a `render` carries fresh geometry that ends a scrub; a `recolorize`
+  // re-tints the cached buffer without moving it (see `paint`).
   let inFlightKind: ClientRequest['kind'] | null = null
   let pending: ClientRequest | null = null
   let ready = false
@@ -256,6 +270,10 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
   // enters the render slot.
   const onProbeResult: ((probe: PixelProbe) => void) | null = deps.onProbeResult ?? null
   let latestProbeSeq = 0
+
+  // The input layer's gesture state (#159); see `RenderClientDeps`.
+  const isGestureActive = deps.isGestureActive ?? (() => false)
+  const onRenderPainted = deps.onRenderPainted ?? (() => {})
 
   // Advance the probe generation so any probe response still in flight is
   // dropped on arrival. Called whenever the cached frame is about to change.
@@ -517,20 +535,19 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     if (canvas.height !== response.height) {
       canvas.height = response.height
     }
-    // Clear any wheel-zoom Preview transform before painting (ADR-0012), but
-    // only for a `render`. A render carries fresh geometry — the Settle frame,
-    // a pan/resize commit, boot — so clearing it in the same tick as
-    // `putImageData` makes the Preview→true-frame swap atomic (no snap-back)
-    // without any callback back to the input layer. A `recolorize` is
-    // different: it re-tints the *cached* (pre-scrub) buffer without moving it,
-    // so if a palette change lands mid-scrub (within the settle window) the
-    // Preview scale still applies to the same image — clearing the transform
-    // would snap the frame to identity at the wrong scale until the Settle
-    // render lands. So a recolorize leaves the transform for the render that
-    // ends the scrub. Outside a scrub the transform is already '' and the guard
-    // skips regardless, so this only ever matters while a Preview is live.
-    if (requestKind === 'render' && canvas.style.transform !== '') {
-      canvas.style.transform = ''
+    // End any wheel-zoom Preview before painting (ADR-0012), but only for a
+    // `render`. A render carries fresh geometry — the Settle frame, a
+    // pan/resize commit, boot — so ending the Preview in the same tick as
+    // `putImageData` makes the Preview→true-frame swap atomic (no snap-back).
+    // A `recolorize` is different: it re-tints the *cached* (pre-scrub) buffer
+    // without moving it, so if a palette change lands mid-scrub (within the
+    // settle window) the Preview scale still applies to the same image —
+    // ending it would snap the frame to identity at the wrong scale until the
+    // Settle render lands. So a recolorize leaves the Preview for the render
+    // that ends the scrub. Outside a scrub there is no Preview and the input
+    // layer ignores the call.
+    if (requestKind === 'render') {
+      onRenderPainted()
     }
     const image = new ImageData(response.rgba, response.width, response.height)
     ctx.putImageData(image, 0, 0)
@@ -605,8 +622,8 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
    * `epoch`, and posts immediately) and is gated on the cached buffer being
    * stable: skipped while booting/dead, while a *render* is in flight (its
    * first band has already clobbered the cached frame with partial data), or
-   * while a Preview transform is live (mid-gesture the buffer is stale — the
-   * same paint-guard signal `paint` keys off). In those windows the inspector
+   * while a gesture owns the canvas (a drag shifts the image, a Preview scales
+   * it). In those windows the inspector
    * keeps its last reading rather than showing a value that isn't on screen. An
    * in-flight *recolorize* is fine: it never rewrites the iteration buffer and
    * runs synchronously on the worker, so the probe reads a whole frame.
@@ -618,8 +635,7 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     if (inFlight && inFlightKind === 'render') {
       return false
     }
-    const canvas = targetCtx?.canvas
-    if (canvas == null || canvas.style.transform !== '') {
+    if (targetCtx === null || isGestureActive()) {
       return false
     }
     latestProbeSeq += 1

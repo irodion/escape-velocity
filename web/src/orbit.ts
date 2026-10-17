@@ -56,16 +56,6 @@ export function viewGeometryFromStore(
 }
 
 /**
- * Whether a gesture currently owns the fractal image, so a hover-driven readout
- * (the orbit overlay, the pixel inspector) must hold off: a drag shifts the
- * buffer (`.dragging`) and a wheel Preview CSS-transforms the canvas, either of
- * which makes the cursor→complex/pixel mapping wrong until the store settles.
- */
-export function isGestureInProgress(surface: HTMLElement): boolean {
-  return surface.classList.contains('dragging') || surface.style.transform !== ''
-}
-
-/**
  * The orbit visualizer (E1, #94) — the diagram half of the unified probe panel.
  *
  * With the feature enabled, hovering the fractal draws a compact, animated
@@ -114,6 +104,10 @@ export class OrbitOverlay {
     // is a light-dismiss, not a pin — so we suppress pinning then (and `Escape`
     // closes the drawer rather than un-pinning).
     private readonly isDrawerOpen: () => boolean,
+    // Whether a gesture owns the canvas (the InputController's phase, #159): a
+    // drag shifts the image and a zoom Preview scales it, so the
+    // cursor→complex mapping is wrong until the store settles.
+    private readonly isGestureActive: () => boolean,
   ) {
     this.ctx = overlay.getContext('2d')
     this.mode = initial.mode
@@ -188,7 +182,7 @@ export class OrbitOverlay {
     if (!this.enabled || this.pinned !== null) return
     // Don't track while a gesture owns the image — the cursor→complex mapping
     // would be wrong until the store settles.
-    if (isGestureInProgress(this.surface)) return
+    if (this.isGestureActive()) return
     const rect = this.surface.getBoundingClientRect()
     const view = viewGeometryFromStore(this.store, this.surface, rect)
     if (view === null) return

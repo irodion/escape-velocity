@@ -13,6 +13,7 @@ import { mountDrawer } from './drawer.js'
 import { buildFilename, computeExportDims, exportRenderedFrame } from './export-png.js'
 import { showFatal } from './fatal.js'
 import { defaultModeForField, isModeValidForField } from './field-modes.js'
+import { createGesturePhaseStore } from './gesture-phase.js'
 import { InputController } from './input.js'
 import { PixelInspector } from './inspector.js'
 import { OrbitOverlay, viewGeometryFromStore } from './orbit.js'
@@ -185,10 +186,20 @@ mountDrawer(controlsToggle, controlsForm, canvas)
 //    The client drives `begin`/`report`/`end` as a banded render streams its
 //    heartbeats; the mounted reporter owns the reveal debounce so fast frames
 //    never flash.
+//  - `isGestureActive` / `onRenderPainted` connect it to the InputController's
+//    gesture phase (#159): probes hold off mid-gesture, and a render's paint
+//    ends a live zoom Preview in the same tick (ADR-0012).
 // Forward-declared so the render client's `onProbeResult` can reach it (the
 // inspector needs the client's `probe`, so they're mutually referential — the
 // same forward-decl shape `controls` uses below). Assigned once below.
 let inspector: PixelInspector | undefined
+// The same shape for the input controller: it needs the client's
+// `discardInFlight`, and the client's paint needs its `onRenderPainted`.
+let input: InputController | undefined
+// Which gesture owns the canvas. The InputController (built last) is its only
+// writer; the modules built before it read it through `isGestureActive`.
+const gesture = createGesturePhaseStore()
+const isGestureActive = (): boolean => gesture.get() !== 'idle'
 const { render, recolorize, probe, discardInFlight } = createRenderClient({
   workerFactory: () =>
     new Worker(new URL('./worker/worker.ts', import.meta.url), { type: 'module' }),
@@ -199,6 +210,11 @@ const { render, recolorize, probe, discardInFlight } = createRenderClient({
   // Deliver each traced pixel (E2, #95) to the inspector HUD. Dropped before the
   // inspector is constructed (no probe can be issued before then anyway).
   onProbeResult: (result) => inspector?.showResult(result),
+  isGestureActive,
+  // `input` is always set by the time this runs: the first render is issued
+  // after `await init()` below, and everything from there to the controller's
+  // construction is synchronous, so no response can paint in between.
+  onRenderPainted: () => input?.onRenderPainted(),
 })
 
 // Initialise the WASM module on the main thread so the synchronous
@@ -473,6 +489,7 @@ const orbitOverlay = new OrbitOverlay(
     enabled: current.orbit,
   },
   () => controlsForm.classList.contains('open'),
+  isGestureActive,
 )
 
 // Pixel inspector (E2, #95). Presentation-only like the orbit overlay: it maps
@@ -486,6 +503,7 @@ inspector = new PixelInspector(
   store,
   { mode: current.mode, field: current.field, enabled: current.inspect },
   (px, py) => probe(px, py, paletteEnum(current.palette), modeEnum(current.normalisation)),
+  isGestureActive,
 )
 
 // Whether the controls drawer was open at the *start* of the current press.
@@ -501,12 +519,13 @@ canvas.addEventListener('pointerdown', () => {
   drawerOpenAtPress = controlsForm.classList.contains('open')
 })
 
-// The controller needs no binding: it wires its own canvas listeners and
-// subscribes to the store in its constructor, and main.ts now reaches the
-// viewport through the store rather than through the controller.
-new InputController(
+// The controller wires its own canvas listeners and subscribes to the store in
+// its constructor; main.ts reaches the viewport through the store. The binding
+// exists only so the render client can tell it when a render paints.
+input = new InputController(
   canvas,
   store,
+  gesture,
   // While a wheel Preview is active, drop any in-flight render so a
   // premature Settle's frame can't paint mid-scrub and clear the Preview
   // transform out from under the gesture (ADR-0012).

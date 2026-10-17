@@ -73,6 +73,8 @@ function makeClient(deps?: {
   onFatal?: (message: string) => void
   progress?: ProgressReporter
   onProbeResult?: (probe: PixelProbe) => void
+  isGestureActive?: () => boolean
+  onRenderPainted?: () => void
 }): {
   client: TestRenderClient
   worker: FakeWorker
@@ -227,32 +229,25 @@ describe('render-client', () => {
     expect(image.data).toHaveLength(16)
   })
 
-  it('clears a Preview transform before painting the frame (atomic swap, ADR-0012)', () => {
-    const { client, worker } = makeClient()
+  it('tells the input layer a render is painting, before putImageData (atomic swap, ADR-0012)', () => {
+    const onRenderPainted = vi.fn()
+    const { client, worker } = makeClient({ onRenderPainted })
     const ctx = makeCtx()
-    // A wheel-zoom Preview transform is on the canvas when the fresh frame
-    // arrives (the input layer set it; this layer owns clearing it).
-    ctx.canvas.style.transform = 'translate(40px, 30px) scale(0.8)'
-    expect(ctx.canvas.style.transform).not.toBe('') // sanity: jsdom stored it
-
-    let transformAtPaint: string | null = null
-    ;(ctx.putImageData as ReturnType<typeof vi.fn>).mockImplementation(() => {
-      transformAtPaint = ctx.canvas.style.transform
-    })
     deliver(worker, readyMsg())
     doRender(client, ctx)
     deliver(worker, response(1))
 
     expect(ctx.putImageData).toHaveBeenCalledTimes(1)
-    // The transform was already identity by the time putImageData ran —
-    // the clear and the paint happen in the same tick, so the swap from
-    // Preview to true frame is atomic (no snap-back).
-    expect(transformAtPaint).toBe('')
-    expect(ctx.canvas.style.transform).toBe('')
+    expect(onRenderPainted).toHaveBeenCalledTimes(1)
+    // The input layer ends its Preview before the pixels land, in the same
+    // tick, so the swap from Preview to true frame is atomic (no snap-back).
+    const paintOrder = (ctx.putImageData as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]
+    expect(onRenderPainted.mock.invocationCallOrder[0]).toBeLessThan(paintOrder)
   })
 
-  it('keeps the Preview transform on a recolorize paint (B2: palette change mid-scrub)', () => {
-    const { client, worker } = makeClient()
+  it('does not end the Preview on a recolorize paint (B2: palette change mid-scrub)', () => {
+    const onRenderPainted = vi.fn()
+    const { client, worker } = makeClient({ onRenderPainted })
     const ctx = makeCtx()
     deliver(worker, readyMsg())
 
@@ -260,20 +255,19 @@ describe('render-client', () => {
     // precondition for a standalone recolorize to dispatch at all.
     doRender(client, ctx)
     deliver(worker, response(1))
+    expect(onRenderPainted).toHaveBeenCalledTimes(1)
 
-    // A wheel-zoom Preview transform is on the canvas (the input layer set
-    // it). A palette change within the settle window issues a recolorize,
-    // which re-tints the cached pre-scrub buffer without changing geometry.
-    ctx.canvas.style.transform = 'translate(40px, 30px) scale(0.8)'
+    // A palette change within the settle window issues a recolorize, which
+    // re-tints the cached pre-scrub buffer without changing geometry.
     client.recolorize(ctx, PALETTE_MAGMA, MODE_HISTOGRAM)
     deliver(worker, response(2))
 
-    // The recolorize painted (new colours) but must NOT clear the transform:
-    // the Preview scale still applies to the same image, so clearing it would
-    // snap the frame to identity at the wrong scale until the Settle render
-    // lands. Only a render ends the scrub.
+    // The recolorize painted (new colours) but must NOT end the Preview: its
+    // scale still applies to the same image, so ending it would snap the frame
+    // to identity at the wrong scale until the Settle render lands. Only a
+    // render ends the scrub.
     expect(ctx.putImageData).toHaveBeenCalledTimes(2)
-    expect(ctx.canvas.style.transform).toBe('translate(40px, 30px) scale(0.8)')
+    expect(onRenderPainted).toHaveBeenCalledTimes(1)
   })
 
   it('drops a stale response (epoch behind the latest issued)', () => {
@@ -785,12 +779,12 @@ describe('render-client probe (E2, #95)', () => {
     expect(postedProbes(worker)).toHaveLength(1)
   })
 
-  it('does not probe while a Preview transform is live (mid-gesture the buffer is stale)', () => {
-    const { client, worker, ctx } = readyWithStableFrame()
-    ctx.canvas.style.transform = 'scale(1.5)'
+  it('does not probe while a gesture owns the canvas (the image is shifted or scaled)', () => {
+    let gestureActive = true
+    const { client, worker } = readyWithStableFrame({ isGestureActive: () => gestureActive })
     expect(client.probe(1, 1, PALETTE_VIRIDIS, MODE_CYCLED)).toBe(false)
     expect(postedProbes(worker)).toHaveLength(0)
-    ctx.canvas.style.transform = ''
+    gestureActive = false
     expect(client.probe(1, 1, PALETTE_VIRIDIS, MODE_CYCLED)).toBe(true)
     expect(postedProbes(worker)).toHaveLength(1)
   })

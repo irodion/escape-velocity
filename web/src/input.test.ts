@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Viewport } from '../wasm/fractal_wasm.js'
+import { createGesturePhaseStore, type GesturePhaseStore } from './gesture-phase.js'
 import { InputController, WHEEL_SETTLE_MS } from './input.js'
 import { createViewportStore, type ViewportStore } from './viewport-store.js'
 
@@ -110,13 +111,14 @@ function mount(
   vp: ReturnType<typeof makeViewportDouble>,
   onChange: (viewport: Viewport) => void,
   onInvalidate?: () => void,
-): { controller: InputController; store: ViewportStore } {
+): { controller: InputController; store: ViewportStore; phase: GesturePhaseStore } {
   const store = createViewportStore(vp as unknown as Viewport)
   store.subscribe((next, source) => {
     if (source === 'gesture') onChange(next)
   })
-  const controller = new InputController(canvas, store, onInvalidate)
-  return { controller, store }
+  const phase = createGesturePhaseStore()
+  const controller = new InputController(canvas, store, phase, onInvalidate)
+  return { controller, store, phase }
 }
 
 describe('InputController', () => {
@@ -292,15 +294,82 @@ describe('InputController', () => {
     expect(viewport.pan_by_pixels).toHaveBeenCalledTimes(1)
   })
 
-  it('toggles the dragging class on pointerdown / pointerup', () => {
+  it('toggles the dragging class and phase on pointerdown / pointerup', () => {
     viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
-    mount(canvas, viewport, onChange)
+    const { phase } = mount(canvas, viewport, onChange)
 
     expect(canvas.classList.contains('dragging')).toBe(false)
+    expect(phase.get()).toBe('idle')
     canvas.dispatchEvent(pe('pointerdown', { clientX: 0, clientY: 0 }))
     expect(canvas.classList.contains('dragging')).toBe(true)
+    expect(phase.get()).toBe('dragging')
     canvas.dispatchEvent(pe('pointerup', { clientX: 0, clientY: 0 }))
     expect(canvas.classList.contains('dragging')).toBe(false)
+    expect(phase.get()).toBe('idle')
+  })
+
+  it('publishes the preview phase from the first notch until a render paints', () => {
+    viewport.zoom_around.mockReturnValue(makeZoomResult(1.25))
+    const { controller, phase } = mount(canvas, viewport, onChange)
+
+    canvas.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: -100,
+        clientX: 200,
+        clientY: 150,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    expect(phase.get()).toBe('preview')
+    // The Settle commits but keeps the Preview on screen until the fresh frame
+    // paints (ADR-0012), so the phase holds too.
+    vi.advanceTimersByTime(WHEEL_SETTLE_MS)
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(phase.get()).toBe('preview')
+    expect(canvas.style.transform).not.toBe('')
+
+    controller.onRenderPainted()
+    expect(phase.get()).toBe('idle')
+    expect(canvas.style.transform).toBe('')
+  })
+
+  it('publishes dragging for the first finger, then preview once a second makes it a pinch', () => {
+    viewport.zoom_around.mockReturnValue(makeZoomResult(2))
+    const { phase } = mount(canvas, viewport, onChange)
+
+    canvas.dispatchEvent(pe('pointerdown', { pointerId: 1, clientX: 100, clientY: 100 }))
+    expect(phase.get()).toBe('dragging')
+    canvas.dispatchEvent(pe('pointerdown', { pointerId: 2, clientX: 200, clientY: 100 }))
+    // The pan handed over to the pinch, which owns the canvas before it scales.
+    expect(phase.get()).toBe('preview')
+    canvas.dispatchEvent(pe('pointermove', { pointerId: 2, clientX: 300, clientY: 100 }))
+    expect(phase.get()).toBe('preview')
+  })
+
+  it('ignores a wheel notch mid-drag (it would scale the drag and later undo the pan)', () => {
+    viewport.zoom_around.mockReturnValue(makeZoomResult(1.25))
+    viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
+    const { phase } = mount(canvas, viewport, onChange)
+
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 100 }))
+    const wheel = new WheelEvent('wheel', {
+      deltaY: -100,
+      clientX: 200,
+      clientY: 150,
+      bubbles: true,
+      cancelable: true,
+    })
+    canvas.dispatchEvent(wheel)
+    expect(wheel.defaultPrevented).toBe(true) // still no page scroll
+    expect(viewport.zoom_around).not.toHaveBeenCalled()
+    expect(canvas.style.transform).toBe('')
+    expect(phase.get()).toBe('dragging')
+
+    canvas.dispatchEvent(pe('pointermove', { clientX: 160, clientY: 100 }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 160, clientY: 100 }))
+    vi.advanceTimersByTime(WHEEL_SETTLE_MS)
+    expect(onChange).toHaveBeenCalledTimes(1) // the pan's commit, and no Settle after it
   })
 
   it('a plain tap neither discards in-flight work nor commits a pan (B3, #74)', () => {
@@ -328,7 +397,7 @@ describe('InputController', () => {
     // position — staying presentation-free about what either means.
     const onClick = vi.fn()
     const store = createViewportStore(viewport as unknown as Viewport)
-    new InputController(canvas, store, undefined, onClick)
+    new InputController(canvas, store, createGesturePhaseStore(), undefined, onClick)
 
     // A plain in-deadzone tap: altKey false, CSS position relative to the box.
     canvas.dispatchEvent(pe('pointerdown', { clientX: 120, clientY: 80 }))
@@ -623,12 +692,12 @@ describe('InputController', () => {
     expect(afterFirst.zoom_around).toHaveBeenCalledWith(199.5, 149.5, 1.25)
   })
 
-  it('re-bases the Preview to the committed viewport once a paint clears the transform', () => {
+  it('re-bases the Preview to the committed viewport once a render paints', () => {
     const committed = makeZoomResult(0.8)
     const next = makeZoomResult(0.64)
     viewport.zoom_around.mockReturnValue(committed)
     committed.zoom_around.mockReturnValue(next)
-    mount(canvas, viewport, onChange)
+    const { controller } = mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(
       new WheelEvent('wheel', {
@@ -640,9 +709,9 @@ describe('InputController', () => {
       }),
     )
     vi.advanceTimersByTime(WHEEL_SETTLE_MS) // Settle commits `committed`
-    // Simulate render-client's paint clearing the Preview transform: the
-    // buffer now matches `committed`.
-    canvas.style.transform = ''
+    // The render client paints the Settle frame: the buffer now matches
+    // `committed`.
+    controller.onRenderPainted()
 
     canvas.dispatchEvent(
       new WheelEvent('wheel', {
@@ -743,7 +812,7 @@ describe('InputController', () => {
     const z1 = makeZoomResult(1.25)
     viewport.zoom_around.mockReturnValue(z1)
     viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
-    mount(canvas, viewport, onChange)
+    const { phase } = mount(canvas, viewport, onChange)
 
     // Active zoom Preview (transform applied), Settle still pending.
     canvas.dispatchEvent(
@@ -761,6 +830,7 @@ describe('InputController', () => {
     // or the pan delta on pointerup would be scaled by the live transform.
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
     expect(canvas.style.transform).toBe('')
+    expect(phase.get()).toBe('dragging')
   })
 
   it('wheel respects canvas-CSS-vs-internal scaling', () => {
@@ -905,7 +975,7 @@ describe('InputController', () => {
   it('a non-gesture store write clears an active Preview transform so the next scrub measures an untransformed box', () => {
     const z1 = makeZoomResult(0.8)
     viewport.zoom_around.mockReturnValue(z1)
-    const { store } = mount(canvas, viewport, onChange)
+    const { store, phase } = mount(canvas, viewport, onChange)
 
     // Active zoom Preview transform on the canvas.
     canvas.dispatchEvent(
@@ -925,6 +995,7 @@ describe('InputController', () => {
     const next = makeViewportDouble()
     store.set(next as unknown as Viewport, 'refit')
     expect(canvas.style.transform).toBe('')
+    expect(phase.get()).toBe('idle')
   })
 
   it('wheel calls preventDefault', () => {

@@ -129,3 +129,20 @@ additive.
 - [CONTEXT.md](../../CONTEXT.md) — the *Preview* and *Settle* glossary terms
   introduced for this decision.
 - Issue #55 — the PRD this ADR backs.
+
+## Update — 2026-10-17 (#159)
+
+The paint contract (Decision 4) now goes through the input layer instead of
+around it. The render client no longer touches `canvas.style.transform`: for
+a *render* response, `paint()` calls `onRenderPainted()` synchronously right
+before `putImageData`, and the `InputController` clears its own transform in
+that callback, so the swap stays atomic in one tick. A recolorize does not
+end the Preview (B2): it re-tints the cached frame without moving it, so the
+Preview scale still applies. The "unconditionally" in Decision 4 had already
+narrowed to renders for that reason.
+
+The controller also publishes an explicit gesture phase (`idle`, `dragging`,
+`preview`) that the render client's probe gate, the orbit overlay and the
+pixel inspector read, instead of each sniffing the canvas's inline transform
+or `.dragging` class. That retires the Negative consequence above: no module
+writes or reads state on the canvas that another module owns.

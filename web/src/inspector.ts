@@ -1,4 +1,4 @@
-import { isGestureInProgress, viewGeometryFromStore } from './orbit.js'
+import { viewGeometryFromStore } from './orbit.js'
 import { cssToBufferPixel, cssToComplex } from './orbit-math.js'
 import type { PixelProbe } from './render-client.js'
 import type { FieldName, FractalMode } from './settings.js'
@@ -57,6 +57,8 @@ export class PixelInspector {
     // main.ts wires this to `renderClient.probe` with the live palette/mode
     // enums; the result comes back via `showResult` (the client's `onProbeResult`).
     private readonly probe: (px: number, py: number) => boolean,
+    // Whether a gesture owns the canvas (the InputController's phase, #159).
+    private readonly isGestureActive: () => boolean,
   ) {
     this.mode = initial.mode
     this.field = initial.field
@@ -124,7 +126,7 @@ export class PixelInspector {
     // Don't track while a gesture owns the image — the cursor→pixel mapping would
     // be wrong until the store settles (the render client refuses the probe in
     // these windows too).
-    if (isGestureInProgress(this.surface)) return
+    if (this.isGestureActive()) return
     this.pendingCursor = { clientX: event.clientX, clientY: event.clientY }
     if (this.rafHandle === null) {
       this.rafHandle = requestAnimationFrame(this.tick)
