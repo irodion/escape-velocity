@@ -105,9 +105,9 @@ async function boot(): Promise<void> {
   try {
     wasm = await init()
   } catch (err) {
-    // The binary failed to instantiate — most often an unsupported required
-    // WASM feature on this browser (e.g. a SIMD-built binary on a browser below
-    // the SIMD floor), or a LinkError from a stripped isolation header.
+    // The binary failed to instantiate — most often a required WASM feature
+    // this browser lacks (the build needs threads: atomics + shared memory), or
+    // a LinkError from a stripped isolation header.
     postBootError('init', err)
     return
   }
@@ -226,9 +226,14 @@ async function runRender(msg: RenderRequest): Promise<void> {
     ctx.postMessage(result.response, result.transfer)
   } catch (err) {
     // A throw inside the band loop (a `JsError` from the WASM `Viewport` /
-    // `compute_band` boundary validation). Post an `error` arm echoing the
-    // epoch instead of letting the throw post nothing — a silent no-response
-    // wedges the client's single-slot pipeline permanently (see `RenderError`).
+    // `compute_band` boundary validation) or after it (colorize / the RGBA
+    // copy). Drop the cache for the same reason as the abort path above: once
+    // the first band ran, the buffer was resized in place and may have moved,
+    // so the previous frame's (ptr, len) would send a recolorize or probe into
+    // stale memory. Then post an `error` arm echoing the epoch instead of
+    // letting the throw post nothing — a silent no-response wedges the
+    // client's single-slot pipeline permanently (see `RenderError`).
+    state = createWorkerState()
     postError(msg.epoch, err)
   }
 }

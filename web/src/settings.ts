@@ -1,50 +1,65 @@
 /**
- * The frontend's domain vocabulary: the form's value unions, the
+ * The frontend's domain vocabulary: each enum axis's names, the
  * `Settings` snapshot they compose into, and the iteration-stop table.
  *
  * This is a leaf module with no runtime imports — `controls.ts` (the DOM
  * wiring), `field-modes.ts` (the Field × Normalisation policy),
  * `settings-transition.ts` (the change classifier), `wasm-enums.ts` (the
- * name → wasm-enum tables), and `main.ts` all import their vocabulary from
- * here. Keeping the types in a leaf is what breaks the old
+ * name → wasm-enum tables), `view-state.ts` (the permalink codec's
+ * allow-lists), and `main.ts` all import their vocabulary from here. Keeping the types in a leaf is what breaks the old
  * `controls → field-modes → controls` import cycle: `field-modes.ts` now
  * depends on this module instead of reaching back into `controls.ts`.
  */
 
-export type PaletteName =
-  | 'grayscale'
-  | 'viridis'
-  | 'magma'
-  | 'inferno'
-  | 'plasma'
-  | 'turbo'
-  | 'cubehelix'
-  | 'twilight'
-  | 'earth-and-sky'
-  | 'rainbow'
-  | 'kahol-lavan'
-  | 'ocean'
-  | 'solar'
-  | 'spectral'
-  | 'cosmic'
-  | 'phosphor'
-  | 'amber'
-export type NormalisationName =
-  | 'cycled'
-  | 'histogram'
-  | 'linear'
-  | 'sqrt'
-  | 'logarithmic'
-  | 'clamped'
-export type FractalMode = 'mandelbrot' | 'julia'
+// Each axis's names are written exactly once (#162): the `as const` array is
+// the runtime list (permalink allow-lists, the markup-parity test in
+// settings.test.ts) and the union type is derived from it, so a name can't be
+// valid in the type yet missing from the list. Order matches the `<option>`
+// order in index.html, which that test enforces. The wasm-enum and accent
+// tables in wasm-enums.ts are `Record`s over these unions, so they stay
+// exhaustive by construction.
+export const PALETTES = [
+  'grayscale',
+  'viridis',
+  'magma',
+  'inferno',
+  'plasma',
+  'turbo',
+  'cubehelix',
+  'twilight',
+  'earth-and-sky',
+  'rainbow',
+  'kahol-lavan',
+  'ocean',
+  'solar',
+  'spectral',
+  'cosmic',
+  'phosphor',
+  'amber',
+] as const
+export type PaletteName = (typeof PALETTES)[number]
+
+export const NORMALISATIONS = [
+  'cycled',
+  'histogram',
+  'linear',
+  'sqrt',
+  'logarithmic',
+  'clamped',
+] as const
+export type NormalisationName = (typeof NORMALISATIONS)[number]
+
+export const FRACTAL_MODES = ['mandelbrot', 'julia'] as const
+export type FractalMode = (typeof FRACTAL_MODES)[number]
+
 /**
- * The Field axis (ADR-0013): the per-pixel scalar `compute` emits. Only
- * `escape-time` is selectable in this slice; `distance-estimate` is
- * reserved in the union and ships as a disabled `<option>` until its
- * kernel lands (#61). `main.ts` maps these tag strings to the
- * wasm-bindgen `Field` discriminants at the WASM seam.
+ * The Field axis (ADR-0013): the per-pixel scalar `compute` emits —
+ * `escape-time` (the default) or `distance-estimate` (#61, #62).
+ * `wasm-enums.ts` maps these tag strings to the wasm-bindgen `Field`
+ * discriminants at the WASM seam.
  */
-export type FieldName = 'escape-time' | 'distance-estimate'
+export const FIELDS = ['escape-time', 'distance-estimate'] as const
+export type FieldName = (typeof FIELDS)[number]
 
 /**
  * Iteration-count stops for the log slider, low → high.

@@ -19,9 +19,10 @@
 //! changing palette or normalisation alone reuses the same iteration
 //! buffer instead of triggering a recompute. The caller is responsible
 //! for not interleaving a fresh frame's bands between a cached
-//! `(iter_ptr, len)` and its next `colorize`; the JS render layer
-//! enforces this with a module-level cache that is invalidated only
-//! after a full `render` cycle.
+//! `(iter_ptr, len)` and its next `colorize`; the worker enforces this
+//! by threading the cached pair through its `WorkerState`
+//! (`web/src/worker/handler.ts`), replaced only when a full render
+//! completes and dropped when a render is aborted mid-frame.
 
 use std::cell::RefCell;
 
@@ -144,9 +145,9 @@ pub enum FractalKind {
 /// explicit and **appended** so the JS↔WASM wire format stays stable as
 /// new Fields arrive, exactly like the palette/mode enums above.
 ///
-/// Only [`Field::EscapeTime`] is wired through the core in this slice;
-/// [`Field::DistanceEstimate`] is reserved here (the UI never selects it)
-/// and gains its kernel in Slice 2 (#61).
+/// Both Fields are wired through the core and selectable in the UI:
+/// [`Field::EscapeTime`] (the default) and [`Field::DistanceEstimate`]
+/// (Mandelbrot #61, Julia #62).
 #[wasm_bindgen]
 #[derive(Clone, Copy, Debug)]
 pub enum Field {
@@ -387,7 +388,7 @@ pub fn compute_len() -> usize {
 ///
 /// ## Buffer protocol
 ///
-/// The **first** band of a frame (`y0 == 0`) clears [`ITER_BUFFER`] and
+/// The **first** band of a frame (`y0 == 0`) clears `ITER_BUFFER` and
 /// resizes it to the whole frame (`width * height`) up front. That single
 /// allocation never moves while the remaining bands fill, so the returned
 /// pointer stays valid across the entire band sequence *and* the trailing
@@ -461,8 +462,9 @@ pub fn compute_band(
 /// `Uint8ClampedArray` view.
 ///
 /// `iter_ptr` / `len` must be the pair previously returned by
-/// [`compute_band`] + [`compute_len`]. Slice 4's render-layer cache lets
-/// this be called repeatedly against the same `(iter_ptr, len)` pair
+/// [`compute_band`] + [`compute_len`]. The worker's cached pair (its
+/// `WorkerState`, see the module doc) lets this be called repeatedly
+/// against the same `(iter_ptr, len)` pair
 /// — the fast-path payoff of ADR-0002: a palette or normalisation
 /// change repaints in milliseconds because no iteration runs.
 #[wasm_bindgen]
