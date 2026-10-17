@@ -111,13 +111,14 @@ function mount(
   vp: ReturnType<typeof makeViewportDouble>,
   onChange: (viewport: Viewport) => void,
   onInvalidate?: () => void,
+  onClick?: ConstructorParameters<typeof InputController>[4],
 ): { controller: InputController; store: ViewportStore; phase: GesturePhaseStore } {
   const store = createViewportStore(vp as unknown as Viewport)
   store.subscribe((next, source) => {
     if (source === 'gesture') onChange(next)
   })
   const phase = createGesturePhaseStore()
-  const controller = new InputController(canvas, store, phase, onInvalidate)
+  const controller = new InputController(canvas, store, phase, onInvalidate, onClick)
   return { controller, store, phase }
 }
 
@@ -388,6 +389,96 @@ describe('InputController', () => {
     expect(onChange).not.toHaveBeenCalled()
     expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
     expect(canvas.classList.contains('dragging')).toBe(false)
+  })
+
+  it('jitter inside the deadzone neither discards in-flight work nor draws (B3, #74)', () => {
+    // Displayed at 5× the logical grid, so 2 CSS px is 0.4 logical px: inside
+    // the deadzone. A trackpad or pen click jitters like this.
+    setRect(canvas, { width: 4000, height: 3000 })
+    const onInvalidate = vi.fn()
+    mount(canvas, viewport, onChange, onInvalidate)
+
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
+    canvas.dispatchEvent(pe('pointermove', { clientX: 102, clientY: 49 }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 102, clientY: 49 }))
+
+    expect(onInvalidate).not.toHaveBeenCalled()
+    expect(ctxStub.drawImage).not.toHaveBeenCalled()
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('a drag released back inside the deadzone re-renders what it discarded (#180)', () => {
+    // The first move out of the deadzone discards the in-flight render. A
+    // release back at the start is a click, which commits no pan — so the
+    // controller must re-request the current viewport, or the canvas keeps
+    // showing the frame from before the press.
+    const onInvalidate = vi.fn()
+    const onClick = vi.fn()
+    mount(canvas, viewport, onChange, onInvalidate, onClick)
+
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
+    canvas.dispatchEvent(pe('pointermove', { clientX: 130, clientY: 70 }))
+    expect(onInvalidate).toHaveBeenCalledTimes(1)
+    canvas.dispatchEvent(pe('pointerup', { clientX: 100, clientY: 50 }))
+
+    expect(onClick).toHaveBeenCalledWith(100, 50, { altKey: false })
+    expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith(viewport)
+    // The drag preview is undone: the snapshot is back at the origin.
+    expect(ctxStub.drawImage).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), 0, 0)
+  })
+
+  it('skips the re-render when the click consumer wrote the store itself', () => {
+    // An Alt-click's Julia c-pick resets the view through the store, which
+    // re-renders; re-committing on top would restart that render for nothing.
+    const julia = makeViewportDouble()
+    let store: ViewportStore | undefined
+    const onClick = vi.fn(() => store?.set(julia as unknown as Viewport, 'mode-reset'))
+    ;({ store } = mount(canvas, viewport, onChange, undefined, onClick))
+
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
+    canvas.dispatchEvent(pe('pointermove', { clientX: 130, clientY: 70 }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 100, clientY: 50, altKey: true }))
+
+    expect(onClick).toHaveBeenCalledTimes(1)
+    expect(onChange).not.toHaveBeenCalled()
+    expect(store.get()).toBe(julia)
+  })
+
+  it('a tap inside the wheel Settle window commits the zoom it tore down', () => {
+    // The press clears the unsettled Preview, so the canvas shows the pre-zoom
+    // frame while `currentViewport` holds the zoom. A tap commits nothing of
+    // its own, so without a commit the next gesture would start from a zoom
+    // the screen and the store never showed.
+    const zoomed = makeZoomResult(0.8)
+    viewport.zoom_around.mockReturnValue(zoomed)
+    let viewAtClick: Viewport | undefined
+    let store: ViewportStore | undefined
+    const onClick = vi.fn(() => {
+      viewAtClick = store?.get()
+    })
+    ;({ store } = mount(canvas, viewport, onChange, undefined, onClick))
+
+    canvas.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: -100,
+        clientX: 200,
+        clientY: 150,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 120, clientY: 80 }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 120, clientY: 80 }))
+
+    // The click maps through the frame that was on screen, then the zoom lands.
+    expect(viewAtClick).toBe(viewport)
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith(zoomed)
+    // The Settle timer was cancelled by the press, so it adds no second render.
+    vi.advanceTimersByTime(WHEEL_SETTLE_MS)
+    expect(onChange).toHaveBeenCalledTimes(1)
   })
 
   it('threads the tap position and modifier-key state to the click consumer (O2, #92)', () => {

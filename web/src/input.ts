@@ -19,7 +19,8 @@ export const WHEEL_SETTLE_MS = 150
 // is skipped so a plain click — e.g. the drawer's light-dismiss click — never
 // restarts an in-flight deep render with an identical, no-op viewport (B3,
 // #74). A sub-pixel pan is visually a no-op anyway (the image can't shift by
-// less than a pixel), so suppressing it costs nothing.
+// less than a pixel), so suppressing it costs nothing. Moves inside it don't
+// start a drag either, so trackpad or pen jitter under a click discards nothing.
 export const PAN_DEADZONE_PX = 0.5
 
 /**
@@ -250,8 +251,8 @@ export class InputController {
     // Do NOT discard in-flight work here. A plain tap (pointerdown + pointerup
     // with no move — e.g. the drawer's light-dismiss click) must leave an
     // in-flight deep render untouched. The discard is deferred to the first
-    // real `pointermove`, when an actual drag begins (B3, #74); `invalidated`
-    // tracks whether it has fired yet for this drag.
+    // `pointermove` that leaves the pan deadzone, when an actual drag begins
+    // (B3, #74); `invalidated` tracks whether it has fired yet for this drag.
     this.dragState = {
       startClientX: event.clientX,
       startClientY: event.clientY,
@@ -293,6 +294,15 @@ export class InputController {
     this.publishPhase()
   }
 
+  // Repaint the un-panned drag snapshot at the origin, undoing the drag preview.
+  private restoreSnapshot(snapshot: HTMLCanvasElement): void {
+    const ctx = this.canvas.getContext('2d')
+    if (ctx === null) return
+    ctx.fillStyle = 'black'
+    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height)
+    ctx.drawImage(snapshot, 0, 0)
+  }
+
   // Switch an in-progress (or just-started) pan into a two-finger pinch.
   private beginPinch(): void {
     // A pinch supersedes any in-progress pan. The pan never committed, so
@@ -301,12 +311,7 @@ export class InputController {
     // drag. (If no pointermove painted yet the buffer already matches, so the
     // blit is a harmless no-op.)
     if (this.dragState !== null) {
-      const ctx = this.canvas.getContext('2d')
-      if (ctx !== null) {
-        ctx.fillStyle = 'black'
-        ctx.fillRect(0, 0, this.canvas.width, this.canvas.height)
-        ctx.drawImage(this.dragState.snapshot, 0, 0)
-      }
+      this.restoreSnapshot(this.dragState.snapshot)
       this.dropDrag()
     }
     // Drop any in-flight render so a late frame can't paint mid-pinch and clear
@@ -352,16 +357,19 @@ export class InputController {
     const rect = this.canvas.getBoundingClientRect()
     if (rect.width <= 0 || rect.height <= 0) return
 
-    // First real movement of this drag: now discard any in-flight render so it
-    // can't paint over the drag preview (ADR-0012 boundary rule). Deferred from
-    // pointerdown so a plain tap never throws away in-flight work (B3, #74).
+    const dxCss = event.clientX - this.dragState.startClientX
+    const dyCss = event.clientY - this.dragState.startClientY
+
+    // The first move out of the pan deadzone begins the drag: now discard any
+    // in-flight render so it can't paint over the drag preview (ADR-0012
+    // boundary rule). Until then the press may still be a click, so it neither
+    // discards (B3, #74) nor draws (a sub-pixel shift is invisible).
     if (!this.dragState.invalidated) {
+      if (this.withinDeadzone(dxCss, dyCss, rect)) return
       this.onInvalidate()
       this.dragState.invalidated = true
     }
 
-    const dxCss = event.clientX - this.dragState.startClientX
-    const dyCss = event.clientY - this.dragState.startClientY
     const dxInternal = (dxCss * this.canvas.width) / rect.width
     const dyInternal = (dyCss * this.canvas.height) / rect.height
 
@@ -446,7 +454,7 @@ export class InputController {
   // Commit (or discard, as a click) a one-pointer pan on release.
   private endDrag(event: PointerEvent): void {
     if (this.dragState === null) return
-    const { startClientX, startClientY } = this.dragState
+    const { startClientX, startClientY, snapshot, invalidated } = this.dragState
 
     this.dropDrag()
 
@@ -459,6 +467,40 @@ export class InputController {
     if (rect.width <= 0 || rect.height <= 0) return
     const dxCss = event.clientX - startClientX
     const dyCss = event.clientY - startClientY
+
+    // A click/tap (or sub-pixel drag) is not a pan: the viewport is unchanged,
+    // and for a plain tap a store write would only restart an identical render
+    // — the exact waste B3 (#74) describes.
+    if (this.withinDeadzone(dxCss, dyCss, rect)) {
+      // Hand the CSS-pixel position to the click consumer (the orbit
+      // visualizer, E1 #94; the Julia c-picker, O2 #92). Reuses this canonical
+      // click-vs-pan classification rather than a separate `click` listener
+      // re-deriving its own threshold. The modifier flags ride along so the
+      // consumer can route a plain click vs. a modifier-click (Alt-click picks
+      // the Julia constant) without this layer knowing either intent — it
+      // stays presentation-free.
+      const shown = this.store.get()
+      this.onClick(event.clientX - rect.left, event.clientY - rect.top, {
+        altKey: event.altKey,
+      })
+      // A drag that left the deadzone and came back has shifted the canvas;
+      // put the un-panned frame back while the re-render below computes.
+      if (invalidated) this.restoreSnapshot(snapshot)
+      // Two earlier steps can leave the canvas out of step with
+      // `currentViewport`, with nothing left to re-render it:
+      //  - the drag left the deadzone and came back: its first move discarded
+      //    the in-flight render (#180);
+      //  - the press tore down an unsettled zoom Preview: the zoom rides in
+      //    `currentViewport`, but the canvas shows the frame from before it.
+      // Commit `currentViewport` then — unless the click consumer wrote the
+      // store itself (an Alt-click's Julia reset), which re-renders anyway.
+      // `onClick` runs first so it maps the click through the frame on screen.
+      if (this.store.get() === shown && (invalidated || this.currentViewport !== shown)) {
+        this.store.set(this.currentViewport, 'gesture')
+      }
+      return
+    }
+
     // Pan from `currentViewport`, not the drag-start snapshot. They are
     // the same object for a drag with no concurrent resize, but a debounced
     // `refitToCanvas` (ResizeObserver) can fire mid-drag and `set` a viewport
@@ -480,28 +522,17 @@ export class InputController {
     const base = this.currentViewport
     const dxInternal = (dxCss * base.width()) / rect.width
     const dyInternal = (dyCss * base.height()) / rect.height
-
-    // A click/tap (or sub-pixel drag) commits nothing: the viewport is
-    // unchanged, no move repainted the canvas, and a store write would only
-    // restart an identical render — the exact waste B3 (#74) describes. Bail
-    // before the commit. (Cleanup above already ran, so the drag is torn down.)
-    if (Math.abs(dxInternal) < PAN_DEADZONE_PX && Math.abs(dyInternal) < PAN_DEADZONE_PX) {
-      // This was a click/tap, not a pan — hand the CSS-pixel position to the
-      // click consumer (the orbit visualizer, E1 #94; the Julia c-picker, O2
-      // #92). Reuses this canonical click-vs-pan classification rather than a
-      // separate `click` listener re-deriving its own threshold. The modifier
-      // flags ride along so the consumer can route a plain click vs. a
-      // modifier-click (Alt-click picks the Julia constant) without this layer
-      // knowing either intent — it stays presentation-free.
-      this.onClick(event.clientX - rect.left, event.clientY - rect.top, {
-        altKey: event.altKey,
-      })
-      return
-    }
-
     const next = base.pan_by_pixels(dxInternal, dyInternal)
     this.currentViewport = next
     this.store.set(next, 'gesture')
+  }
+
+  // Whether a drag of (dxCss, dyCss) is still a click/tap: under
+  // `PAN_DEADZONE_PX` on both axes of the viewport's logical grid.
+  private withinDeadzone(dxCss: number, dyCss: number, rect: DOMRect): boolean {
+    const dx = (dxCss * this.currentViewport.width()) / rect.width
+    const dy = (dyCss * this.currentViewport.height()) / rect.height
+    return Math.abs(dx) < PAN_DEADZONE_PX && Math.abs(dy) < PAN_DEADZONE_PX
   }
 
   // Euclidean distance, in client (CSS) pixels, between two tracked pointers.
@@ -731,8 +762,9 @@ interface DragState {
   // re-blit it with `drawImage` (GPU path) rather than `putImageData` (#82).
   readonly snapshot: HTMLCanvasElement
   // Whether the deferred in-flight-render discard has fired for this drag.
-  // Starts false on pointerdown; set true on the first real move so the
-  // discard runs once, when an actual drag begins (B3, #74).
+  // Starts false on pointerdown; set true on the first move out of the pan
+  // deadzone, so the discard runs once, when an actual drag begins (B3, #74).
+  // Stays true if the pointer returns: a release there re-renders (#180).
   invalidated: boolean
 }
 
