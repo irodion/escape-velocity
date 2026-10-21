@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createRenderClient, type PixelProbe, type ProgressReporter } from './render-client.js'
+import { FakeWorker } from './testing/fake-worker.js'
 import type {
   Aborted,
   CancelRequest,
@@ -29,21 +30,6 @@ if (typeof globalThis.ImageData === 'undefined') {
     configurable: true,
     writable: true,
   })
-}
-
-// Stand-in for the module Worker. Records every posted message and
-// exposes the `onmessage` the client installs so a test can drive
-// worker → client messages synchronously. `createRenderClient` calls the
-// injected factory once, so each `makeClient()` gets its own fresh instance —
-// no global `Worker` patching or module resets needed (A3, #86).
-class FakeWorker {
-  onmessage: ((event: MessageEvent) => void) | null = null
-  onerror: ((event: ErrorEvent) => void) | null = null
-  readonly posted: unknown[] = []
-  postMessage(message: unknown, _transfer?: Transferable[]): void {
-    this.posted.push(message)
-  }
-  terminate(): void {}
 }
 
 // The factory returns enum-typed `render`/`recolorize` params (`Palette` etc.);
@@ -81,7 +67,7 @@ function makeClient(deps?: {
 } {
   const worker = new FakeWorker()
   const client = createRenderClient({
-    workerFactory: () => worker as unknown as Worker,
+    workerFactory: () => worker.asWorker(),
     ...deps,
   }) as unknown as TestRenderClient
   return { client, worker }
@@ -110,11 +96,11 @@ function deliver(
   worker: FakeWorker,
   data: RenderResponse | RenderError | ProgressResponse | Aborted | { kind: 'ready' },
 ): void {
-  worker.onmessage?.({ data } as MessageEvent)
+  worker.send(data)
 }
 
 function deliverError(worker: FakeWorker, epoch: number, message: string): void {
-  worker.onmessage?.({ data: { kind: 'error', epoch, message } } as MessageEvent)
+  worker.send({ kind: 'error', epoch, message })
 }
 
 function deliverProgress(
@@ -123,17 +109,11 @@ function deliverProgress(
   rowsDone: number,
   rowsTotal: number,
 ): void {
-  worker.onmessage?.({ data: { kind: 'progress', epoch, rowsDone, rowsTotal } } as MessageEvent)
+  worker.send({ kind: 'progress', epoch, rowsDone, rowsTotal })
 }
 
 function deliverAborted(worker: FakeWorker, epoch: number): void {
-  worker.onmessage?.({ data: { kind: 'aborted', epoch } } as MessageEvent)
-}
-
-// Fire the worker's `onerror` (a top-level worker throw). `preventDefault` is
-// a no-op spy since the client calls it.
-function fireWorkerError(worker: FakeWorker, message: string): void {
-  worker.onerror?.({ message, preventDefault: () => {} } as ErrorEvent)
+  worker.send({ kind: 'aborted', epoch })
 }
 
 function readyMsg(): { kind: 'ready' } {
@@ -190,7 +170,7 @@ describe('render-client', () => {
     createRenderClient({
       workerFactory: () => {
         calls += 1
-        return worker as unknown as Worker
+        return worker.asWorker()
       },
     })
     // The factory is the seam a future side-by-side view reuses; the client
@@ -615,135 +595,56 @@ describe('render-client', () => {
     expect(ctx.putImageData).not.toHaveBeenCalled()
   })
 
-  it('surfaces a fatal handler when the worker throws at the top level (B4)', () => {
+  // The boot handshake itself (boot-error stages, the watchdog's messages,
+  // onerror) is the connection's, tested in `worker/connection.test.ts`
+  // (#160). These cover how the client is wired to it.
+
+  it('reports a worker fatal to onFatal and stops dispatching (B4)', () => {
     const fatal = vi.fn()
+    const reporter = { begin: vi.fn(), report: vi.fn(), end: vi.fn() }
     vi.spyOn(console, 'error').mockImplementation(() => {})
-    const { worker } = makeClient({ onFatal: fatal })
+    const { client, worker, ctx } = readyWithStableFrame({ onFatal: fatal, progress: reporter })
+    reporter.begin.mockClear()
 
-    fireWorkerError(worker, 'LinkError: shared memory unavailable')
-
+    worker.fail('LinkError: shared memory unavailable')
     expect(fatal).toHaveBeenCalledTimes(1)
     expect(fatal).toHaveBeenCalledWith('LinkError: shared memory unavailable')
-  })
 
-  it('a dead worker (onerror) stops dispatching further requests (B4)', () => {
-    const { client, worker } = makeClient()
-    vi.spyOn(console, 'error').mockImplementation(() => {})
-    deliver(worker, readyMsg())
-    fireWorkerError(worker, 'worker died')
-
-    const ctx = makeCtx()
+    // A dead worker will never reply, so the client dispatches nothing more:
+    // a render after it never starts (no progress indicator left hanging),
+    // and the probe refuses.
     doRender(client, ctx)
-
-    // Nothing posted after death — a dead worker can't drain the slot, so we
-    // don't park requests in it.
-    expect(worker.posted).toHaveLength(0)
+    expect(reporter.begin).not.toHaveBeenCalled()
+    expect(client.probe(1, 1, PALETTE_VIRIDIS, MODE_CYCLED)).toBe(false)
   })
 
-  it('fires the fatal handler if `ready` never arrives within the boot timeout (B4)', () => {
+  it('ends the progress of a render in flight when the worker turns fatal', () => {
+    // No reply will come for it, so the indicator mustn't stay up.
+    const reporter = { begin: vi.fn(), report: vi.fn(), end: vi.fn() }
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { client, worker } = makeClient({ progress: reporter })
+    deliver(worker, readyMsg())
+    doRender(client, makeCtx())
+    expect(reporter.begin).toHaveBeenCalledTimes(1)
+
+    worker.fail('worker died')
+    expect(reporter.end).toHaveBeenCalledTimes(1)
+  })
+
+  it('arms a 5 s boot watchdog only when a fatal surface is injected (B4)', () => {
     vi.useFakeTimers()
     try {
-      const fatal = vi.fn()
       vi.spyOn(console, 'error').mockImplementation(() => {})
-      // Injecting the handler arms the watchdog at construction. No `ready` is
-      // delivered, so it must fire.
+      // Without `onFatal` there is nothing to surface to, so no timer runs.
+      makeClient()
+      expect(vi.getTimerCount()).toBe(0)
+
+      const fatal = vi.fn()
       makeClient({ onFatal: fatal })
-
-      vi.advanceTimersByTime(5000)
-
-      expect(fatal).toHaveBeenCalledTimes(1)
-      expect(fatal).toHaveBeenCalledWith(expect.stringContaining('did not start'))
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('does not fire the boot watchdog once `ready` has arrived (B4)', () => {
-    vi.useFakeTimers()
-    try {
-      const fatal = vi.fn()
-      const { worker } = makeClient({ onFatal: fatal })
-      deliver(worker, readyMsg()) // boot succeeds, cancelling the watchdog
-
-      vi.advanceTimersByTime(5000)
-
+      vi.advanceTimersByTime(4999)
       expect(fatal).not.toHaveBeenCalled()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  // --- #83: instrumented worker boot failures ------------------------------
-
-  // Post a raw worker→client message whose kind the typed `deliver` helper
-  // doesn't model (the boot heartbeat / boot-error arms).
-  function deliverRaw(worker: FakeWorker, data: unknown): void {
-    worker.onmessage?.({ data } as MessageEvent)
-  }
-
-  it('surfaces a thrown WASM instantiation failure with the raw error (#83)', () => {
-    const fatal = vi.fn()
-    vi.spyOn(console, 'error').mockImplementation(() => {})
-    const { worker } = makeClient({ onFatal: fatal })
-
-    deliverRaw(worker, {
-      kind: 'boot-error',
-      stage: 'init',
-      message: 'CompileError: bad SIMD opcode',
-    })
-
-    expect(fatal).toHaveBeenCalledTimes(1)
-    const message = fatal.mock.calls[0]?.[0] as string
-    // Names the likely cause in plain terms and carries the raw detail through.
-    expect(message).toContain('WebAssembly')
-    expect(message).toContain('CompileError: bad SIMD opcode')
-  })
-
-  it('distinguishes a thread-pool boot failure from instantiation (#83)', () => {
-    const fatal = vi.fn()
-    vi.spyOn(console, 'error').mockImplementation(() => {})
-    const { worker } = makeClient({ onFatal: fatal })
-
-    deliverRaw(worker, {
-      kind: 'boot-error',
-      stage: 'thread-pool',
-      message: 'RangeError',
-    })
-
-    const message = fatal.mock.calls[0]?.[0] as string
-    expect(message).toContain('worker pool')
-  })
-
-  it('a boot-error cancels the watchdog so it does not double-report (#83)', () => {
-    vi.useFakeTimers()
-    try {
-      const fatal = vi.fn()
-      vi.spyOn(console, 'error').mockImplementation(() => {})
-      const { worker } = makeClient({ onFatal: fatal })
-
-      deliverRaw(worker, { kind: 'boot-error', stage: 'isolation', message: '' })
-      vi.advanceTimersByTime(5000)
-
-      // The boot-error reported once; the watchdog must not fire a second time.
-      expect(fatal).toHaveBeenCalledTimes(1)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('the watchdog blames the thread pool once WASM has instantiated (#83)', () => {
-    vi.useFakeTimers()
-    try {
-      const fatal = vi.fn()
-      vi.spyOn(console, 'error').mockImplementation(() => {})
-      const { worker } = makeClient({ onFatal: fatal })
-
-      // WASM came up but `ready` never follows: the pool hung, not init.
-      deliverRaw(worker, { kind: 'boot', stage: 'wasm' })
-      vi.advanceTimersByTime(5000)
-
-      expect(fatal).toHaveBeenCalledTimes(1)
-      expect(fatal.mock.calls[0]?.[0]).toContain('worker pool did not come up')
+      vi.advanceTimersByTime(1)
+      expect(fatal).toHaveBeenCalledWith(expect.stringContaining('did not start within 5s'))
     } finally {
       vi.useRealTimers()
     }
@@ -900,9 +801,17 @@ function postedProbes(worker: FakeWorker): ProbeMsg[] {
 }
 
 function deliverProbeResponse(worker: FakeWorker, seq: number, probe: Partial<PixelProbe>): void {
-  worker.onmessage?.({
-    data: { kind: 'probe-response', seq, raw: 0, t: 0, inside: false, r: 0, g: 0, b: 0, ...probe },
-  } as MessageEvent)
+  worker.send({
+    kind: 'probe-response',
+    seq,
+    raw: 0,
+    t: 0,
+    inside: false,
+    r: 0,
+    g: 0,
+    b: 0,
+    ...probe,
+  })
 }
 
 // Drive the client into the exact window a hover may probe in: ready, one render

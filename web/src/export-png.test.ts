@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest'
-import { buildFilename, computeExportDims, EXPORT_MAX_PIXELS } from './export-png.js'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { buildFilename, computeExportDims, EXPORT_MAX_PIXELS, renderOnce } from './export-png.js'
+import { FakeWorker } from './testing/fake-worker.js'
 import type { ViewState } from './view-state.js'
 import { serialize } from './view-state.js'
+import type { RenderRequest } from './worker/protocol.js'
 
 const SAMPLE: ViewState = {
   re: -0.743,
@@ -75,5 +77,74 @@ describe('computeExportDims', () => {
   ])('keeps a %i×%i 2× export under the iOS Safari 4096² canvas-area limit', (w, h) => {
     const dims = computeExportDims(w, h, 2)
     expect(dims.width * dims.height).toBeLessThanOrEqual(4096 * 4096)
+  })
+})
+
+// The boot handshake and the stall watchdog are the connection's, tested in
+// `worker/connection.test.ts` (#160). These cover what export does with it.
+describe('renderOnce', () => {
+  const REQUEST = { kind: 'render', epoch: 0 } as RenderRequest
+
+  function start() {
+    const worker = new FakeWorker()
+    const result = renderOnce(REQUEST, () => worker.asWorker())
+    return { worker, result }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('sends the request once the worker is ready, resolves with the frame, and terminates it', async () => {
+    const { worker, result } = start()
+    worker.send({ kind: 'boot', stage: 'wasm' })
+    expect(worker.posted).toHaveLength(0)
+    worker.send({ kind: 'ready' })
+    expect(worker.posted).toEqual([REQUEST])
+
+    const frame = {
+      kind: 'response',
+      epoch: 0,
+      rgba: new Uint8ClampedArray(4),
+      width: 1,
+      height: 1,
+    }
+    worker.send({ kind: 'progress', epoch: 0, rowsDone: 1, rowsTotal: 1 })
+    worker.send(frame)
+    await expect(result).resolves.toBe(frame)
+    expect(worker.terminated).toBe(true)
+  })
+
+  it.each([
+    ['a render error', { kind: 'error', epoch: 0, message: 'boom' }, 'export render failed: boom'],
+    ['an abort', { kind: 'aborted', epoch: 0 }, 'export render was aborted'],
+  ])('rejects on %s and terminates the worker', async (_, reply, message) => {
+    const { worker, result } = start()
+    worker.send({ kind: 'ready' })
+    worker.send(reply)
+    await expect(result).rejects.toThrow(message)
+    expect(worker.terminated).toBe(true)
+  })
+
+  it('rejects on a boot failure without waiting out the watchdog', async () => {
+    const { worker, result } = start()
+    worker.send({ kind: 'boot-error', stage: 'init', message: 'CompileError' })
+    await expect(result).rejects.toThrow('CompileError')
+    expect(worker.terminated).toBe(true)
+  })
+
+  it('rejects once the worker goes silent for a minute', async () => {
+    const { worker, result } = start()
+    worker.send({ kind: 'ready' })
+    vi.advanceTimersByTime(59_999)
+    worker.send({ kind: 'progress', epoch: 0, rowsDone: 1, rowsTotal: 12 })
+    vi.advanceTimersByTime(59_999)
+    expect(worker.terminated).toBe(false)
+    vi.advanceTimersByTime(1)
+    await expect(result).rejects.toThrow('stopped responding')
+    expect(worker.terminated).toBe(true)
   })
 })

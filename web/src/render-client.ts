@@ -1,7 +1,5 @@
+import { connectWorker, type WorkerReply } from './worker/connection.js'
 import type {
-  Aborted,
-  BootError,
-  BootProgress,
   CancelRequest,
   Field,
   FractalKind,
@@ -9,10 +7,7 @@ import type {
   Palette,
   ProbeRequest,
   ProbeResponse,
-  ProgressResponse,
-  Ready,
   RecolorizeRequest,
-  RenderError,
   RenderRequest,
   RenderResponse,
 } from './worker/protocol.js'
@@ -51,35 +46,6 @@ const NOOP_PROGRESS: ProgressReporter = {
   begin: () => {},
   report: () => {},
   end: () => {},
-}
-
-/**
- * Compose a human, on-screen message for a worker {@link BootError} (#83). The
- * fatal panel is the only diagnostic a phone user can read without a console,
- * so each stage names what it means in plain terms and appends the raw error
- * text, which usually pins the exact cause (an unsupported WASM feature, a
- * `SharedArrayBuffer` RangeError, a stripped isolation header).
- */
-function bootErrorMessage(err: BootError): string {
-  const detail = err.message ? ` (${err.message})` : ''
-  switch (err.stage) {
-    case 'isolation':
-      return (
-        'The renderer needs cross-origin isolation (SharedArrayBuffer), which ' +
-        `this page is not serving${detail}.`
-      )
-    case 'init':
-      return (
-        'The WebAssembly renderer failed to load. This browser may be missing a ' +
-        'feature the build requires (for example WebAssembly threads on an older ' +
-        `browser), or an isolation header was stripped${detail}.`
-      )
-    case 'thread-pool':
-      return (
-        'The renderer loaded but its multithreaded worker pool failed to start ' +
-        `on this browser${detail}.`
-      )
-  }
 }
 
 /**
@@ -232,8 +198,6 @@ export interface RenderClient {
 }
 
 export function createRenderClient(deps: RenderClientDeps): RenderClient {
-  const worker = deps.workerFactory()
-
   let latestEpoch = 0
   // The epoch of the newest request that moves the frame: a render (including
   // one a recolorize folded into) or a discard. A render response stands only
@@ -257,16 +221,9 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
   let inFlightKind: ClientRequest['kind'] | null = null
   let pending: ClientRequest | null = null
   let ready = false
-  // How far the worker's two-step boot got (#83). Flips to `true` when the
-  // worker posts `{ kind: 'boot', stage: 'wasm' }` — i.e. the WASM module
-  // instantiated. The watchdog reads it to localise a *hang*: WASM up but no
-  // `ready` means the rayon thread pool never came up; still false means the
-  // binary never instantiated (often an unsupported WASM feature on this
-  // browser). A `boot-error` gives the exact cause; this covers the silent hang.
-  let wasmInstantiated = false
-  // Set once the worker is known to be unusable (it threw at the top level, or
-  // never reached `ready`). A dead worker will never respond, so `issue` and
-  // `flush` no-op rather than parking requests in a slot that can't drain.
+  // Set once the connection reports the worker unusable (see `reportFatal`).
+  // A dead worker will never respond, so `flush` sends nothing more: a request
+  // issued after it waits in the pending slot for good.
   let dead = false
   // The canvas context to paint the next fresh response onto. Only a current
   // response paints (see the module doc), and `targetCtx` always tracks the
@@ -274,10 +231,6 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
   // it is the one canvas for this client's lifetime).
   let targetCtx: CanvasRenderingContext2D | null = null
 
-  // Surfaced to the host (main.ts wires `showFatal`). Null when not injected;
-  // `reportFatal` no-ops without it.
-  const onFatal: ((message: string) => void) | null = deps.onFatal ?? null
-  let bootTimer: ReturnType<typeof setTimeout> | undefined
   // Progress sink for the in-flight render (P2). No-op when not injected;
   // recolorizes never drive it. See `ProgressReporter`.
   const progress: ProgressReporter = deps.progress ?? NOOP_PROGRESS
@@ -303,32 +256,8 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     latestProbeSeq += 1
   }
 
-  worker.onmessage = (
-    event: MessageEvent<
-      | RenderResponse
-      | Ready
-      | RenderError
-      | ProgressResponse
-      | Aborted
-      | ProbeResponse
-      | BootProgress
-      | BootError
-    >,
-  ): void => {
-    const msg = event.data
-    if (msg.kind === 'boot') {
-      // The worker's WASM module instantiated; the thread pool is next. Record
-      // it so a later watchdog can blame the pool, not instantiation (#83).
-      wasmInstantiated = true
-      return
-    }
-    if (msg.kind === 'boot-error') {
-      // A boot step threw and the worker caught it (a rejection in a module
-      // worker's top-level async path never reaches `worker.onerror` reliably).
-      // Surface the real cause instead of waiting out the watchdog.
-      reportFatal(bootErrorMessage(msg))
-      return
-    }
+  // Everything the worker posts once booted (see `connectWorker`).
+  function handleReply(msg: WorkerReply): void {
     if (msg.kind === 'probe-response') {
       // A read-only side query's reply (E2, #95): independent of the render
       // slot, so handled before the in-flight guard. Deliver only the newest
@@ -346,18 +275,6 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
       }
       return
     }
-    if (msg.kind === 'ready') {
-      ready = true
-      // Boot succeeded — the watchdog (if armed) must not later declare a
-      // false failure.
-      if (bootTimer !== undefined) {
-        clearTimeout(bootTimer)
-        bootTimer = undefined
-      }
-      flush()
-      return
-    }
-
     if (msg.kind === 'progress') {
       // A non-terminal heartbeat from a banded render (P2): it does NOT free
       // the slot. Drive the indicator only for the frame the user is still
@@ -429,36 +346,37 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     flush()
   }
 
-  // A top-level throw in the worker (boot failure: WASM instantiation, or the
-  // cross-origin-isolation gate in worker.ts) fires here, not `onmessage`. No
-  // response will ever come, so mark the client dead and surface a fatal
-  // panel. `preventDefault` suppresses the browser's default console spam,
-  // which `reportFatal` (via console.error) already covers more legibly.
-  worker.onerror = (event: ErrorEvent): void => {
-    event.preventDefault()
-    dead = true
-    reportFatal(
-      event.message ||
-        'The render worker failed to start. The page may not be cross-origin ' +
-          'isolated, which the multithreaded renderer requires (SharedArrayBuffer).',
-    )
-  }
-
   /**
-   * Report an unrecoverable boot failure exactly once: mark the worker dead,
-   * cancel the watchdog, log, and hand a human message to the host surface (if
-   * injected). Idempotent so a worker.onerror and the watchdog can both fire
-   * without double-reporting.
+   * The connection found the worker unusable (its boot failed or hung, or it
+   * threw at the top level; called at most once): mark it dead, log, and hand
+   * the message to the host surface, if injected. A request in flight gets no
+   * reply now, so end its progress indicator here.
    */
   function reportFatal(message: string): void {
-    if (bootTimer !== undefined) {
-      clearTimeout(bootTimer)
-      bootTimer = undefined
-    }
     dead = true
+    if (inFlight) {
+      inFlight = false
+      progress.end()
+    }
     console.error(`render worker fatal: ${message}`)
-    onFatal?.(message)
+    deps.onFatal?.(message)
   }
+
+  // The worker and its boot handshake (#160). The boot watchdog runs only when
+  // a fatal surface was injected: with no `onFatal` there is nothing to
+  // surface to, so a client built without one leaves no stray timer running.
+  const connection = connectWorker(
+    deps.workerFactory,
+    {
+      onReady: () => {
+        ready = true
+        flush()
+      },
+      onMessage: handleReply,
+      onFatal: reportFatal,
+    },
+    { timeoutMs: deps.onFatal === undefined ? undefined : BOOT_TIMEOUT_MS },
+  )
 
   /**
    * Dispatch the pending request if the worker is ready and idle. A no-op
@@ -493,7 +411,7 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     if (req.kind === 'render') {
       progress.begin()
     }
-    worker.postMessage(req)
+    connection.post(req)
   }
 
   /**
@@ -508,7 +426,7 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
       return
     }
     const cancel: CancelRequest = { kind: 'cancel', epoch: latestEpoch }
-    worker.postMessage(cancel)
+    connection.post(cancel)
   }
 
   /**
@@ -704,35 +622,8 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     }
     latestProbeSeq += 1
     const req: ProbeRequest = { kind: 'probe', seq: latestProbeSeq, x, y, palette, mode }
-    worker.postMessage(req)
+    connection.post(req)
     return true
-  }
-
-  // Arm the boot watchdog now, at construction — but only if a fatal surface
-  // was injected. With no `onFatal` there is nothing to surface to, so a client
-  // built without one leaves no stray timer running. The worker cannot have
-  // reached `ready` or thrown yet (both are asynchronous), so this is the only
-  // place the watchdog needs to arm.
-  if (onFatal !== null) {
-    bootTimer = setTimeout(() => {
-      bootTimer = undefined
-      if (ready) {
-        return
-      }
-      // A timeout, not a thrown error — the worker hung rather than rejecting
-      // (a rejection would have arrived as `boot-error`). Localise it with the
-      // boot-stage heartbeat: if WASM instantiated, the rayon pool is what
-      // never came up; if not, instantiation itself stalled.
-      const where = wasmInstantiated
-        ? 'its multithreaded worker pool did not come up'
-        : 'the WebAssembly module did not finish loading'
-      reportFatal(
-        `The renderer did not start within ${BOOT_TIMEOUT_MS / 1000}s: ${where}. ` +
-          'This can be an unsupported browser, lost cross-origin isolation ' +
-          '(SharedArrayBuffer), or a stale cached build — try fully closing the ' +
-          'tab and reopening, or reload in a private window.',
-      )
-    }, BOOT_TIMEOUT_MS)
   }
 
   return { render, recolorize, probe, discardInFlight }
