@@ -115,11 +115,15 @@ function bootErrorMessage(err: BootError): string {
  * both recomputes the right frame and paints it in the right colours.
  *
  * Each issued request carries a monotonically increasing `epoch`. A
- * response is painted only if its epoch is still the latest one issued;
- * a response for a superseded request is discarded. This is belt-and-
+ * response for a superseded request is discarded. This is belt-and-
  * braces alongside the single-slot queue: even though we never have two
  * requests in flight at once, the epoch check guarantees a slow
- * response can't repaint a frame the user has already moved past.
+ * response can't repaint a frame the user has already moved past. What
+ * supersedes differs by kind (#182). A recolorize response paints only if
+ * nothing was issued after it. A render response paints unless a newer
+ * render or a `discardInFlight` has moved the frame on. A recolorize issued
+ * while it ran doesn't count: it re-tints that frame once it has painted,
+ * and the paint is what ends a zoom Preview.
  *
  * ## Boot ordering
  *
@@ -227,6 +231,15 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
   const worker = deps.workerFactory()
 
   let latestEpoch = 0
+  // The epoch of the newest request that moves the frame: a render (including
+  // one a recolorize folded into) or a discard. A render response paints only
+  // if it carries this epoch (see the module doc, #182).
+  let latestFrameEpoch = 0
+  // Whether the worker's cached frame is the one on the canvas. A render the
+  // client dropped as superseded, or one the worker abandoned partway, leaves a
+  // frame the canvas never showed, and re-tinting it would paint geometry the
+  // user isn't looking at, under a Preview scaling a different frame (#182).
+  let cachedFrameShown = false
   let inFlight = false
   // The kind of the request currently on the worker, captured at dispatch.
   // `paint` reads it to decide whether the response ends a zoom Preview: only
@@ -340,8 +353,9 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
       // A non-terminal heartbeat from a banded render (P2): it does NOT free
       // the slot. Drive the indicator only for the frame the user is still
       // waiting on — a heartbeat for an already-superseded render is ignored,
-      // so a doomed frame never moves the bar.
-      if (msg.epoch === latestEpoch) {
+      // so a doomed frame never moves the bar. A recolorize queued behind the
+      // render doesn't supersede it.
+      if (msg.epoch === latestFrameEpoch) {
         progress.report(msg.rowsTotal > 0 ? msg.rowsDone / msg.rowsTotal : 0)
       }
       return
@@ -360,6 +374,8 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     if (msg.kind === 'aborted') {
       // The worker abandoned this render because a newer one superseded it
       // (P2). There is no frame to paint — just dispatch whatever overtook it.
+      // Its partial frame is now the worker's cache.
+      cachedFrameShown = false
       flush()
       return
     }
@@ -368,15 +384,26 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
       // JsError, or WASM refusing to colour a missing or partial frame). The
       // worker stays alive and idle, so this is recoverable: free the slot,
       // log, and dispatch whatever queued — a single dropped frame, not a
-      // permanent freeze. The canvas keeps its last good frame.
+      // permanent freeze. The canvas keeps its last good frame, and a zoom
+      // Preview over it stays up: the transform is still the closest the old
+      // frame comes to the viewport the store now holds, so the phase stays
+      // `preview` (probes hold off) until a render paints. `cachedFrameShown`
+      // stands too: a request refused up front leaves the cache as it was,
+      // and WASM won't re-tint one that failed partway.
       console.error(`render worker error (epoch ${msg.epoch}): ${msg.message}`)
       flush()
       return
     }
-    // Paint it only if it is still the frame the user wants; then dispatch
-    // whatever queued up while it ran.
-    if (msg.epoch === latestEpoch && targetCtx !== null) {
+    // Paint it only if it is still the frame the user wants (see the module
+    // doc); then dispatch whatever queued up while it ran.
+    const isRender = inFlightKind === 'render'
+    const wanted = msg.epoch === (isRender ? latestFrameEpoch : latestEpoch)
+    if (wanted && targetCtx !== null) {
       paint(targetCtx, msg, inFlightKind)
+    }
+    // A completed render's frame is the worker's cache now, painted or not.
+    if (isRender) {
+      cachedFrameShown = wanted && targetCtx !== null
     }
     flush()
   }
@@ -420,6 +447,15 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
    */
   function flush(): void {
     if (dead || !ready || inFlight || pending === null) {
+      return
+    }
+    if (pending.kind === 'recolorize' && !cachedFrameShown) {
+      // The worker's cached frame isn't the one on screen (see
+      // `cachedFrameShown`), so drop the re-tint rather than paint that frame.
+      // The render that replaces it (the Settle, a pan's commit) reads the
+      // current colours. Before the first frame this also spares the worker a
+      // recolorize it would reject.
+      pending = null
       return
     }
     inFlight = true
@@ -473,6 +509,9 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     } else {
       pending = { ...req, epoch: latestEpoch }
     }
+    if (pending.kind === 'render') {
+      latestFrameEpoch = latestEpoch
+    }
     // Cancel the in-flight render only when a newer *render* makes it obsolete —
     // then the queued frame starts sooner instead of after the doomed one
     // finishes (P2). A queued recolorize is the opposite: it re-tints whatever
@@ -503,6 +542,7 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
    */
   function discardInFlight(): void {
     latestEpoch += 1
+    latestFrameEpoch = latestEpoch
     pending = null
     // A Preview is taking over the canvas; the buffer a probe would describe is
     // about to be stale, so invalidate any outstanding probe response too.
@@ -621,7 +661,8 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
    * Bypasses the render coalescing entirely (it carries a `seq`, not an
    * `epoch`, and posts immediately) and is gated on the cached buffer being
    * stable: skipped while booting/dead, while a *render* is in flight (its
-   * first band has already clobbered the cached frame with partial data), or
+   * first band has already clobbered the cached frame with partial data),
+   * while the cached frame isn't the one on screen (`cachedFrameShown`), or
    * while a gesture owns the canvas (a drag shifts the image, a Preview scales
    * it). In those windows the inspector
    * keeps its last reading rather than showing a value that isn't on screen. An
@@ -635,7 +676,7 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     if (inFlight && inFlightKind === 'render') {
       return false
     }
-    if (targetCtx === null || isGestureActive()) {
+    if (!cachedFrameShown || isGestureActive()) {
       return false
     }
     latestProbeSeq += 1
