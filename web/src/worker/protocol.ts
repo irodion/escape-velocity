@@ -227,3 +227,17 @@ export interface RenderResponse {
   readonly width: number
   readonly height: number
 }
+
+/** Every message the main thread posts to the worker. */
+export type MainToWorker = RenderRequest | RecolorizeRequest | CancelRequest | ProbeRequest
+
+/** Every message the worker posts to the main thread. */
+export type WorkerToMain =
+  | BootProgress
+  | BootError
+  | Ready
+  | RenderResponse
+  | RenderError
+  | Aborted
+  | ProgressResponse
+  | ProbeResponse

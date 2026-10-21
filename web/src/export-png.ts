@@ -11,15 +11,16 @@
  * pixels under a filename naming a different view. Rendering the requested state
  * makes the pixels and the filename describe the same frame, always.
  *
- * It deliberately does NOT reuse the live render client: that client has one
+ * It deliberately does NOT render on the live worker: the live client has one
  * epoch counter + a single in-flight slot (see `createRenderClient`), and its
  * worker's WASM instance caches the last frame's iteration buffer, so
  * dispatching an export render through it would supersede — and visually
  * clobber — the frame the user is looking at, and evict the cache a recolorize
- * depends on. Instead a dedicated
- * one-shot worker boots, renders exactly one request, and is terminated. The
- * cost is a brief second WASM boot per export, which is fine for an explicit,
- * infrequent action and keeps the live pipeline untouched.
+ * depends on. Instead a dedicated one-shot worker boots, renders exactly one
+ * request, and is terminated. It shares the live client's boot handshake
+ * (`connectWorker`, #160), not its pipeline. The cost is a brief second WASM
+ * boot per export, which is fine for an explicit, infrequent action and keeps
+ * the live pipeline untouched.
  *
  * The caller builds the `RenderRequest` (it owns the viewport + the form→wasm
  * enum mapping), sizing the buffer with `computeExportDims` — the same
@@ -32,21 +33,13 @@ import type { BufferDims } from './render-buffer.js'
 import { computeBufferDims } from './render-buffer.js'
 import type { ViewState } from './view-state.js'
 import { serialize } from './view-state.js'
-import type {
-  Aborted,
-  BootError,
-  BootProgress,
-  ProgressResponse,
-  Ready,
-  RenderError,
-  RenderRequest,
-  RenderResponse,
-} from './worker/protocol.js'
+import { connectWorker } from './worker/connection.js'
+import type { RenderRequest, RenderResponse } from './worker/protocol.js'
 
-// Inactivity watchdog for an export render: give up and free the UI once the
-// worker has gone this long without posting anything. Every message (boot
-// heartbeat, `ready`, each band's `progress`) re-arms it, so it never bounds a
-// slow-but-progressing render — a deep, 16M px frame can legitimately run well
+// Inactivity watchdog for an export render (the connection's `'stall'` mode):
+// give up and free the UI once the worker has gone this long without posting
+// anything. Every message (boot heartbeat, `ready`, each band's `progress`)
+// re-arms it, so it never bounds a slow-but-progressing render — a deep, 16M px frame can legitimately run well
 // past a minute in total (#157). What it catches is a worker that never settles
 // (a stuck boot — the same failure the live client guards with its own boot
 // watchdog — or a worker that dies without posting a terminal message), which
@@ -154,92 +147,55 @@ function rgbaToPngBlob(
  */
 export async function exportRenderedFrame(request: RenderRequest, filename: string): Promise<void> {
   // Same worker entry as the live pipeline — Vite bundles it as its own chunk.
-  const worker = new Worker(new URL('./worker/worker.ts', import.meta.url), { type: 'module' })
-  let response: RenderResponse
-  try {
-    response = await new Promise<RenderResponse>((resolve, reject) => {
-      // The stall watchdog: re-armed by every non-terminal message, cleared by
-      // every terminal path so the timer never outlives the Promise. Firing
-      // rejects, which (via the `finally` below) terminates the worker and lets
-      // `runExport` re-enable the buttons.
-      let timer: ReturnType<typeof setTimeout> | undefined
-      const arm = (): void => {
-        clearTimeout(timer)
-        timer = setTimeout(() => {
-          reject(
-            new Error(`export render stalled: no progress for ${EXPORT_STALL_TIMEOUT_MS / 1000}s`),
-          )
-        }, EXPORT_STALL_TIMEOUT_MS)
-      }
-      arm()
-      const settleResolve = (value: RenderResponse): void => {
-        clearTimeout(timer)
-        resolve(value)
-      }
-      const settleReject = (error: Error): void => {
-        clearTimeout(timer)
-        reject(error)
-      }
-      worker.onmessage = (
-        event: MessageEvent<
-          | Ready
-          | RenderResponse
-          | RenderError
-          | Aborted
-          | BootProgress
-          | BootError
-          | ProgressResponse
-        >,
-      ): void => {
-        const msg = event.data
-        switch (msg.kind) {
-          case 'boot':
-            // Non-terminal boot heartbeat (#83): WASM instantiated, the pool is
-            // next. Nothing to do on a one-shot export — wait for `ready`.
-            arm()
-            return
-          case 'boot-error':
-            // The worker bootstrap failed and reported it via postMessage (a
-            // module-worker top-level rejection does NOT reliably fire
-            // `worker.onerror`, #83), so without this arm the export would sit
-            // disabled until the stall watchdog fired. Reject now with the real
-            // cause.
-            settleReject(
-              new Error(`export render worker failed to boot (${msg.stage}): ${msg.message}`),
-            )
-            return
-          case 'ready':
-            // The worker buffers nothing of its own; dispatch the single render
-            // only once it has booted its WASM instance and thread pool.
-            arm()
-            worker.postMessage(request)
-            return
-          case 'progress':
-            // A band finished: the render is alive, so push the watchdog out.
-            // A one-shot export shows no progress bar.
-            arm()
-            return
-          case 'response':
-            settleResolve(msg)
-            return
-          case 'error':
-            settleReject(new Error(`export render failed: ${msg.message}`))
-            return
-          case 'aborted':
-            // No newer request exists on a one-shot worker, so this is
-            // unexpected — surface it rather than hanging.
-            settleReject(new Error('export render was aborted'))
-            return
-        }
-      }
-      worker.onerror = (event: ErrorEvent): void => {
-        event.preventDefault()
-        settleReject(new Error(event.message || 'export render worker failed to start'))
-      }
-    })
-  } finally {
-    worker.terminate()
-  }
+  const response = await renderOnce(
+    request,
+    () => new Worker(new URL('./worker/worker.ts', import.meta.url), { type: 'module' }),
+  )
   const blob = await rgbaToPngBlob(response.rgba, response.width, response.height)
   downloadBlob(blob, filename)
+}
+
+/**
+ * Boot a worker from `workerFactory`, render `request` on it once, and close
+ * it on any outcome. Rejects with a readable message if the worker fails to
+ * boot, stalls, or fails the render. Exported for testing.
+ */
+export function renderOnce(
+  request: RenderRequest,
+  workerFactory: () => Worker,
+): Promise<RenderResponse> {
+  return new Promise((resolve, reject) => {
+    const fail = (message: string): void => {
+      connection.close()
+      reject(new Error(message))
+    }
+    const connection = connectWorker(
+      workerFactory,
+      {
+        // The worker buffers nothing of its own; dispatch the single render
+        // only once it has booted its WASM instance and thread pool.
+        onReady: () => connection.post(request),
+        onMessage: (msg) => {
+          switch (msg.kind) {
+            case 'response':
+              connection.close()
+              resolve(msg)
+              return
+            case 'error':
+              fail(`export render failed: ${msg.message}`)
+              return
+            case 'aborted':
+              // No newer request exists on a one-shot worker, so this is
+              // unexpected — surface it rather than hanging.
+              fail('export render was aborted')
+              return
+          }
+          // A band's `progress` needs nothing here: the connection's stall
+          // watchdog already counted it. A one-shot export shows no bar.
+        },
+        onFatal: fail,
+      },
+      { timeoutMs: EXPORT_STALL_TIMEOUT_MS, watch: 'stall' },
+    )
+  })
 }

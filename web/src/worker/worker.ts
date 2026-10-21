@@ -26,11 +26,9 @@ import type {
   Aborted,
   BootError,
   BootProgress,
-  CancelRequest,
-  ProbeRequest,
+  MainToWorker,
   ProgressResponse,
   Ready,
-  RecolorizeRequest,
   RenderError,
   RenderRequest,
 } from './protocol.js'
@@ -141,9 +139,7 @@ function postBootError(stage: BootError['stage'], err: unknown): void {
   ctx.postMessage(error)
 }
 
-function handleMessage(
-  event: MessageEvent<RenderRequest | RecolorizeRequest | CancelRequest | ProbeRequest>,
-): void {
+function handleMessage(event: MessageEvent<MainToWorker>): void {
   const msg = event.data
 
   if (msg.kind === 'probe') {
