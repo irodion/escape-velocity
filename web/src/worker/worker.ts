@@ -1,8 +1,8 @@
 /// <reference lib="webworker" />
 /**
- * Render-worker entry point. Owns its own WASM instance — separate from
- * the main thread's — so the heavy `compute` → `colorize` cycle runs off
- * the UI thread and never freezes input (ADR-0007's first slice).
+ * Render-worker entry point. Owns the page's WASM instance (the main
+ * thread loads none, ADR-0015), so the heavy `compute` → `colorize` cycle
+ * runs off the UI thread and never freezes input (ADR-0007's first slice).
  *
  * Slice 7C makes that instance *multicore*: before announcing `ready`,
  * the worker stands up a `wasm-bindgen-rayon` thread pool sized to the

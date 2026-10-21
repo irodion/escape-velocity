@@ -766,7 +766,7 @@ describe('InputController', () => {
     // 1600×1200 over an 800×600 viewport grid, CSS 400×300) separates them: the
     // correction is a flat −0.5 in *grid* units, cssX·(800/400) − 0.5. This is
     // the only assertion that would fail if the −0.5 were applied in CSS units
-    // instead of grid units. (Convention rationale lives at `cssToGridSample`.)
+    // instead of grid units. (Convention rationale lives at `cssToGrid`.)
     canvas.width = 1600
     canvas.height = 1200
     setRect(canvas, { width: 400, height: 300 })

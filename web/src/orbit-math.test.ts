@@ -75,7 +75,7 @@ describe('revealedCount', () => {
 describe('complexToCss / cssToComplex', () => {
   // Display ratio 1 (buffer == CSS box) keeps the anchors easy to reason about.
   const viewport = new Viewport(-0.5, 0.1, 1, 800, 600)
-  const view: ViewGeometry = { viewport, rectW: 800, rectH: 600 }
+  const view: ViewGeometry = { viewport, rect: { width: 800, height: 600 } }
 
   it('round-trips an arbitrary CSS pixel within fp tolerance', () => {
     const c = cssToComplex(123.5, 456.25, view)
@@ -84,29 +84,37 @@ describe('complexToCss / cssToComplex', () => {
     expect(back.y).toBeCloseTo(456.25, 9)
   })
 
-  it('maps the grid centre to the viewport centre', () => {
-    // The geometric centre of the pixel grid is (width-1)/2, (height-1)/2.
-    const c = cssToComplex((800 - 1) / 2, (600 - 1) / 2, view)
+  it('maps the centre of the box to the viewport centre', () => {
+    // CSS 400 is a cell edge, half a pixel past the sample at the grid's
+    // centre, (800 - 1) / 2 = 399.5.
+    const c = cssToComplex(400, 300, view)
     expect(c.re).toBeCloseTo(viewport.centerRe, 12)
     expect(c.im).toBeCloseTo(viewport.centerIm, 12)
   })
 
+  it('picks the sample drawn under the cursor, the pixel the inspector probes', () => {
+    // A cursor in the middle of cell (100, 50) is over buffer pixel (100, 50),
+    // rendered from the sample at grid coordinate (100, 50), not (100.5, 50.5).
+    expect(cssToBufferPixel(100.5, 50.5, 800, 600, 800, 600)).toEqual({ px: 100, py: 50 })
+    expect(cssToComplex(100.5, 50.5, view)).toEqual(viewport.pixelToComplex(100, 50))
+  })
+
   it('reproduces the Rust pixel_to_complex_f anchor at the top-left pixel', () => {
     // Cross-check the literal formula (not the implementation): for center
-    // (0,0), zoom 1, 800×600, pixel (0,0) is (−399.5·scale, +299.5·scale).
+    // (0,0), zoom 1, 800×600, pixel (0,0) is (−399.5·scale, +299.5·scale),
+    // drawn under the middle of the top-left cell.
     const ref: ViewGeometry = { ...view, viewport: new Viewport(0, 0, 1, 800, 600) }
     const scale = pixelScale(1)
-    const c = cssToComplex(0, 0, ref)
+    const c = cssToComplex(0.5, 0.5, ref)
     expect(c.re).toBeCloseTo(-399.5 * scale, 12)
     expect(c.im).toBeCloseTo(299.5 * scale, 12)
   })
 
   it('honours the CSS↔logical display ratio when the canvas is stretched', () => {
-    // A 1600-CSS-wide canvas backed by an 800-logical grid: the CSS pixel that
-    // maps to the grid centre (logical 399.5, 299.5) lands on the viewport
-    // centre — 2× the logical coordinate at this ratio.
-    const stretched: ViewGeometry = { ...view, rectW: 1600, rectH: 1200 }
-    const c = cssToComplex(399.5 * 2, 299.5 * 2, stretched)
+    // A 1600×1200 CSS box over the 800×600 grid: the box's centre, 2× the
+    // logical one at this ratio, still lands on the viewport centre.
+    const stretched: ViewGeometry = { ...view, rect: { width: 1600, height: 1200 } }
+    const c = cssToComplex(800, 600, stretched)
     expect(c.re).toBeCloseTo(viewport.centerRe, 12)
     expect(c.im).toBeCloseTo(viewport.centerIm, 12)
   })

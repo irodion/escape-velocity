@@ -40,27 +40,35 @@ Having both paid the costs of both:
 
 1. It is an immutable class: `pixelScale`, `pixelToComplex`, `panByPixels`,
    `zoomAround`, `withResolution`, the constants (`REFERENCE_WIDTH`,
-   `BASE_RE_SPAN`) and the zoom clamp (`MIN_ZOOM`, `MAX_ZOOM`). It adds
-   `complexToPixel`, the inverse projection the overlays draw with, which the
-   compute never needs. The validation the binding did (finite inputs, zoom
-   and factor > 0, whole-pixel dimensions) moves with it.
-2. The overlays' projection (`cssToComplex`, `complexToCss` in
-   [orbit-math.ts](../../web/src/orbit-math.ts)) goes through it. `orbit-math`'s
-   own copy of the constants and the pixel scale is gone, so the main thread
-   has one implementation.
+   `BASE_RE_SPAN`) and the zoom clamp (`MIN_ZOOM`, `MAX_ZOOM`). It also has
+   `complexToPixel`, the inverse projection, which the compute never needs.
+   The validation the binding did (finite inputs, zoom and factor > 0,
+   whole-pixel dimensions) moves with it, and a permalink's zoom is clamped
+   to the range a gesture can reach when it is read.
+2. **One CSS → grid mapping.** `cssToGrid` scales a CSS point by the grid over
+   the box and names the sample drawn there, half a pixel back (B5, #76). The
+   zoom anchor, the Alt-click picker, the orbit and the inspector readout all
+   go through it, then through `pixelToComplex`. `orbit-math`'s own copy of
+   the constants and the pixel scale is gone, so the main thread has one
+   implementation. (The click, hover and inspector mappings used to skip the
+   half pixel, so they named a point half a pixel off the sample under the
+   cursor; they no longer do.)
 3. **`main.ts` no longer loads WASM.** Only the render worker and the export's
    one-shot worker do. A browser that can't run the module finds out through
    the worker's boot handshake (`connectWorker`, #160), which already
-   reported it.
+   reported it. The main thread still takes the four enum tables from the
+   generated glue (`wasm-enums.ts`); the build inlines just those objects, so
+   neither the glue nor the rayon helper loads with the page. (The dev
+   server, unbundled, still evaluates the glue module.)
 4. **Rust stays the source of truth for the compute.** The worker builds a
    WASM `Viewport` from the request's five fields for every render; the
    per-pixel mapping and the kernel run in Rust.
 5. **The port is exact.** Every formula keeps Rust's operation order. Both
    sides compute in IEEE-754 binary64 with each operation rounded on its own
    (no fused multiply-add), so the two agree bit for bit, not within a
-   tolerance. A one-off check against the real WASM build compared 80,000
-   random pans, zooms, resizes and eight-notch wheel scrubs and found no
-   difference. #169 turns that into a permanent test.
+   tolerance. [viewport-parity.test.ts](../../web/src/viewport-parity.test.ts)
+   loads the real module in Vitest and compares the two on random pans,
+   zooms (clamps included), resizes and eight-notch wheel scrubs (#169).
 
 ## Consequences
 
@@ -71,8 +79,8 @@ Having both paid the costs of both:
   orbit suites now run against the real viewport, and `viewport.test.ts`
   carries the Rust suite's key properties.
 - **Two implementations remain.** A change to `viewport.rs` needs the same
-  change to `viewport.ts`. Both files say so, but until #169 lands nothing
-  enforces it.
+  change to `viewport.ts`. Both files say so, and the parity test fails CI
+  when they disagree, since CI builds the module before Vitest runs.
 - **The main thread's interaction maths is TypeScript, not Rust**, which fits
   the README's "the code teaches Rust" aim less well than the Rust-only
   alternative below. The TypeScript is written as a port: each method names
@@ -81,8 +89,8 @@ Having both paid the costs of both:
   `init()`, so the two boots already overlapped. This is a simplicity
   decision, not a speed one.
 - The binding's `pan_by_pixels`, `zoom_around`, `with_resolution` and getters
-  are no longer called by the app. They stay as the reference #169 tests the
-  port against.
+  are no longer called by the app. They stay as the reference the parity test
+  compares the port against, so they still ship in the module.
 - The orbit overlay's single-point iteration (`traceOrbit`, `BAILOUT_SQR`)
   stays a TypeScript mirror of the kernel, as it was (E1, #94).
 
@@ -94,7 +102,8 @@ Having both paid the costs of both:
   Rejected: it keeps a main-thread instance of the threaded module for about
   sixty lines of geometry; every pointer move crosses the boundary and gets a
   pair back (a WASM object to free, or an array copy); and the orbit,
-  inspector, picker and input tests would all need the real module in Vitest.
+  inspector, picker and input suites would all need the built module, as
+  only the parity test does now.
 - **Keep both and add only the parity test.** The cheapest option, but it
   keeps the main-thread boot, its fatal path and the object lifetimes: the
   costs of both approaches, which is what #172 asked to end.

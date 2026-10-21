@@ -376,7 +376,7 @@ impl Viewport {
     // with the constructor. The main thread now keeps a TypeScript port
     // instead (ADR-0015), so the worker's constructor call is the app's
     // only use of this class. The methods and accessors stay as the
-    // reference that port is tested against (#169).
+    // reference that port is tested against (`viewport-parity.test.ts`).
 
     #[wasm_bindgen]
     pub fn center_re(&self) -> f64 {

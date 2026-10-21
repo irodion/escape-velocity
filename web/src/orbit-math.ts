@@ -1,15 +1,15 @@
-import type { Viewport } from './viewport.js'
+import { type BoxSize, cssToGrid, type Viewport } from './viewport.js'
 
 /**
  * Pure maths for the orbit visualizer (E1, #94): iterate a single point's
  * `z = z² + c` orbit in plain TS, and project complex-plane points to/from CSS
  * pixels on the overlay canvas.
  *
- * The projection is the viewport's own (`viewport.ts`) plus the CSS ↔ grid
- * display ratio. The iteration and `BAILOUT_SQR` are a deliberate mirror of the
- * Rust source of truth (`lib.rs`'s `BAILOUT_SQR` and `escape_time.rs`'s
- * iteration): iterating one point is microseconds, so E1 stays entirely on the
- * TS side with no wasm/protocol change (per the issue).
+ * The projection is the viewport's own, through the same CSS → grid mapping the
+ * zoom anchor uses (`viewport.ts`). The iteration and `BAILOUT_SQR` are a
+ * deliberate mirror of the Rust source of truth (`lib.rs`'s `BAILOUT_SQR` and
+ * `escape_time.rs`'s iteration): iterating one point is microseconds, so E1
+ * stays entirely on the TS side with no wasm/protocol change (per the issue).
  */
 
 /**
@@ -22,14 +22,12 @@ import type { Viewport } from './viewport.js'
 export const BAILOUT_SQR = 65_536
 
 /**
- * A viewport plus the CSS box its canvas is displayed at (`rectW`/`rectH`,
- * `getBoundingClientRect`'s size). The viewport's logical grid and the box
- * differ by the display ratio, which the projection undoes.
+ * A viewport plus the CSS box its canvas is displayed in. The input
+ * controller's `ClickFrame` is one.
  */
 export interface ViewGeometry {
   readonly viewport: Viewport
-  readonly rectW: number
-  readonly rectH: number
+  readonly rect: BoxSize
 }
 
 /**
@@ -68,14 +66,14 @@ export function traceOrbit(
 
 /**
  * Project a complex-plane point to a CSS pixel on the overlay: the viewport's
- * grid position for it, then logical → CSS by the display ratio.
+ * grid position for it, then grid → CSS, the inverse of `cssToGrid`.
  */
 export function complexToCss(re: number, im: number, view: ViewGeometry): { x: number; y: number } {
-  const { viewport } = view
+  const { viewport, rect } = view
   const grid = viewport.complexToPixel(re, im)
   return {
-    x: (grid.x * view.rectW) / viewport.width,
-    y: (grid.y * view.rectH) / viewport.height,
+    x: ((grid.x + 0.5) * rect.width) / viewport.width,
+    y: ((grid.y + 0.5) * rect.height) / viewport.height,
   }
 }
 
@@ -104,15 +102,13 @@ export function revealedCount(
 }
 
 /**
- * Map a CSS pixel on the overlay back to its complex-plane point: CSS → logical
- * by the display ratio, then the viewport's `pixelToComplex`.
+ * Map a CSS pixel on the overlay back to its complex-plane point: the sample
+ * drawn under it (`cssToGrid`), so a pick or a traced orbit is the point the
+ * pixel beneath the cursor was rendered from.
  */
 export function cssToComplex(x: number, y: number, view: ViewGeometry): { re: number; im: number } {
-  const { viewport } = view
-  return viewport.pixelToComplex(
-    (x * viewport.width) / view.rectW,
-    (y * viewport.height) / view.rectH,
-  )
+  const grid = cssToGrid(view.viewport, view.rect, x, y)
+  return view.viewport.pixelToComplex(grid.x, grid.y)
 }
 
 /**

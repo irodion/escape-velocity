@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   BASE_RE_SPAN,
+  clampZoom,
+  cssToGrid,
   MAX_ZOOM,
   MIN_ZOOM,
   pixelScale,
@@ -10,7 +12,8 @@ import {
 
 // The properties the main thread relies on, after the Rust tests in
 // `crates/fractal-core/src/viewport.rs` (same tolerances). That the two
-// implementations agree is #169's parity test; this file pins the TS behaviour.
+// implementations agree is `viewport-parity.test.ts`'s job; this file pins the
+// TS behaviour.
 
 const sample = (): Viewport => new Viewport(-0.5, 0, 1, 800, 600)
 
@@ -44,6 +47,17 @@ describe('Viewport projection', () => {
       expect(back.x).toBeCloseTo(px, 6)
       expect(back.y).toBeCloseTo(py, 6)
     }
+  })
+})
+
+describe('cssToGrid', () => {
+  it('scales CSS by the grid over the box, then names the sample half a pixel back', () => {
+    // An 800×600 grid shown in a 400×300 box: CSS (50, 25) is the cell edge at
+    // grid (100, 50), so the sample under it is at (99.5, 49.5).
+    const vp = sample()
+    expect(cssToGrid(vp, { width: 400, height: 300 }, 50, 25)).toEqual({ x: 99.5, y: 49.5 })
+    // The middle of a cell is its sample.
+    expect(cssToGrid(vp, { width: 800, height: 600 }, 10.5, 20.5)).toEqual({ x: 10, y: 20 })
   })
 })
 
@@ -95,6 +109,7 @@ describe('Viewport.zoomAround', () => {
   })
 
   it('clamps to [MIN_ZOOM, MAX_ZOOM], landing exactly on the bound', () => {
+    expect([clampZoom(1e-310), clampZoom(200), clampZoom(1e300)]).toEqual([MIN_ZOOM, 200, MAX_ZOOM])
     expect(new Viewport(0, 0, MAX_ZOOM, 800, 600).zoomAround(400, 300, 10).zoom).toBe(MAX_ZOOM)
     expect(new Viewport(0, 0, MAX_ZOOM / 2, 800, 600).zoomAround(400, 300, 10).zoom).toBe(MAX_ZOOM)
     expect(new Viewport(0, 0, MIN_ZOOM, 800, 600).zoomAround(400, 300, 0.1).zoom).toBe(MIN_ZOOM)
