@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   BAILOUT_SQR,
-  complexToCss,
   cssToBufferPixel,
   cssToComplex,
   revealedCount,
@@ -72,17 +71,10 @@ describe('revealedCount', () => {
   })
 })
 
-describe('complexToCss / cssToComplex', () => {
+describe('cssToComplex', () => {
   // Display ratio 1 (buffer == CSS box) keeps the anchors easy to reason about.
   const viewport = new Viewport(-0.5, 0.1, 1, 800, 600)
   const view: ViewGeometry = { viewport, rect: { width: 800, height: 600 } }
-
-  it('round-trips an arbitrary CSS pixel within fp tolerance', () => {
-    const c = cssToComplex(123.5, 456.25, view)
-    const back = complexToCss(c.re, c.im, view)
-    expect(back.x).toBeCloseTo(123.5, 9)
-    expect(back.y).toBeCloseTo(456.25, 9)
-  })
 
   it('maps the centre of the box to the viewport centre', () => {
     // CSS 400 is a cell edge, half a pixel past the sample at the grid's

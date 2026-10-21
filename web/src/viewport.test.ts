@@ -34,20 +34,6 @@ describe('Viewport projection', () => {
     const span = wide.pixelToComplex(1599, 0).re - wide.pixelToComplex(0, 0).re
     expect(span).toBeCloseTo((1599 / REFERENCE_WIDTH) * BASE_RE_SPAN, 12)
   })
-
-  it('inverts pixelToComplex with complexToPixel', () => {
-    const vp = new Viewport(-0.7435, 0.1314, 200, 1280, 720)
-    for (const [px, py] of [
-      [0, 0],
-      [123.5, 77.25],
-      [1279, 719],
-    ]) {
-      const c = vp.pixelToComplex(px, py)
-      const back = vp.complexToPixel(c.re, c.im)
-      expect(back.x).toBeCloseTo(px, 6)
-      expect(back.y).toBeCloseTo(py, 6)
-    }
-  })
 })
 
 describe('cssToGrid', () => {

@@ -2,8 +2,8 @@ import { type BoxSize, cssToGrid, type Viewport } from './viewport.js'
 
 /**
  * Pure maths for the orbit visualizer (E1, #94): iterate a single point's
- * `z = z² + c` orbit in plain TS, and project complex-plane points to/from CSS
- * pixels on the overlay canvas.
+ * `z = z² + c` orbit in plain TS, and map a CSS pixel on the canvas to the
+ * complex point drawn there.
  *
  * The projection is the viewport's own, through the same CSS → grid mapping the
  * zoom anchor uses (`viewport.ts`). The iteration and `BAILOUT_SQR` are a
@@ -62,19 +62,6 @@ export function traceOrbit(
     im = nextIm
   }
   return points
-}
-
-/**
- * Project a complex-plane point to a CSS pixel on the overlay: the viewport's
- * grid position for it, then grid → CSS, the inverse of `cssToGrid`.
- */
-export function complexToCss(re: number, im: number, view: ViewGeometry): { x: number; y: number } {
-  const { viewport, rect } = view
-  const grid = viewport.complexToPixel(re, im)
-  return {
-    x: ((grid.x + 0.5) * rect.width) / viewport.width,
-    y: ((grid.y + 0.5) * rect.height) / viewport.height,
-  }
 }
 
 /**
