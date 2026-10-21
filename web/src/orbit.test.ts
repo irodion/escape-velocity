@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { OrbitOverlay } from './orbit.js'
+import { Viewport } from './viewport.js'
 import type { ViewportStore } from './viewport-store.js'
 
 // A 2D context stub that just tallies calls — the overlay's drawing is exercised
@@ -21,15 +22,7 @@ function makeCtx(): { ctx: CanvasRenderingContext2D; calls: Record<string, numbe
   return { ctx, calls }
 }
 
-// A sentinel viewport exposing only the accessors the overlay reads.
-const viewport = () =>
-  ({
-    center_re: () => 0,
-    center_im: () => 0,
-    zoom: () => 1,
-    width: () => 800,
-    height: () => 600,
-  }) as unknown as ReturnType<ViewportStore['get']>
+const viewport = () => new Viewport(0, 0, 1, 800, 600)
 
 // The animation loop is driven by rAF; stub it so a `start()` runs exactly one
 // synchronous frame (drawn immediately) and then schedules a frame that never

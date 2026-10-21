@@ -1,14 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
   BAILOUT_SQR,
-  complexToCss,
   cssToBufferPixel,
   cssToComplex,
-  pixelScale,
   revealedCount,
   traceOrbit,
   type ViewGeometry,
 } from './orbit-math.js'
+import { pixelScale, Viewport } from './viewport.js'
 
 describe('traceOrbit', () => {
   it('keeps an interior point bounded for the full maxIter (z₀=0, c=0 stays at 0)', () => {
@@ -72,50 +71,44 @@ describe('revealedCount', () => {
   })
 })
 
-describe('complexToCss / cssToComplex', () => {
+describe('cssToComplex', () => {
   // Display ratio 1 (buffer == CSS box) keeps the anchors easy to reason about.
-  const view: ViewGeometry = {
-    centerRe: -0.5,
-    centerIm: 0.1,
-    zoom: 1,
-    logicalW: 800,
-    logicalH: 600,
-    rectW: 800,
-    rectH: 600,
-  }
+  const viewport = new Viewport(-0.5, 0.1, 1, 800, 600)
+  const view: ViewGeometry = { viewport, rect: { width: 800, height: 600 } }
 
-  it('round-trips an arbitrary CSS pixel within fp tolerance', () => {
-    const c = cssToComplex(123.5, 456.25, view)
-    const back = complexToCss(c.re, c.im, view)
-    expect(back.x).toBeCloseTo(123.5, 9)
-    expect(back.y).toBeCloseTo(456.25, 9)
+  it('maps the centre of the box to the viewport centre', () => {
+    // CSS 400 is a cell edge, half a pixel past the sample at the grid's
+    // centre, (800 - 1) / 2 = 399.5.
+    const c = cssToComplex(400, 300, view)
+    expect(c.re).toBeCloseTo(viewport.centerRe, 12)
+    expect(c.im).toBeCloseTo(viewport.centerIm, 12)
   })
 
-  it('maps the grid centre to the viewport centre', () => {
-    // The geometric centre of the pixel grid is (logicalW-1)/2, (logicalH-1)/2.
-    const c = cssToComplex((800 - 1) / 2, (600 - 1) / 2, view)
-    expect(c.re).toBeCloseTo(view.centerRe, 12)
-    expect(c.im).toBeCloseTo(view.centerIm, 12)
+  it('picks the sample drawn under the cursor, the pixel the inspector probes', () => {
+    // A cursor in the middle of cell (100, 50) is over buffer pixel (100, 50),
+    // rendered from the sample at grid coordinate (100, 50), not (100.5, 50.5).
+    expect(cssToBufferPixel(100.5, 50.5, 800, 600, 800, 600)).toEqual({ px: 100, py: 50 })
+    expect(cssToComplex(100.5, 50.5, view)).toEqual(viewport.pixelToComplex(100, 50))
   })
 
   it('reproduces the Rust pixel_to_complex_f anchor at the top-left pixel', () => {
     // Cross-check the literal formula (not the implementation): for center
-    // (0,0), zoom 1, 800×600, pixel (0,0) is (−399.5·scale, +299.5·scale).
-    const ref: ViewGeometry = { ...view, centerRe: 0, centerIm: 0 }
+    // (0,0), zoom 1, 800×600, pixel (0,0) is (−399.5·scale, +299.5·scale),
+    // drawn under the middle of the top-left cell.
+    const ref: ViewGeometry = { ...view, viewport: new Viewport(0, 0, 1, 800, 600) }
     const scale = pixelScale(1)
-    const c = cssToComplex(0, 0, ref)
+    const c = cssToComplex(0.5, 0.5, ref)
     expect(c.re).toBeCloseTo(-399.5 * scale, 12)
     expect(c.im).toBeCloseTo(299.5 * scale, 12)
   })
 
   it('honours the CSS↔logical display ratio when the canvas is stretched', () => {
-    // A 1600-CSS-wide canvas backed by an 800-logical grid: the CSS pixel that
-    // maps to the grid centre (logical 399.5, 299.5) lands on the viewport
-    // centre — 2× the logical coordinate at this ratio.
-    const stretched: ViewGeometry = { ...view, rectW: 1600, rectH: 1200 }
-    const c = cssToComplex(399.5 * 2, 299.5 * 2, stretched)
-    expect(c.re).toBeCloseTo(view.centerRe, 12)
-    expect(c.im).toBeCloseTo(view.centerIm, 12)
+    // A 1600×1200 CSS box over the 800×600 grid: the box's centre, 2× the
+    // logical one at this ratio, still lands on the viewport centre.
+    const stretched: ViewGeometry = { ...view, rect: { width: 1600, height: 1200 } }
+    const c = cssToComplex(800, 600, stretched)
+    expect(c.re).toBeCloseTo(viewport.centerRe, 12)
+    expect(c.im).toBeCloseTo(viewport.centerIm, 12)
   })
 })
 

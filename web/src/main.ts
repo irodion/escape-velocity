@@ -7,7 +7,6 @@ import '@fontsource/ibm-plex-mono/latin-400.css'
 import '@fontsource/ibm-plex-mono/latin-500.css'
 import '@fontsource-variable/martian-mono/wght.css'
 import { registerSW } from 'virtual:pwa-register'
-import init, { Viewport } from '../wasm/fractal_wasm.js'
 import { Controls, nearestMaxIterStop, pickJuliaSettings } from './controls.js'
 import { mountDrawer } from './drawer.js'
 import { buildFilename, computeExportDims, exportRenderedFrame } from './export-png.js'
@@ -16,7 +15,7 @@ import { defaultModeForField, isModeValidForField } from './field-modes.js'
 import { createGesturePhaseStore } from './gesture-phase.js'
 import { InputController } from './input.js'
 import { PixelInspector } from './inspector.js'
-import { OrbitOverlay, viewGeometry } from './orbit.js'
+import { OrbitOverlay } from './orbit.js'
 import { cssToComplex } from './orbit-math.js'
 import { mountProgress } from './progress.js'
 import { createPwaLifecycle } from './pwa-lifecycle.js'
@@ -40,6 +39,7 @@ import {
   type ViewState,
   zoomDepth,
 } from './view-state.js'
+import { clampZoom, Viewport } from './viewport.js'
 import { createViewportStore } from './viewport-store.js'
 import { fieldEnum, kindEnum, modeEnum, PALETTE_ACCENT, paletteEnum } from './wasm-enums.js'
 import type { RenderRequest } from './worker/protocol.js'
@@ -178,10 +178,12 @@ mountDrawer(controlsToggle, controlsForm, canvas)
 // a ready-made worker; Vite ships the worker and its WASM as their own chunk.
 //
 //  - `onFatal` routes unrecoverable renderer failures to a legible full-screen
-//    surface instead of a silent black canvas (B4 / U2). Supplying it also opts
-//    the client into boot-failure detection: a worker that stalls during
-//    init (a stripped cross-origin-isolation header, a WASM LinkError) surfaces
-//    the same panel after a few seconds rather than leaving the page to hang.
+//    surface instead of a silent black canvas (B4 / U2). WASM runs only in the
+//    worker (ADR-0015), so this is where a browser that can't run it is told.
+//    Supplying it also opts the client into boot-failure detection: a worker
+//    that stalls during init (a stripped cross-origin-isolation header, a WASM
+//    LinkError) surfaces the same panel after a few seconds rather than
+//    leaving the page to hang.
 //  - `progress` is the determinate indicator for slow deep renders (P2, #78).
 //    The client drives `begin`/`report`/`end` as a banded render streams its
 //    heartbeats; the mounted reporter owns the reveal debounce so fast frames
@@ -211,32 +213,11 @@ const { render, recolorize, probe, discardInFlight } = createRenderClient({
   // inspector is constructed (no probe can be issued before then anyway).
   onProbeResult: (result) => inspector?.showResult(result),
   isGestureActive,
-  // `input` is always set by the time this runs: the first render is issued
-  // after `await init()` below, and everything from there to the controller's
-  // construction is synchronous, so no response can paint in between.
+  // `input` is always set by the time this runs: everything from here to the
+  // controller's construction runs synchronously, so no response can paint in
+  // between.
   onRenderPainted: () => input?.onRenderPainted(),
 })
-
-// Initialise the WASM module on the main thread so the synchronous
-// `Viewport` class (used by the input controller and the dispatcher
-// below) is callable. The render worker bootstraps its own separate
-// WASM instance; the main thread no longer needs the `InitOutput`
-// handle now that pixel work has moved off-thread.
-//
-// A failure here (cross-origin isolation lost, instantiation error) leaves
-// the page with no usable `Viewport`, so surface it and stop boot rather
-// than letting later code throw cryptically against a dead module.
-try {
-  await init()
-} catch (error) {
-  const detail = error instanceof Error ? error.message : String(error)
-  showFatal(
-    'Renderer unavailable',
-    `The WebAssembly module failed to load: ${detail}. This browser or server ` +
-      'configuration may not support the renderer (it requires SharedArrayBuffer).',
-  )
-  throw error
-}
 
 // Version signal (O2, #92): announce which build is running. For a
 // continuously-deployed PWA this is the one reliable way to correlate a live
@@ -246,8 +227,9 @@ console.info(`Escape Velocity · build ${__APP_VERSION__}`)
 
 // The viewport's logical dimensions: the canvas's CSS box, rounded and
 // floored to ≥ 1 so a pre-layout or `display:none` canvas can't feed a
-// zero dimension to the WASM seam. Re-read after every layout change
-// (boot + window resize) so the fractal always fills the live window.
+// zero dimension to the `Viewport`, which rejects it. Re-read after every
+// layout change (boot + window resize) so the fractal always fills the live
+// window.
 // This is the *only* source of the logical size, so it relies on the
 // canvas being laid out to fill its intended area — see the full-bleed
 // flex rules for `#fractal` in index.html. A CSS refactor that changes
@@ -272,13 +254,16 @@ const measureLogicalSize = (): { width: number; height: number } => {
 // frame instead of always opening on the hardcoded seahorse. `parse` is
 // tolerant, so any field the hash omits or mangles falls back to the constant
 // default below and a junk hash degrades to the default view rather than
-// failing. Two values get a domain repair the codec can't own: `maxIter` is
-// snapped to a real slider stop (a stale count would otherwise throw in the
-// `Controls` constructor), and an incoherent (field, normalisation) pair is
-// replaced with the field's default — the same rule `Controls` enforces — so
-// `current`, the form, and the rendered frame always agree. `re`/`im` are
-// finite and `zoom` is finite & > 0 by `parse`'s contract, exactly what the
-// `Viewport` constructor validates, so it never throws on resolved input.
+// failing. Three values get a domain repair the codec can't own: `zoom` is
+// clamped to the range a gesture can reach (`clampZoom`; a zoom like 1e-310
+// would overflow the pixel maths, so every pan and zoom from it would throw),
+// `maxIter` is snapped to a real slider stop (a stale count would otherwise
+// throw in the `Controls` constructor), and an incoherent (field,
+// normalisation) pair is replaced with the field's default — the same rule
+// `Controls` enforces — so `current`, the form, and the rendered frame always
+// agree. `re`/`im` are finite and `zoom` is finite & > 0 by `parse`'s
+// contract, exactly what the `Viewport` constructor validates, so it never
+// throws on resolved input.
 //
 // Render scale is NOT carried in the hash (it's a device quality knob, not
 // part of the shared view), so the caller passes the scale to preserve: the
@@ -300,7 +285,8 @@ const resolveView = (
   hash: string,
   renderScale: number,
 ): { view: ViewState; settings: Settings } => {
-  const view: ViewState = { ...DEFAULT_VIEW, ...(parse(hash) ?? {}) }
+  const parsed: ViewState = { ...DEFAULT_VIEW, ...(parse(hash) ?? {}) }
+  const view: ViewState = { ...parsed, zoom: clampZoom(parsed.zoom) }
   const settings: Settings = {
     maxIter: nearestMaxIterStop(view.maxIter),
     renderScale,
@@ -336,11 +322,6 @@ const applyAccent = (palette: PaletteName): void => {
 }
 
 const rerender = (): void => {
-  // Flatten the `Viewport` instance into primitives: the wasm-bindgen
-  // class cannot survive `postMessage` to the worker, so the client
-  // ships the accessor values and the worker rebuilds a Viewport
-  // against its own WASM instance.
-  //
   // Render scale + the pixel budget are applied here, at the render
   // seam. `computeBufferDims` turns the logical (display) size into the
   // buffer the worker computes, and returns the *effective* scale once
@@ -354,16 +335,16 @@ const rerender = (): void => {
   // (see `paint` in render-client).
   const viewport = store.get()
   const { width, height, scale } = computeBufferDims(
-    viewport.width(),
-    viewport.height(),
+    viewport.width,
+    viewport.height,
     current.renderScale,
     MAX_RENDER_PIXELS,
   )
   render(
     {
-      centerRe: viewport.center_re(),
-      centerIm: viewport.center_im(),
-      zoom: viewport.zoom() * scale,
+      centerRe: viewport.centerRe,
+      centerIm: viewport.centerIm,
+      zoom: viewport.zoom * scale,
       width,
       height,
     },
@@ -396,9 +377,9 @@ let urlWriteTimer: ReturnType<typeof setTimeout> | undefined
 const currentViewState = (): ViewState => {
   const vp = store.get()
   return {
-    re: vp.center_re(),
-    im: vp.center_im(),
-    zoom: vp.zoom(),
+    re: vp.centerRe,
+    im: vp.centerIm,
+    zoom: vp.zoom,
     maxIter: current.maxIter,
     palette: current.palette,
     normalisation: current.normalisation,
@@ -536,24 +517,22 @@ input = new InputController(
   //    point and switches to Julia (O2, #92).
   //  - any other click seeds/pins the orbit at that point (E1, #94).
   // Both map the click through the frame it landed on, not the store, which
-  // lags a zoom Preview still on screen.
+  // lags a zoom Preview still on screen. The frame is a `ViewGeometry`, and
+  // the controller never reports a click on a degenerate box.
   (cssX, cssY, frame, modifiers) => {
-    const view = viewGeometry(frame.viewport, frame.rect)
     // A click that *began* while the drawer was open is a light-dismiss, not a
     // c-pick (the live `.open` class can't be used — the dismiss already
     // cleared it on the canvas `pointerup`; see `drawerOpenAtPress`).
     if (modifiers.altKey && current.mode === 'mandelbrot' && !drawerOpenAtPress) {
-      if (view !== null) {
-        const { re, im } = cssToComplex(cssX, cssY, view)
-        const next = pickJuliaSettings(current, re, im)
-        // Mirror the picked settings into the form (no emit), then run the
-        // dispatcher exactly as the hashchange handler does: branch 1 (mode
-        // change) resets to the Julia default view and rerenders with the
-        // picked c, and `syncView` persists the new view to the URL.
-        controls.applySettings(next)
-        applySettings(next)
-        syncView()
-      }
+      const { re, im } = cssToComplex(cssX, cssY, frame)
+      const next = pickJuliaSettings(current, re, im)
+      // Mirror the picked settings into the form (no emit), then run the
+      // dispatcher exactly as the hashchange handler does: branch 1 (mode
+      // change) resets to the Julia default view and rerenders with the
+      // picked c, and `syncView` persists the new view to the URL.
+      controls.applySettings(next)
+      applySettings(next)
+      syncView()
       return
     }
     // A click that began while the drawer was open is a light-dismiss, not an
@@ -562,7 +541,7 @@ input = new InputController(
     // controller's `pointerup` runs — so the same press-time flag must suppress
     // the pin. The flag re-arms on the next `pointerdown`, so no reset is needed.
     if (drawerOpenAtPress) return
-    orbitOverlay.pin(cssX, cssY, view)
+    orbitOverlay.pin(cssX, cssY, frame)
   },
 )
 
@@ -574,21 +553,21 @@ input = new InputController(
 // device rotation, or any reflow. Debounced so a continuous window drag
 // triggers a single recompute once it settles; in between, the
 // full-bleed canvas CSS-stretches the last buffer as a live preview.
-// `with_resolution` preserves center and zoom, so only the framing
+// `withResolution` preserves center and zoom, so only the framing
 // extent grows/shrinks with the box, never the set's proportions.
 let resizeTimer: ReturnType<typeof setTimeout> | undefined
 const refitToCanvas = (): void => {
   resizeTimer = undefined
   const { width, height } = measureLogicalSize()
   const viewport = store.get()
-  if (width === viewport.width() && height === viewport.height()) {
+  if (width === viewport.width && height === viewport.height) {
     return
   }
   // One `set` does the whole job: the store subscription rerenders, and the
   // InputController's subscription mirrors the resized viewport into its
   // working copy (and tears down any live wheel Preview) — the second job the
   // old `inputController.setViewport` call carried.
-  store.set(viewport.with_resolution(width, height), 'refit')
+  store.set(viewport.withResolution(width, height), 'refit')
 }
 // ResizeObserver delivers an initial callback on observe(); the no-op
 // guard above absorbs it, since the boot viewport already matches the
@@ -656,7 +635,7 @@ const applySettings = (rawNext: Settings): void => {
       // rerender and the InputController's Preview teardown.
       const { view } = transition
       const vp = store.get()
-      store.set(new Viewport(view.re, view.im, view.zoom, vp.width(), vp.height()), 'mode-reset')
+      store.set(new Viewport(view.re, view.im, view.zoom, vp.width, vp.height), 'mode-reset')
       break
     }
     case 'recompute':
@@ -713,7 +692,7 @@ window.addEventListener('hashchange', () => {
   })
   inspector?.sync({ mode: settings.mode, field: settings.field, enabled: settings.inspect })
   const live = store.get()
-  store.set(new Viewport(view.re, view.im, view.zoom, live.width(), live.height()), 'hashchange')
+  store.set(new Viewport(view.re, view.im, view.zoom, live.width, live.height), 'hashchange')
 })
 
 // PNG export (O2, #92). Both buttons render the *requested* (latest committed)
@@ -727,19 +706,15 @@ window.addEventListener('hashchange', () => {
 const EXPORT_SUPERSAMPLE = 2
 const buildExportRequest = (multiplier: number): RenderRequest => {
   const viewport = store.get()
-  const { width, height, scale } = computeExportDims(
-    viewport.width(),
-    viewport.height(),
-    multiplier,
-  )
+  const { width, height, scale } = computeExportDims(viewport.width, viewport.height, multiplier)
   return {
     kind: 'render',
     epoch: 0, // a one-shot worker; epoch coalescing does not apply
     width,
     height,
-    centerRe: viewport.center_re(),
-    centerIm: viewport.center_im(),
-    zoom: viewport.zoom() * scale,
+    centerRe: viewport.centerRe,
+    centerIm: viewport.centerIm,
+    zoom: viewport.zoom * scale,
     maxIter: current.maxIter,
     palette: paletteEnum(current.palette),
     mode: modeEnum(current.normalisation),

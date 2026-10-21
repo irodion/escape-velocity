@@ -59,6 +59,7 @@ See the [roadmap](#roadmap) for the slice sequence.
 | Zoom feedback  | Instant CSS-transform Preview while zooming; one debounced Settle computes the frame. | [0012](docs/decisions/0012-instant-zoom-feedback-transform-preview.md) |
 | Field          | Escape Time or Distance Estimate, chosen at compute time; `colorize` stays Field-blind. | [0013](docs/decisions/0013-distance-estimate-as-a-field.md) |
 | Input          | Pointer Events throughout; two-finger pinch-zoom reuses the Preview/Settle.       | [0014](docs/decisions/0014-pointer-events-and-pinch-zoom.md) |
+| Viewport maths | A TypeScript port on the main thread, exact to the Rust one; WASM loads only in the workers. | [0015](docs/decisions/0015-main-thread-viewport-in-typescript.md) |
 
 Every row is backed by an [ADR](docs/decisions/) that records the context, the
 decision, and the trade-offs — including the options we rejected.
