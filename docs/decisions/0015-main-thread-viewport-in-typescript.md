@@ -40,9 +40,8 @@ Having both paid the costs of both:
 
 1. It is an immutable class: `pixelScale`, `pixelToComplex`, `panByPixels`,
    `zoomAround`, `withResolution`, the constants (`REFERENCE_WIDTH`,
-   `BASE_RE_SPAN`) and the zoom clamp (`MIN_ZOOM`, `MAX_ZOOM`). It also has
-   `complexToPixel`, the inverse projection, which the compute never needs.
-   The validation the binding did (finite inputs, zoom and factor > 0,
+   `BASE_RE_SPAN`) and the zoom clamp (`MIN_ZOOM`, `MAX_ZOOM`). The
+   validation the binding did (finite inputs, zoom and factor > 0,
    whole-pixel dimensions) moves with it, and a permalink's zoom is clamped
    to the range a gesture can reach when it is read.
 2. **One CSS → grid mapping.** `cssToGrid` scales a CSS point by the grid over
@@ -50,7 +49,8 @@ Having both paid the costs of both:
    zoom anchor, the Alt-click picker, the orbit and the inspector readout all
    go through it, then through `pixelToComplex`. `orbit-math`'s own copy of
    the constants and the pixel scale is gone, so the main thread has one
-   implementation. (The click, hover and inspector mappings used to skip the
+   implementation. So is its inverse, `complexToCss`, which nothing but its
+   tests called. (The click, hover and inspector mappings used to skip the
    half pixel, so they named a point half a pixel off the sample under the
    cursor; they no longer do.)
 3. **`main.ts` no longer loads WASM.** Only the render worker and the export's

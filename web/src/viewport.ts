@@ -3,7 +3,7 @@
  * TypeScript port of `fractal_core::Viewport` (`crates/fractal-core/src/viewport.rs`).
  *
  * The main thread needs only the geometry: pan, cursor-anchored zoom, resize,
- * and the pixel ↔ complex projection that the orbit overlay, the inspector and
+ * and the pixel → complex projection that the orbit overlay, the inspector and
  * the Julia picker map the cursor with. It used to get them by instantiating
  * the whole threaded WASM module a second time, beside the worker's, for this
  * one class. Rust stays the source of truth for the compute: the worker
@@ -118,20 +118,6 @@ export class Viewport {
     return {
       re: this.centerRe + (px - midX) * scale,
       im: this.centerIm - (py - midY) * scale,
-    }
-  }
-
-  /**
-   * The grid position that samples `(re, im)`: the inverse of
-   * {@link pixelToComplex}. TypeScript only; the compute never maps this way.
-   */
-  complexToPixel(re: number, im: number): { x: number; y: number } {
-    const scale = this.pixelScale()
-    const midX = (this.width - 1) / 2
-    const midY = (this.height - 1) / 2
-    return {
-      x: midX + (re - this.centerRe) / scale,
-      y: midY - (im - this.centerIm) / scale,
     }
   }
 
