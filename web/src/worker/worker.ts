@@ -182,8 +182,9 @@ function handleMessage(
   if (msg.kind === 'recolorize') {
     // Fast path (ADR-0002): no per-band work to cancel, run it straight
     // through. Per the client's single-in-flight contract a recolorize never
-    // races a render; one that followed an abandoned render finds a partial
-    // frame, which WASM refuses to colour, and gets a recoverable `error`.
+    // races a render, and the client only sends one for a frame that is on
+    // screen or about to be (it drops one after an abandoned render). WASM
+    // still refuses to colour a partial frame; that gets a recoverable `error`.
     try {
       const result = handleRecolorize(msg, wasm)
       ctx.postMessage(result.response, result.transfer)
