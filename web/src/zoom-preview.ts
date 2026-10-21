@@ -1,4 +1,4 @@
-import type { Viewport } from '../wasm/fractal_wasm.js'
+import type { Viewport } from './viewport.js'
 
 /**
  * Pure accumulator for the wheel-zoom **Preview** (ADR-0012; the
@@ -8,7 +8,7 @@ import type { Viewport } from '../wasm/fractal_wasm.js'
  * sequence into two representations held in lockstep:
  *
  *  - the **authoritative Viewport**, advanced once per notch via
- *    `Viewport.zoom_around` (the cursor-invariant zoom of ADR-0011);
+ *    `Viewport.zoomAround` (the cursor-invariant zoom of ADR-0011);
  *  - the **CSS transform matrix** that scales the on-screen frame to
  *    approximate that viewport — a pure screen-space stand-in painted
  *    instantly while the real recompute is deferred to the Settle.
@@ -17,23 +17,23 @@ import type { Viewport } from '../wasm/fractal_wasm.js'
  * (no rotation), expressed in the canvas's CSS-pixel box with
  * `transform-origin` at its top-left (set in `index.html`). It carries
  * no DOM and no timers, so the whole scrub is unit-testable against a
- * `Viewport` double.
+ * real `Viewport`.
  *
  * ## Why the matrix is driven by the *realized* zoom ratio
  *
  * Each notch composes a scale-about-cursor step whose factor is
- * `next.zoom() / current.zoom()` — the ratio the viewport **actually**
+ * `next.zoom / current.zoom` — the ratio the viewport **actually**
  * moved — not the raw wheel factor. At the `MIN_ZOOM` / `MAX_ZOOM`
- * clamp, `zoom_around` stops advancing, so the realized ratio collapses
+ * clamp, `zoomAround` stops advancing, so the realized ratio collapses
  * to `1.0` and the Preview freezes in exact step with the viewport. The
  * two can never drift, so the Settle frame always matches what was on
  * screen — no snap at the clamp.
  */
 export interface ZoomPreview {
-  /** Authoritative viewport, advanced via `zoom_around` per notch. */
+  /** Authoritative viewport, advanced via `zoomAround` per notch. */
   readonly viewport: Viewport
   /** Accumulated uniform scale, relative to the frame on screen when the
-   *  scrub began. Equals `viewport.zoom() / startZoom` by construction. */
+   *  scrub began. Equals `viewport.zoom / startZoom` by construction. */
   readonly scale: number
   /** Accumulated translation in CSS pixels, paired with `scale` as the
    *  affine `p ↦ scale·p + (tx, ty)`. */
@@ -54,10 +54,10 @@ export function beginZoomPreview(viewport: Viewport): ZoomPreview {
  * Fold one wheel notch into the Preview.
  *
  * `zoomPixelX` / `zoomPixelY` are the cursor in the viewport's logical
- * pixel grid (what `zoom_around` consumes). `anchorX` / `anchorY` are the
+ * pixel grid (what `zoomAround` consumes). `anchorX` / `anchorY` are the
  * same cursor in the canvas's CSS-pixel box (what the transform anchors
  * on). They scale by the same display ratio, so the screen point the
- * matrix holds fixed is exactly the complex-plane point `zoom_around`
+ * matrix holds fixed is exactly the complex-plane point `zoomAround`
  * holds fixed — the Preview tracks the true zoom.
  */
 export function applyZoomNotch(
@@ -68,10 +68,10 @@ export function applyZoomNotch(
   anchorY: number,
   factor: number,
 ): ZoomPreview {
-  const next = preview.viewport.zoom_around(zoomPixelX, zoomPixelY, factor)
+  const next = preview.viewport.zoomAround(zoomPixelX, zoomPixelY, factor)
   // The realized ratio (see module doc) — 1.0 at the clamp, so the
   // Preview freezes exactly when the viewport stops advancing.
-  const realized = next.zoom() / preview.viewport.zoom()
+  const realized = next.zoom / preview.viewport.zoom
   // Compose a scale-about-(anchorX, anchorY) step of `realized` onto the
   // existing affine. A lone scale-about-`a` is `p ↦ realized·p +
   // a·(1−realized)`; composing it *after* `p ↦ scale·p + t` gives the

@@ -1,5 +1,5 @@
-import type { Viewport } from '../wasm/fractal_wasm.js'
 import type { GesturePhaseStore } from './gesture-phase.js'
+import type { Viewport } from './viewport.js'
 import type { ViewportStore } from './viewport-store.js'
 import {
   applyZoomNotch,
@@ -74,7 +74,7 @@ export const CLICK_SLOP_PX = 4
  * stays on the GPU and is ~an order of magnitude cheaper than the
  * `putImageData` it replaced (#82), which wrote the full ~10 MB pixel
  * buffer on the main thread every move. The canvas DOM element
- * itself never moves. On `pointerup`, one `pan_by_pixels` call produces
+ * itself never moves. On `pointerup`, one `panByPixels` call produces
  * the final viewport and one store write hands it off.
  *
  * ## Pinch semantics (two pointers)
@@ -105,7 +105,7 @@ export const CLICK_SLOP_PX = 4
  *    CSS → buffer pixels using `canvas.width / boundingRect.width`.
  *  - **pan/zoom** operate on the viewport, whose dimensions are the
  *    logical grid, so they scale CSS → logical pixels using
- *    `viewport.width() / boundingRect.width`.
+ *    `viewport.width / boundingRect.width`.
  *
  * When render scale is 1 (buffer == logical) the two ratios coincide,
  * which is the only case the original code had to handle.
@@ -118,10 +118,11 @@ export const CLICK_SLOP_PX = 4
  * image inside the buffer keeps the canvas element stationary, so
  * only the content moves — same as a native pan.
  *
- * The pan sign matches `fractal_core::Viewport::pan_by_pixels`:
- * dragging the canvas right by `dx` CSS pixels corresponds to the
- * image shifting right by `dx_internal` pixels, which is exactly
- * `pan_by_pixels(+dx_internal, +dy_internal)`. (This deviates from
+ * The pan sign matches `Viewport.panByPixels`, a mirror of
+ * `fractal_core::Viewport::pan_by_pixels`: dragging the canvas right by
+ * `dx` CSS pixels corresponds to the image shifting right by
+ * `dx_internal` pixels, which is exactly
+ * `panByPixels(+dx_internal, +dy_internal)`. (This deviates from
  * the literal `-dx_internal, -dy_internal` written in issue #9 — that
  * spec assumed the opposite convention from what Slice 2A landed.
  * The Slice 2A `pan_by_pixels` doc-comment and tests are the
@@ -132,7 +133,7 @@ export const CLICK_SLOP_PX = 4
  * `factor = 1.25 ^ (-deltaY / 100)` — a continuous exponential so
  * trackpads (many small deltas) and discrete wheel notches (one
  * `±100` per click) both feel right. The cursor position is mapped
- * through the same CSS→internal scaling and handed to `zoom_around`,
+ * through the same CSS→internal scaling and handed to `zoomAround`,
  * which keeps the complex-plane point under the cursor invariant.
  *
  * Wheel zoom mirrors pan's "respond now, compute once at the end"
@@ -513,7 +514,7 @@ export class InputController {
     // the same object for a drag with no concurrent resize, but a debounced
     // `refitToCanvas` (ResizeObserver) can fire mid-drag and `set` a viewport
     // at new dimensions — which our store subscription has already mirrored
-    // into `currentViewport`. `with_resolution` preserves center and zoom, so
+    // into `currentViewport`. `withResolution` preserves center and zoom, so
     // `currentViewport` still depicts the same framing the dragged snapshot
     // shows — only its width/height are refreshed to the live box. Panning
     // from the stale snapshot instead would commit its old dimensions,
@@ -528,9 +529,9 @@ export class InputController {
     // of render scale — and by the *live* dimensions, matching the
     // post-resize `rect`.
     const base = this.currentViewport
-    const dxInternal = (dxCss * base.width()) / rect.width
-    const dyInternal = (dyCss * base.height()) / rect.height
-    const next = base.pan_by_pixels(dxInternal, dyInternal)
+    const dxInternal = (dxCss * base.width) / rect.width
+    const dyInternal = (dyCss * base.height) / rect.height
+    const next = base.panByPixels(dxInternal, dyInternal)
     this.currentViewport = next
     this.store.set(next, 'gesture')
   }
@@ -580,14 +581,14 @@ export class InputController {
 
   /**
    * Map a CSS-pixel cursor position to the logical-grid sample point that
-   * `Viewport.zoom_around` (and `pixel_to_complex_f`) consume. Both the wheel
+   * `Viewport.zoomAround` (and `pixelToComplex`) consume. Both the wheel
    * and pinch zoom feeders go through here, so the convention lives in one
    * place (B5, #76).
    *
    * Two corrections are folded in:
    *  - Scale by the viewport's *logical* dimensions over `rect`, not the
    *    render buffer, so the anchored point is correct at any render scale.
-   *  - Subtract a half-pixel. `pixel_to_complex_f` samples index j at
+   *  - Subtract a half-pixel. `pixelToComplex` samples index j at
    *    coordinate j, so the sample for buffer pixel j is displayed across the
    *    screen cell [j, j+1) centred at j+0.5. The cursor's CSS coordinate is
    *    cell-edge, so the buffer position under it is `cssX·scale`; the −0.5
@@ -599,8 +600,8 @@ export class InputController {
    */
   private cssToGridSample(cssX: number, cssY: number, rect: DOMRect): [number, number] {
     return [
-      (cssX * this.currentViewport.width()) / rect.width - 0.5,
-      (cssY * this.currentViewport.height()) / rect.height - 0.5,
+      (cssX * this.currentViewport.width) / rect.width - 0.5,
+      (cssY * this.currentViewport.height) / rect.height - 0.5,
     ]
   }
 

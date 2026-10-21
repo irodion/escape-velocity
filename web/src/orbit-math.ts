@@ -1,29 +1,16 @@
+import type { Viewport } from './viewport.js'
+
 /**
  * Pure maths for the orbit visualizer (E1, #94): iterate a single point's
  * `z = z² + c` orbit in plain TS, and project complex-plane points to/from CSS
  * pixels on the overlay canvas.
  *
- * Everything here takes primitives rather than the opaque wasm `Viewport`
- * class, so the whole module is unit-testable without booting wasm. The
- * constants and the projection formula are a deliberate mirror of the Rust
- * source of truth (`crates/fractal-core/src/viewport.rs`, `lib.rs`'s
- * `BAILOUT_SQR`, and `escape_time.rs`'s iteration) — iterating one point is
- * microseconds, so E1 stays
- * entirely on the TS side with no wasm/protocol change (per the issue).
+ * The projection is the viewport's own (`viewport.ts`) plus the CSS ↔ grid
+ * display ratio. The iteration and `BAILOUT_SQR` are a deliberate mirror of the
+ * Rust source of truth (`lib.rs`'s `BAILOUT_SQR` and `escape_time.rs`'s
+ * iteration): iterating one point is microseconds, so E1 stays entirely on the
+ * TS side with no wasm/protocol change (per the issue).
  */
-
-/**
- * The buffer width at which `zoom = 1.0` spans [`BASE_RE_SPAN`] of the real
- * axis. The per-pixel scale is keyed to this fixed value, not the live buffer
- * width (ADR-0011). Mirror of `REFERENCE_WIDTH` in `viewport.rs`.
- */
-export const REFERENCE_WIDTH = 800
-
-/**
- * Real-axis span at `zoom = 1.0` and `width = REFERENCE_WIDTH`. Mirror of
- * `BASE_RE_SPAN` in `viewport.rs`.
- */
-export const BASE_RE_SPAN = 3.5
 
 /**
  * Escape threshold on `|z|²`. The renderer bails at `|z| > 256`, i.e.
@@ -34,23 +21,13 @@ export const BASE_RE_SPAN = 3.5
  */
 export const BAILOUT_SQR = 65_536
 
-/** Complex-plane size of one reference pixel — mirrors `Viewport::pixel_scale`. */
-export function pixelScale(zoom: number): number {
-  return BASE_RE_SPAN / REFERENCE_WIDTH / zoom
-}
-
 /**
- * The view geometry the projection needs, flattened from the wasm `Viewport`
- * plus the overlay canvas's CSS box. `logicalW`/`logicalH` are the viewport's
- * logical grid (`viewport.width()`/`height()`); `rectW`/`rectH` are the CSS
- * pixel size the canvas is displayed at.
+ * A viewport plus the CSS box its canvas is displayed at (`rectW`/`rectH`,
+ * `getBoundingClientRect`'s size). The viewport's logical grid and the box
+ * differ by the display ratio, which the projection undoes.
  */
 export interface ViewGeometry {
-  readonly centerRe: number
-  readonly centerIm: number
-  readonly zoom: number
-  readonly logicalW: number
-  readonly logicalH: number
+  readonly viewport: Viewport
   readonly rectW: number
   readonly rectH: number
 }
@@ -90,19 +67,15 @@ export function traceOrbit(
 }
 
 /**
- * Project a complex-plane point to a CSS pixel on the overlay. The inverse of
- * the Rust `pixel_to_complex_f`, then logical → CSS by the display ratio.
- * Image-y is negated (the imaginary axis grows up, image-y grows down).
+ * Project a complex-plane point to a CSS pixel on the overlay: the viewport's
+ * grid position for it, then logical → CSS by the display ratio.
  */
 export function complexToCss(re: number, im: number, view: ViewGeometry): { x: number; y: number } {
-  const scale = pixelScale(view.zoom)
-  const midX = (view.logicalW - 1) / 2
-  const midY = (view.logicalH - 1) / 2
-  const logicalX = midX + (re - view.centerRe) / scale
-  const logicalY = midY - (im - view.centerIm) / scale
+  const { viewport } = view
+  const grid = viewport.complexToPixel(re, im)
   return {
-    x: (logicalX * view.rectW) / view.logicalW,
-    y: (logicalY * view.rectH) / view.logicalH,
+    x: (grid.x * view.rectW) / viewport.width,
+    y: (grid.y * view.rectH) / viewport.height,
   }
 }
 
@@ -131,19 +104,15 @@ export function revealedCount(
 }
 
 /**
- * Map a CSS pixel on the overlay back to its complex-plane point. CSS → logical
- * by the display ratio, then the Rust `pixel_to_complex_f` formula.
+ * Map a CSS pixel on the overlay back to its complex-plane point: CSS → logical
+ * by the display ratio, then the viewport's `pixelToComplex`.
  */
 export function cssToComplex(x: number, y: number, view: ViewGeometry): { re: number; im: number } {
-  const scale = pixelScale(view.zoom)
-  const midX = (view.logicalW - 1) / 2
-  const midY = (view.logicalH - 1) / 2
-  const logicalX = (x * view.logicalW) / view.rectW
-  const logicalY = (y * view.logicalH) / view.rectH
-  return {
-    re: view.centerRe + (logicalX - midX) * scale,
-    im: view.centerIm - (logicalY - midY) * scale,
-  }
+  const { viewport } = view
+  return viewport.pixelToComplex(
+    (x * viewport.width) / view.rectW,
+    (y * viewport.height) / view.rectH,
+  )
 }
 
 /**

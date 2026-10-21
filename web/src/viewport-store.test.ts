@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { Viewport } from '../wasm/fractal_wasm.js'
+import type { Viewport } from './viewport.js'
 import { createViewportStore } from './viewport-store.js'
 
 // Sentinel viewports — the store never inspects them, it only stores and

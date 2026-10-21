@@ -2,8 +2,7 @@
 //!
 //! The viewport is the only input `compute` needs to know *where* to
 //! sample the Mandelbrot set. It encodes the project's coordinate
-//! convention so that every layer above (WASM binding, TS glue) can
-//! treat the math as opaque.
+//! convention, which the main thread mirrors in TypeScript (see below).
 //!
 //! ## Coordinate convention
 //!
@@ -22,6 +21,13 @@
 //! downwards; the imaginary axis grows upwards — so the y-mapping is
 //! negated. The geometric centre of the pixel grid maps to
 //! `viewport.center`.
+//!
+//! ## The TypeScript mirror
+//!
+//! The main thread pans, zooms and maps the cursor with a TypeScript
+//! port of this type, `web/src/viewport.ts`, so it never loads the WASM
+//! module (ADR-0015). The port keeps every formula's operation order, so
+//! the two agree bit for bit. A change here needs the same change there.
 //!
 //! See ADR-0011 for why the scale is keyed to a fixed reference width
 //! rather than the live buffer width.
