@@ -270,11 +270,12 @@ describe('render-client', () => {
     expect(onRenderPainted).toHaveBeenCalledTimes(1)
   })
 
-  it('paints a render with a recolorize queued behind it, then re-tints it (#182)', () => {
+  it('a recolorize queued behind a render paints its frame, ending the Preview (#182)', () => {
     // A palette change while the Settle render is in flight must not cost that
-    // render its paint: the paint is what ends the zoom Preview. Dropped, the
+    // frame its paint, which is what ends the zoom Preview. Dropped, the
     // recolorize would re-tint the render's frame (the worker's cache) under a
-    // Preview still scaling the pre-zoom frame — zoomed twice.
+    // Preview still scaling the pre-zoom frame — zoomed twice. Instead the
+    // recolorize paints the fresh frame, once, in the new colours.
     const onRenderPainted = vi.fn()
     const { client, worker } = makeClient({ onRenderPainted })
     const ctx = makeCtx()
@@ -284,12 +285,41 @@ describe('render-client', () => {
     client.recolorize(ctx, PALETTE_MAGMA, MODE_HISTOGRAM) // epoch 2, queued
     deliver(worker, response(1))
 
-    expect(ctx.putImageData).toHaveBeenCalledTimes(1)
-    expect(onRenderPainted).toHaveBeenCalledTimes(1)
+    // Not painted in the old colours; the recolorize goes straight out.
+    expect(ctx.putImageData).not.toHaveBeenCalled()
+    expect(onRenderPainted).not.toHaveBeenCalled()
     expect(postedEpochs(worker)).toEqual([1, 2])
     deliver(worker, response(2))
+    expect(ctx.putImageData).toHaveBeenCalledTimes(1)
+    expect(onRenderPainted).toHaveBeenCalledTimes(1)
+    const paintOrder = (ctx.putImageData as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]
+    expect(onRenderPainted.mock.invocationCallOrder[0]).toBeLessThan(paintOrder)
+
+    // A later recolorize re-tints the frame now on screen: the Preview is
+    // already gone, and nothing new ends it.
+    client.recolorize(ctx, PALETTE_VIRIDIS, MODE_CYCLED) // epoch 3
+    deliver(worker, response(3))
     expect(ctx.putImageData).toHaveBeenCalledTimes(2)
     expect(onRenderPainted).toHaveBeenCalledTimes(1)
+  })
+
+  it('a recolorize that took over a render is dropped once a discard moves past it (#182)', () => {
+    // The user scrolls again before the re-tinted frame lands: that frame is no
+    // longer wanted, so neither its paint nor a later re-tint may show it.
+    const onRenderPainted = vi.fn()
+    const { client, worker, ctx } = readyWithStableFrame({ onRenderPainted })
+    onRenderPainted.mockClear()
+
+    doRender(client, ctx) // epoch 2
+    client.recolorize(ctx, PALETTE_MAGMA, MODE_HISTOGRAM) // epoch 3
+    deliver(worker, response(2)) // deferred to the recolorize
+    client.discardInFlight() // epoch 4
+    deliver(worker, response(3)) // stale
+    client.recolorize(ctx, PALETTE_VIRIDIS, MODE_CYCLED) // epoch 5: cache not wanted
+
+    expect(postedEpochs(worker)).toEqual([1, 2, 3])
+    expect(ctx.putImageData).toHaveBeenCalledTimes(1) // the stable frame only
+    expect(onRenderPainted).not.toHaveBeenCalled()
   })
 
   it('drops a recolorize whose cached frame never reached the canvas (#182)', () => {
@@ -345,6 +375,62 @@ describe('render-client', () => {
     doRender(client, ctx) // epoch 1
     deliverError(worker, 1, 'compute: invalid viewport')
     expect(onRenderPainted).not.toHaveBeenCalled()
+  })
+
+  it('trusts no cached frame after a render fails: no re-tint, no probe (#182)', () => {
+    // A render can fail after its bands land (colorize, the RGBA copy), leaving
+    // a complete frame the canvas never showed. The client can't tell that from
+    // a failure that left the cache alone, so it trusts neither until a render
+    // lands.
+    const { client, worker, ctx } = readyWithStableFrame()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    doRender(client, ctx) // epoch 2
+    client.recolorize(ctx, PALETTE_MAGMA, MODE_HISTOGRAM) // epoch 3, queued
+    deliverError(worker, 2, 'colorize failed')
+    expect(postedEpochs(worker)).toEqual([1, 2])
+    expect(client.probe(1, 1, PALETTE_VIRIDIS, MODE_CYCLED)).toBe(false)
+
+    doRender(client, ctx) // epoch 4
+    deliver(worker, response(4))
+    client.recolorize(ctx, PALETTE_MAGMA, MODE_HISTOGRAM) // epoch 5
+    expect(postedEpochs(worker)).toEqual([1, 2, 4, 5])
+    deliver(worker, response(5))
+    expect(client.probe(1, 1, PALETTE_VIRIDIS, MODE_CYCLED)).toBe(true)
+  })
+
+  it('a render whose paint throws counts as cached but not shown', () => {
+    // So a probe holds off, and a recolorize, still wanting that frame,
+    // paints it as a new frame.
+    const onRenderPainted = vi.fn()
+    const { client, worker, ctx } = readyWithStableFrame({ onRenderPainted })
+    onRenderPainted.mockClear()
+    ;(ctx.putImageData as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error('paint failed')
+    })
+
+    doRender(client, ctx) // epoch 2
+    expect(() => deliver(worker, response(2))).toThrow('paint failed')
+    expect(client.probe(1, 1, PALETTE_VIRIDIS, MODE_CYCLED)).toBe(false)
+
+    client.recolorize(ctx, PALETTE_MAGMA, MODE_HISTOGRAM) // epoch 3
+    expect(postedEpochs(worker)).toEqual([1, 2, 3])
+    deliver(worker, response(3))
+    expect(onRenderPainted).toHaveBeenCalledTimes(2) // the failed paint, then this one
+    expect(client.probe(1, 1, PALETTE_VIRIDIS, MODE_CYCLED)).toBe(true)
+  })
+
+  it('a failed recolorize leaves the cached frame trusted', () => {
+    // It re-tints without touching geometry, so the frame on screen is still
+    // the worker's cache.
+    const { client, worker, ctx } = readyWithStableFrame()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    client.recolorize(ctx, PALETTE_MAGMA, MODE_HISTOGRAM) // epoch 2
+    deliverError(worker, 2, 'colorize failed')
+    expect(client.probe(1, 1, PALETTE_VIRIDIS, MODE_CYCLED)).toBe(true)
+    client.recolorize(ctx, PALETTE_VIRIDIS, MODE_CYCLED) // epoch 3
+    expect(postedEpochs(worker)).toEqual([1, 2, 3])
   })
 
   it('drops a stale response (epoch behind the latest issued)', () => {
