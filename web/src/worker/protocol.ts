@@ -1,20 +1,16 @@
 /**
  * Wire-protocol types for the Slice 6 render worker.
  *
- * The main thread and the worker each own an independent WASM instance.
- * Wasm-bindgen-generated class instances (e.g. `Viewport`) cannot
- * survive `postMessage`: structured-clone preserves shape but breaks
- * class identity across realms, and the wasm-bindgen prototype
- * machinery cannot be reattached on the receiving side. So the main
- * thread flattens its `Viewport` into the five primitives below (via
- * the wasm getters added alongside this file) and the worker
- * reconstructs a fresh `Viewport` against its own WASM instance.
+ * Only the worker loads the WASM module; the main thread works with a
+ * TypeScript `Viewport` (ADR-0015). A request carries the view as the
+ * five primitives below, and the worker builds a WASM `Viewport` from
+ * them for the render.
  *
  * Both ends import the protocol types from this single module so the
  * wire shape cannot drift. `Palette` / `NormalizationMode` /
  * `FractalKind` are re-exported from the wasm bindings as **types
- * only** — the values live on each side's own WASM module, but the
- * shared identity comes from the same `.d.ts`. Keep this file pure
+ * only** — each side imports the values from the generated glue, and
+ * the shared identity comes from the same `.d.ts`. Keep this file pure
  * `import type` so no wasm module loads as a side effect of importing
  * the protocol.
  *

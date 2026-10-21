@@ -1,40 +1,36 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Viewport } from '../wasm/fractal_wasm.js'
 import { createGesturePhaseStore, type GesturePhaseStore } from './gesture-phase.js'
 import { InputController, WHEEL_SETTLE_MS } from './input.js'
+import type { Viewport } from './viewport.js'
 import { createViewportStore, type ViewportStore } from './viewport-store.js'
 
-// Plain JS double for Viewport. The InputController calls
-// `pan_by_pixels` / `zoom_around` (which produce new viewports) and
-// reads `zoom()` (for the Preview's realized ratio) and `width()` /
-// `height()` (the logical grid it maps CSS deltas onto), so a structural
-// double covers the surface. The pan/zoom methods are `vi.fn`s returning
-// a sentinel viewport so we can assert which call produced the `onChange`
-// argument; `width`/`height` report the logical 800×600 grid (the
-// production display size); `zoom` defaults to 1.
-function makeViewportDouble(): {
-  pan_by_pixels: ReturnType<typeof vi.fn>
-  zoom_around: ReturnType<typeof vi.fn>
-  zoom: ReturnType<typeof vi.fn>
-  width: ReturnType<typeof vi.fn>
-  height: ReturnType<typeof vi.fn>
+// A structural double for Viewport, so a test can assert which viewport a pan or
+// zoom ran on, and with what. The InputController calls `panByPixels` /
+// `zoomAround` (which produce new viewports) and reads `zoom` (for the
+// Preview's realized ratio) and `width` / `height` (the logical grid it maps
+// CSS deltas onto). The pan/zoom methods are `vi.fn`s returning a sentinel
+// viewport so we can assert which call produced the `onChange` argument; the
+// grid defaults to the logical 800×600 (the production display size) and the
+// zoom to 1.
+function makeViewportDouble(
+  zoom = 1,
+  width = 800,
+  height = 600,
+): {
+  panByPixels: ReturnType<typeof vi.fn>
+  zoomAround: ReturnType<typeof vi.fn>
+  zoom: number
+  width: number
+  height: number
 } {
-  return {
-    pan_by_pixels: vi.fn(),
-    zoom_around: vi.fn(),
-    zoom: vi.fn(() => 1),
-    width: vi.fn(() => 800),
-    height: vi.fn(() => 600),
-  }
+  return { panByPixels: vi.fn(), zoomAround: vi.fn(), zoom, width, height }
 }
 
-// A zoom_around result that carries its own `zoom()` (the Preview reads
-// it to compute the realized ratio) and is itself a full double so a
-// follow-up notch in the same scrub can zoom from it.
+// A zoomAround result that carries its own `zoom` (the Preview reads it to
+// compute the realized ratio) and is itself a full double so a follow-up notch
+// in the same scrub can zoom from it.
 function makeZoomResult(zoom: number): ReturnType<typeof makeViewportDouble> {
-  const vp = makeViewportDouble()
-  vp.zoom.mockReturnValue(zoom)
-  return vp
+  return makeViewportDouble(zoom)
 }
 
 function setRect(
@@ -168,7 +164,7 @@ describe('InputController', () => {
 
   it('emits exactly one onChange on pointerup, none during pointermove', () => {
     const panned = { sentinel: 'panned' } as unknown as Viewport
-    viewport.pan_by_pixels.mockReturnValue(panned)
+    viewport.panByPixels.mockReturnValue(panned)
     mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
@@ -182,8 +178,8 @@ describe('InputController', () => {
     // dx = 150 - 100 = 50, dy = 90 - 50 = 40. Rect matches internal,
     // so internal deltas equal CSS deltas. Sign matches Slice 2A:
     // positive delta = image shifts in that direction.
-    expect(viewport.pan_by_pixels).toHaveBeenCalledTimes(1)
-    expect(viewport.pan_by_pixels).toHaveBeenCalledWith(50, 40)
+    expect(viewport.panByPixels).toHaveBeenCalledTimes(1)
+    expect(viewport.panByPixels).toHaveBeenCalledWith(50, 40)
   })
 
   it('maps pan by the logical viewport grid, not the render buffer, when they differ', () => {
@@ -191,36 +187,34 @@ describe('InputController', () => {
     // the viewport's logical grid (800×600), while the CSS display stays
     // 800×600. A drag must move the viewport by *logical* pixels (so the
     // pan distance is independent of render scale) — i.e. scaled by
-    // viewport.width()/rect.width (= 1 here), NOT canvas.width/rect.width
+    // viewport.width/rect.width (= 1 here), NOT canvas.width/rect.width
     // (= 2), which would double the pan.
     canvas.width = 1600
     canvas.height = 1200
     setRect(canvas, { width: 800, height: 600 })
     const panned = { sentinel: 'panned' } as unknown as Viewport
-    viewport.pan_by_pixels.mockReturnValue(panned)
+    viewport.panByPixels.mockReturnValue(panned)
     mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
     canvas.dispatchEvent(pe('pointerup', { clientX: 150, clientY: 90 }))
     // dx = 50, dy = 40 CSS; logical mapping (800/800, 600/600) leaves
     // them unchanged. Buffer mapping would have produced (100, 80).
-    expect(viewport.pan_by_pixels).toHaveBeenCalledWith(50, 40)
+    expect(viewport.panByPixels).toHaveBeenCalledWith(50, 40)
   })
 
   it('commits the pan from the live (refitted) viewport when a resize fires mid-drag', () => {
     // B1 regression. A debounced `refitToCanvas` (ResizeObserver) can fire
     // mid-drag and `store.set` a viewport at new dimensions —
-    // `with_resolution` preserves center/zoom but updates width/height to
+    // `withResolution` preserves center/zoom but updates width/height to
     // the live box. `endDrag` must commit the pan from that live
     // viewport, not the drag-start snapshot: panning from the snapshot
     // would re-commit the *old* dimensions, reverting the refit and
     // leaving the buffer CSS-stretched onto the new box (non-square
     // pixels) until the next resize — which never comes, the box is stable.
     const refitPanned = { sentinel: 'refit-panned' } as unknown as Viewport
-    const refitted = makeViewportDouble()
-    refitted.width.mockReturnValue(1000)
-    refitted.height.mockReturnValue(700)
-    refitted.pan_by_pixels.mockReturnValue(refitPanned)
+    const refitted = makeViewportDouble(1, 1000, 700)
+    refitted.panByPixels.mockReturnValue(refitPanned)
     const { store } = mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
@@ -235,15 +229,15 @@ describe('InputController', () => {
 
     // dx=50, dy=40 CSS; scaled by the live grid (1000/1000, 700/700) → 50,40.
     // The pan must run on the refitted viewport, never the stale snapshot.
-    expect(refitted.pan_by_pixels).toHaveBeenCalledTimes(1)
-    expect(refitted.pan_by_pixels).toHaveBeenCalledWith(50, 40)
-    expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
+    expect(refitted.panByPixels).toHaveBeenCalledTimes(1)
+    expect(refitted.panByPixels).toHaveBeenCalledWith(50, 40)
+    expect(viewport.panByPixels).not.toHaveBeenCalled()
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledWith(refitPanned)
   })
 
   it('snapshots the canvas when the drag starts and paints it at the drag offset', () => {
-    viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
+    viewport.panByPixels.mockReturnValue({} as unknown as Viewport)
     mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
@@ -267,7 +261,7 @@ describe('InputController', () => {
   })
 
   it('scales the drag offset to canvas-internal pixels', () => {
-    viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
+    viewport.panByPixels.mockReturnValue({} as unknown as Viewport)
     // Canvas is 800x600 internally but displayed at half size.
     setRect(canvas, { left: 0, top: 0, width: 400, height: 300 })
     mount(canvas, viewport, onChange)
@@ -278,24 +272,24 @@ describe('InputController', () => {
     expect(ctxStub.drawImage).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), 100, 60)
 
     canvas.dispatchEvent(pe('pointerup', { clientX: 150, clientY: 80 }))
-    expect(viewport.pan_by_pixels).toHaveBeenCalledWith(100, 60)
+    expect(viewport.panByPixels).toHaveBeenCalledWith(100, 60)
   })
 
   it('completes the drag when pointerup fires with coordinates outside the canvas', () => {
     // `setPointerCapture` routes the whole gesture to the canvas even when the
     // pointer leaves the box, so a release far outside still reaches the
     // controller's canvas-level listener.
-    viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
+    viewport.panByPixels.mockReturnValue({} as unknown as Viewport)
     mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
     canvas.dispatchEvent(pe('pointerup', { clientX: 5000, clientY: 5000 }))
     expect(onChange).toHaveBeenCalledTimes(1)
-    expect(viewport.pan_by_pixels).toHaveBeenCalledTimes(1)
+    expect(viewport.panByPixels).toHaveBeenCalledTimes(1)
   })
 
   it('toggles the dragging class and phase on pointerdown / pointerup', () => {
-    viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
+    viewport.panByPixels.mockReturnValue({} as unknown as Viewport)
     const { phase } = mount(canvas, viewport, onChange)
 
     expect(canvas.classList.contains('dragging')).toBe(false)
@@ -309,7 +303,7 @@ describe('InputController', () => {
   })
 
   it('publishes the preview phase from the first notch until a render paints', () => {
-    viewport.zoom_around.mockReturnValue(makeZoomResult(1.25))
+    viewport.zoomAround.mockReturnValue(makeZoomResult(1.25))
     const { controller, phase } = mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(
@@ -335,7 +329,7 @@ describe('InputController', () => {
   })
 
   it('publishes dragging for the first finger, then preview once a second makes it a pinch', () => {
-    viewport.zoom_around.mockReturnValue(makeZoomResult(2))
+    viewport.zoomAround.mockReturnValue(makeZoomResult(2))
     const { phase } = mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(pe('pointerdown', { pointerId: 1, clientX: 100, clientY: 100 }))
@@ -348,8 +342,8 @@ describe('InputController', () => {
   })
 
   it('ignores a wheel notch mid-drag (it would scale the drag and later undo the pan)', () => {
-    viewport.zoom_around.mockReturnValue(makeZoomResult(1.25))
-    viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
+    viewport.zoomAround.mockReturnValue(makeZoomResult(1.25))
+    viewport.panByPixels.mockReturnValue({} as unknown as Viewport)
     const { phase } = mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 100 }))
@@ -362,7 +356,7 @@ describe('InputController', () => {
     })
     canvas.dispatchEvent(wheel)
     expect(wheel.defaultPrevented).toBe(true) // still no page scroll
-    expect(viewport.zoom_around).not.toHaveBeenCalled()
+    expect(viewport.zoomAround).not.toHaveBeenCalled()
     expect(canvas.style.transform).toBe('')
     expect(phase.get()).toBe('dragging')
 
@@ -376,7 +370,7 @@ describe('InputController', () => {
     // The drawer's light-dismiss is a true tap on the canvas: pointerdown then
     // pointerup at the same point, no pointermove. It must leave an in-flight
     // deep render untouched (no `onInvalidate`) and never restart it with an
-    // identical viewport (no `onChange` / no `pan_by_pixels`) — it is a pure
+    // identical viewport (no `onChange` / no `panByPixels`) — it is a pure
     // visual no-op. The drag is still torn down.
     const onInvalidate = vi.fn()
     mount(canvas, viewport, onChange, onInvalidate)
@@ -386,7 +380,7 @@ describe('InputController', () => {
 
     expect(onInvalidate).not.toHaveBeenCalled()
     expect(onChange).not.toHaveBeenCalled()
-    expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
+    expect(viewport.panByPixels).not.toHaveBeenCalled()
     expect(canvas.classList.contains('dragging')).toBe(false)
   })
 
@@ -416,7 +410,7 @@ describe('InputController', () => {
     const onInvalidate = vi.fn()
     const onClick = vi.fn()
     const unpanned = { sentinel: 'unpanned' } as unknown as Viewport
-    viewport.pan_by_pixels.mockReturnValue(unpanned)
+    viewport.panByPixels.mockReturnValue(unpanned)
     mount(canvas, viewport, onChange, onInvalidate, onClick)
 
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
@@ -425,7 +419,7 @@ describe('InputController', () => {
     canvas.dispatchEvent(pe('pointerup', { clientX: 100, clientY: 50 }))
 
     expect(onClick).not.toHaveBeenCalled()
-    expect(viewport.pan_by_pixels).toHaveBeenCalledWith(0, 0)
+    expect(viewport.panByPixels).toHaveBeenCalledWith(0, 0)
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledWith(unpanned)
   })
@@ -433,7 +427,7 @@ describe('InputController', () => {
   it('snapshots the frame on screen when the drag starts, not at the press (#184)', () => {
     // A render that paints while the press sits inside the click slop must be
     // the frame the drag shifts, so the snapshot waits for the drag to start.
-    viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
+    viewport.panByPixels.mockReturnValue({} as unknown as Viewport)
     mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
@@ -452,7 +446,7 @@ describe('InputController', () => {
     // the scrub's zoom over the untransformed box. The store doesn't hold that
     // zoom yet, and the live box is scaled.
     const zoomed = makeZoomResult(0.8)
-    viewport.zoom_around.mockReturnValue(zoomed)
+    viewport.zoomAround.mockReturnValue(zoomed)
     const onClick = vi.fn()
     const { phase } = mount(canvas, viewport, onChange, undefined, onClick)
     const layout = canvas.getBoundingClientRect()
@@ -500,8 +494,8 @@ describe('InputController', () => {
     // untransformed box, until the fresh frame paints.
     const zoomed = makeZoomResult(1.25)
     const zoomedAgain = makeZoomResult(1.5625)
-    viewport.zoom_around.mockReturnValue(zoomed)
-    zoomed.zoom_around.mockReturnValue(zoomedAgain)
+    viewport.zoomAround.mockReturnValue(zoomed)
+    zoomed.zoomAround.mockReturnValue(zoomedAgain)
     const onClick = vi.fn()
     const { controller, store } = mount(canvas, viewport, onChange, undefined, onClick)
     const layout = canvas.getBoundingClientRect()
@@ -548,7 +542,7 @@ describe('InputController', () => {
     // the click slop reports nothing. A started pan commits from the last
     // tracked move, not the cancel's own coordinates (which can be zeroed).
     const onClick = vi.fn()
-    viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
+    viewport.panByPixels.mockReturnValue({} as unknown as Viewport)
     mount(canvas, viewport, onChange, undefined, onClick)
 
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
@@ -560,7 +554,7 @@ describe('InputController', () => {
     canvas.dispatchEvent(pe('pointermove', { clientX: 130, clientY: 70 }))
     canvas.dispatchEvent(pe('pointercancel', { clientX: 0, clientY: 0 }))
     expect(onClick).not.toHaveBeenCalled()
-    expect(viewport.pan_by_pixels).toHaveBeenCalledWith(30, 20)
+    expect(viewport.panByPixels).toHaveBeenCalledWith(30, 20)
     expect(onChange).toHaveBeenCalledTimes(1)
   })
 
@@ -594,10 +588,10 @@ describe('InputController', () => {
   it('pinches: two pointers zoom around the midpoint, Settling once when a finger lifts', () => {
     // Two-finger pinch (U1, #88). The change in inter-pointer distance between
     // moves is the zoom factor, anchored at the midpoint, fed through the same
-    // `applyZoomNotch`/`zoom_around` path the wheel uses. The store is written
+    // `applyZoomNotch`/`zoomAround` path the wheel uses. The store is written
     // once, on the finger lift (a pinch Settles immediately — no debounce).
     const zoomed = makeZoomResult(2)
-    viewport.zoom_around.mockReturnValue(zoomed)
+    viewport.zoomAround.mockReturnValue(zoomed)
     mount(canvas, viewport, onChange)
 
     // First finger down (pan begins), then second finger down (switch to pinch
@@ -610,8 +604,8 @@ describe('InputController', () => {
     // (200, 100) → logical grid (199.5, 99.5) at render scale 1 (the −0.5
     // half-pixel correction, B5 #76).
     canvas.dispatchEvent(pe('pointermove', { pointerId: 2, clientX: 300, clientY: 100 }))
-    expect(viewport.zoom_around).toHaveBeenCalledTimes(1)
-    expect(viewport.zoom_around).toHaveBeenCalledWith(199.5, 99.5, 2)
+    expect(viewport.zoomAround).toHaveBeenCalledTimes(1)
+    expect(viewport.zoomAround).toHaveBeenCalledWith(199.5, 99.5, 2)
     // The Preview transform is applied instantly; no recompute yet.
     expect(canvas.style.transform).not.toBe('')
     expect(onChange).not.toHaveBeenCalled()
@@ -624,16 +618,16 @@ describe('InputController', () => {
     // The leftover finger lifting does not resume a pan / fire a second commit.
     canvas.dispatchEvent(pe('pointerup', { pointerId: 1, clientX: 100, clientY: 100 }))
     expect(onChange).toHaveBeenCalledTimes(1)
-    expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
+    expect(viewport.panByPixels).not.toHaveBeenCalled()
   })
 
   it('pan→pinch transition restores the un-panned buffer and zooms from the live viewport', () => {
     // A real pinch starts as a one-finger pan for a few ms. When the second
     // finger lands, the partial pan (which never committed) is undone by
     // re-blitting the snapshot at the origin, and the pinch begins from
-    // `currentViewport` — so `zoom_around` runs on the original viewport.
+    // `currentViewport` — so `zoomAround` runs on the original viewport.
     const onInvalidate = vi.fn()
-    viewport.zoom_around.mockReturnValue(makeZoomResult(2))
+    viewport.zoomAround.mockReturnValue(makeZoomResult(2))
     mount(canvas, viewport, onChange, onInvalidate)
 
     canvas.dispatchEvent(pe('pointerdown', { pointerId: 1, clientX: 100, clientY: 100 }))
@@ -652,8 +646,8 @@ describe('InputController', () => {
 
     // The pinch zooms from the original viewport, never a panned one.
     canvas.dispatchEvent(pe('pointermove', { pointerId: 2, clientX: 400, clientY: 100 }))
-    expect(viewport.zoom_around).toHaveBeenCalledTimes(1)
-    expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
+    expect(viewport.zoomAround).toHaveBeenCalledTimes(1)
+    expect(viewport.panByPixels).not.toHaveBeenCalled()
   })
 
   it('Settles when a pinch-pair finger lifts even while a third finger is down', () => {
@@ -662,7 +656,7 @@ describe('InputController', () => {
     // the total count) avoids leaving `pinch` referencing a removed pointer,
     // which would freeze every later move at distance 0.
     const zoomed = makeZoomResult(2)
-    viewport.zoom_around.mockReturnValue(zoomed)
+    viewport.zoomAround.mockReturnValue(zoomed)
     mount(canvas, viewport, onChange)
 
     // Two fingers begin the pinch; a third finger lands (tracked but inert).
@@ -670,7 +664,7 @@ describe('InputController', () => {
     canvas.dispatchEvent(pe('pointerdown', { pointerId: 2, clientX: 200, clientY: 100 }))
     canvas.dispatchEvent(pe('pointerdown', { pointerId: 3, clientX: 150, clientY: 300 }))
     canvas.dispatchEvent(pe('pointermove', { pointerId: 2, clientX: 300, clientY: 100 }))
-    expect(viewport.zoom_around).toHaveBeenCalledTimes(1)
+    expect(viewport.zoomAround).toHaveBeenCalledTimes(1)
     expect(onChange).not.toHaveBeenCalled()
 
     // A pinch-pair pointer (id 1) lifts while id 2 and id 3 remain down: count
@@ -687,7 +681,7 @@ describe('InputController', () => {
     // box and re-base the Preview wrongly). New gestures resume only once every
     // finger has lifted.
     const first = makeZoomResult(2)
-    viewport.zoom_around.mockReturnValue(first)
+    viewport.zoomAround.mockReturnValue(first)
     mount(canvas, viewport, onChange)
 
     // A full pinch that Settles when finger 2 lifts; finger 1 stays down.
@@ -696,23 +690,23 @@ describe('InputController', () => {
     canvas.dispatchEvent(pe('pointermove', { pointerId: 2, clientX: 300, clientY: 100 }))
     canvas.dispatchEvent(pe('pointerup', { pointerId: 2, clientX: 300, clientY: 100 }))
     expect(onChange).toHaveBeenCalledTimes(1)
-    expect(viewport.zoom_around).toHaveBeenCalledTimes(1)
+    expect(viewport.zoomAround).toHaveBeenCalledTimes(1)
 
     // A finger re-lands while finger 1 is still down: locked out — no new pinch.
     canvas.dispatchEvent(pe('pointerdown', { pointerId: 3, clientX: 220, clientY: 100 }))
     canvas.dispatchEvent(pe('pointermove', { pointerId: 3, clientX: 320, clientY: 100 }))
-    expect(viewport.zoom_around).toHaveBeenCalledTimes(1) // no second pinch began
+    expect(viewport.zoomAround).toHaveBeenCalledTimes(1) // no second pinch began
 
     // All fingers lift, then a fresh pinch is allowed again. It zooms from the
-    // post-Settle `currentViewport` (`first`), so it advances `first.zoom_around`
+    // post-Settle `currentViewport` (`first`), so it advances `first.zoomAround`
     // — proof the lockout lifted and a new gesture began.
     canvas.dispatchEvent(pe('pointerup', { pointerId: 1, clientX: 100, clientY: 100 }))
     canvas.dispatchEvent(pe('pointerup', { pointerId: 3, clientX: 320, clientY: 100 }))
-    first.zoom_around.mockReturnValue(makeZoomResult(2))
+    first.zoomAround.mockReturnValue(makeZoomResult(2))
     canvas.dispatchEvent(pe('pointerdown', { pointerId: 4, clientX: 100, clientY: 100 }))
     canvas.dispatchEvent(pe('pointerdown', { pointerId: 5, clientX: 200, clientY: 100 }))
     canvas.dispatchEvent(pe('pointermove', { pointerId: 5, clientX: 300, clientY: 100 }))
-    expect(first.zoom_around).toHaveBeenCalledTimes(1) // lockout lifted, new pinch began
+    expect(first.zoomAround).toHaveBeenCalledTimes(1) // lockout lifted, new pinch began
   })
 
   it('pointercancel during a pinch tears it down and Settles', () => {
@@ -721,7 +715,7 @@ describe('InputController', () => {
     // what the Preview already showed rather than leaving a dangling transform
     // or an ahead-of-store viewport.
     const zoomed = makeZoomResult(2)
-    viewport.zoom_around.mockReturnValue(zoomed)
+    viewport.zoomAround.mockReturnValue(zoomed)
     mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(pe('pointerdown', { pointerId: 1, clientX: 100, clientY: 100 }))
@@ -736,7 +730,7 @@ describe('InputController', () => {
 
   it('previews instantly on a wheel notch and defers a single onChange to the Settle', () => {
     const zoomed = makeZoomResult(0.8)
-    viewport.zoom_around.mockReturnValue(zoomed)
+    viewport.zoomAround.mockReturnValue(zoomed)
     mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(
@@ -748,12 +742,12 @@ describe('InputController', () => {
         cancelable: true,
       }),
     )
-    // factor = 1.25 ^ (-100 / 100) = 1 / 1.25 = 0.8. zoom_around runs
+    // factor = 1.25 ^ (-100 / 100) = 1 / 1.25 = 0.8. zoomAround runs
     // immediately to advance the authoritative viewport...
-    expect(viewport.zoom_around).toHaveBeenCalledTimes(1)
+    expect(viewport.zoomAround).toHaveBeenCalledTimes(1)
     // logical grid (199.5, 149.5): the cursor's cell-edge CSS coordinate minus
     // the half-pixel that aligns it with the sample-at-index grid (B5, #76).
-    expect(viewport.zoom_around).toHaveBeenCalledWith(199.5, 149.5, 1.25 ** -1)
+    expect(viewport.zoomAround).toHaveBeenCalledWith(199.5, 149.5, 1.25 ** -1)
     // ...the Preview transform is applied instantly (cursor-anchored
     // scale) — exact matrix is covered in zoom-preview.test.ts...
     expect(canvas.style.transform).not.toBe('')
@@ -766,7 +760,7 @@ describe('InputController', () => {
     expect(onChange).toHaveBeenCalledWith(zoomed)
   })
 
-  it('feeds zoom_around the sample displayed under the cursor (half-pixel convention, B5 #76)', () => {
+  it('feeds zoomAround the sample displayed under the cursor (half-pixel convention, B5 #76)', () => {
     // The five scale-1 assertions can't distinguish cssX·scale − 0.5 from
     // (cssX − 0.5)·scale (they coincide when scale = 1). Render scale 2 (buffer
     // 1600×1200 over an 800×600 viewport grid, CSS 400×300) separates them: the
@@ -776,7 +770,7 @@ describe('InputController', () => {
     canvas.width = 1600
     canvas.height = 1200
     setRect(canvas, { width: 400, height: 300 })
-    viewport.zoom_around.mockReturnValue(makeZoomResult(1.25))
+    viewport.zoomAround.mockReturnValue(makeZoomResult(1.25))
     mount(canvas, viewport, onChange)
 
     // Cursor at CSS (123, 77): grid x = 123·800/400 − 0.5 = 245.5,
@@ -790,14 +784,14 @@ describe('InputController', () => {
         cancelable: true,
       }),
     )
-    expect(viewport.zoom_around).toHaveBeenCalledWith(245.5, 153.5, 1.25)
+    expect(viewport.zoomAround).toHaveBeenCalledWith(245.5, 153.5, 1.25)
   })
 
   it('coalesces a multi-notch scrub into one onChange at the Settle', () => {
     const afterFirst = makeZoomResult(0.8)
     const afterSecond = makeZoomResult(0.64)
-    viewport.zoom_around.mockReturnValue(afterFirst)
-    afterFirst.zoom_around.mockReturnValue(afterSecond)
+    viewport.zoomAround.mockReturnValue(afterFirst)
+    afterFirst.zoomAround.mockReturnValue(afterSecond)
     mount(canvas, viewport, onChange)
 
     const notch = (): void => {
@@ -813,8 +807,8 @@ describe('InputController', () => {
     }
     notch()
     notch() // second notch zooms from the first notch's viewport
-    expect(viewport.zoom_around).toHaveBeenCalledTimes(1)
-    expect(afterFirst.zoom_around).toHaveBeenCalledTimes(1)
+    expect(viewport.zoomAround).toHaveBeenCalledTimes(1)
+    expect(afterFirst.zoomAround).toHaveBeenCalledTimes(1)
     expect(onChange).not.toHaveBeenCalled()
 
     vi.advanceTimersByTime(WHEEL_SETTLE_MS)
@@ -830,8 +824,8 @@ describe('InputController', () => {
     // captured at scrub start, or the cursor anchor drifts off the pointer.
     const afterFirst = makeZoomResult(1.25)
     const afterSecond = makeZoomResult(1.5625)
-    viewport.zoom_around.mockReturnValue(afterFirst)
-    afterFirst.zoom_around.mockReturnValue(afterSecond)
+    viewport.zoomAround.mockReturnValue(afterFirst)
+    afterFirst.zoomAround.mockReturnValue(afterSecond)
 
     const layout = {
       left: 0,
@@ -869,15 +863,15 @@ describe('InputController', () => {
     // cursor through the layout box: pixelX = 200·800/800 − 0.5 = 199.5
     // (the B5 #76 half-pixel correction). The transformed box would have
     // given (200−(−100))·800/1000 − 0.5 = 239.5.
-    expect(viewport.zoom_around).toHaveBeenCalledWith(199.5, 149.5, 1.25)
-    expect(afterFirst.zoom_around).toHaveBeenCalledWith(199.5, 149.5, 1.25)
+    expect(viewport.zoomAround).toHaveBeenCalledWith(199.5, 149.5, 1.25)
+    expect(afterFirst.zoomAround).toHaveBeenCalledWith(199.5, 149.5, 1.25)
   })
 
   it('re-bases the Preview to the committed viewport once a render paints', () => {
     const committed = makeZoomResult(0.8)
     const next = makeZoomResult(0.64)
-    viewport.zoom_around.mockReturnValue(committed)
-    committed.zoom_around.mockReturnValue(next)
+    viewport.zoomAround.mockReturnValue(committed)
+    committed.zoomAround.mockReturnValue(next)
     const { controller } = mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(
@@ -904,17 +898,17 @@ describe('InputController', () => {
       }),
     )
     // The new scrub zooms from the committed viewport, not the original.
-    expect(committed.zoom_around).toHaveBeenCalledTimes(1)
-    expect(viewport.zoom_around).toHaveBeenCalledTimes(1)
+    expect(committed.zoomAround).toHaveBeenCalledTimes(1)
+    expect(viewport.zoomAround).toHaveBeenCalledTimes(1)
     vi.advanceTimersByTime(WHEEL_SETTLE_MS)
     expect(onChange).toHaveBeenLastCalledWith(next)
   })
 
   it('a pan starting mid-zoom carries the zoom into the pan without an extra render', () => {
     const zoomed = makeZoomResult(0.8)
-    viewport.zoom_around.mockReturnValue(zoomed)
+    viewport.zoomAround.mockReturnValue(zoomed)
     const panned = { sentinel: 'panned' } as unknown as Viewport
-    zoomed.pan_by_pixels.mockReturnValue(panned)
+    zoomed.panByPixels.mockReturnValue(panned)
     const onInvalidate = vi.fn()
     mount(canvas, viewport, onChange, onInvalidate)
 
@@ -954,7 +948,7 @@ describe('InputController', () => {
     // Pointerup issues the single render: the zoomed viewport, panned. The pan
     // operates on the accumulated zoom carried in `currentViewport`.
     canvas.dispatchEvent(pe('pointerup', { clientX: 130, clientY: 70 }))
-    expect(zoomed.pan_by_pixels).toHaveBeenCalledTimes(1)
+    expect(zoomed.panByPixels).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledWith(panned)
   })
@@ -971,8 +965,8 @@ describe('InputController', () => {
     const onInvalidate = vi.fn()
     const z1 = makeZoomResult(0.8)
     const z2 = makeZoomResult(0.64)
-    viewport.zoom_around.mockReturnValue(z1)
-    z1.zoom_around.mockReturnValue(z2)
+    viewport.zoomAround.mockReturnValue(z1)
+    z1.zoomAround.mockReturnValue(z2)
     mount(canvas, viewport, onChange, onInvalidate)
 
     const notch = (): void => {
@@ -994,8 +988,8 @@ describe('InputController', () => {
 
   it('clears the zoom Preview transform when a pan starts (pan reads an untransformed box)', () => {
     const z1 = makeZoomResult(1.25)
-    viewport.zoom_around.mockReturnValue(z1)
-    viewport.pan_by_pixels.mockReturnValue({} as unknown as Viewport)
+    viewport.zoomAround.mockReturnValue(z1)
+    viewport.panByPixels.mockReturnValue({} as unknown as Viewport)
     const { phase } = mount(canvas, viewport, onChange)
 
     // Active zoom Preview (transform applied), Settle still pending.
@@ -1022,7 +1016,7 @@ describe('InputController', () => {
   })
 
   it('wheel respects canvas-CSS-vs-internal scaling', () => {
-    viewport.zoom_around.mockReturnValue(makeZoomResult(1))
+    viewport.zoomAround.mockReturnValue(makeZoomResult(1))
     // Canvas is 800x600 internally but displayed at half size.
     setRect(canvas, { left: 0, top: 0, width: 400, height: 300 })
     mount(canvas, viewport, onChange)
@@ -1038,11 +1032,11 @@ describe('InputController', () => {
         cancelable: true,
       }),
     )
-    expect(viewport.zoom_around).toHaveBeenCalledWith(399.5, 299.5, 1)
+    expect(viewport.zoomAround).toHaveBeenCalledWith(399.5, 299.5, 1)
   })
 
   it('wheel normalizes line-mode deltas (Firefox-on-Linux style)', () => {
-    viewport.zoom_around.mockReturnValue(makeZoomResult(1))
+    viewport.zoomAround.mockReturnValue(makeZoomResult(1))
     mount(canvas, viewport, onChange)
 
     // Firefox-on-Linux historical wheel: deltaMode = 1 (line),
@@ -1059,11 +1053,11 @@ describe('InputController', () => {
         cancelable: true,
       }),
     )
-    expect(viewport.zoom_around).toHaveBeenCalledWith(99.5, 49.5, 1.25 ** (-(3 * 40) / 100))
+    expect(viewport.zoomAround).toHaveBeenCalledWith(99.5, 49.5, 1.25 ** (-(3 * 40) / 100))
   })
 
   it('wheel normalizes page-mode deltas', () => {
-    viewport.zoom_around.mockReturnValue(makeZoomResult(1))
+    viewport.zoomAround.mockReturnValue(makeZoomResult(1))
     mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(
@@ -1076,7 +1070,7 @@ describe('InputController', () => {
         cancelable: true,
       }),
     )
-    expect(viewport.zoom_around).toHaveBeenCalledWith(99.5, 49.5, 1.25 ** (-(1 * 800) / 100))
+    expect(viewport.zoomAround).toHaveBeenCalledWith(99.5, 49.5, 1.25 ** (-(1 * 800) / 100))
   })
 
   it('ignores non-primary pointer buttons on the first pointerdown', () => {
@@ -1093,7 +1087,7 @@ describe('InputController', () => {
 
     canvas.dispatchEvent(pe('pointermove', { clientX: 80, clientY: 70 }))
     canvas.dispatchEvent(pe('pointerup', { clientX: 80, clientY: 70 }))
-    expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
+    expect(viewport.panByPixels).not.toHaveBeenCalled()
     expect(onChange).not.toHaveBeenCalled()
   })
 
@@ -1105,7 +1099,7 @@ describe('InputController', () => {
     setRect(canvas, { width: 0, height: 0 })
     mount(canvas, viewport, onChange)
 
-    // Wheel on a 0×0 canvas: no zoom_around, no onChange.
+    // Wheel on a 0×0 canvas: no zoomAround, no onChange.
     canvas.dispatchEvent(
       new WheelEvent('wheel', {
         deltaY: 100,
@@ -1115,15 +1109,15 @@ describe('InputController', () => {
         cancelable: true,
       }),
     )
-    expect(viewport.zoom_around).not.toHaveBeenCalled()
+    expect(viewport.zoomAround).not.toHaveBeenCalled()
 
     // Drag on a 0×0 canvas: cleanup still happens (class removed) and no
-    // pan_by_pixels, but the viewport is still committed unpanned — the drag
+    // panByPixels, but the viewport is still committed unpanned — the drag
     // discarded the in-flight render, which must run again.
     canvas.dispatchEvent(pe('pointerdown', { clientX: 0, clientY: 0 }))
     canvas.dispatchEvent(pe('pointermove', { clientX: 30, clientY: 20 }))
     canvas.dispatchEvent(pe('pointerup', { clientX: 30, clientY: 20 }))
-    expect(viewport.pan_by_pixels).not.toHaveBeenCalled()
+    expect(viewport.panByPixels).not.toHaveBeenCalled()
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledWith(viewport)
     expect(canvas.classList.contains('dragging')).toBe(false)
@@ -1132,8 +1126,8 @@ describe('InputController', () => {
 
   it('a non-gesture store write redirects subsequent wheel events to the new viewport without firing onChange', () => {
     const next = makeViewportDouble()
-    next.zoom_around.mockReturnValue(makeZoomResult(0.8))
-    viewport.zoom_around.mockReturnValue(makeZoomResult(0.8))
+    next.zoomAround.mockReturnValue(makeZoomResult(0.8))
+    viewport.zoomAround.mockReturnValue(makeZoomResult(0.8))
     const { store } = mount(canvas, viewport, onChange)
 
     store.set(next as unknown as Viewport, 'refit')
@@ -1154,8 +1148,8 @@ describe('InputController', () => {
     )
     // The scrub zooms from the redirected viewport; the recompute lands
     // at the Settle.
-    expect(next.zoom_around).toHaveBeenCalledTimes(1)
-    expect(viewport.zoom_around).not.toHaveBeenCalled()
+    expect(next.zoomAround).toHaveBeenCalledTimes(1)
+    expect(viewport.zoomAround).not.toHaveBeenCalled()
     expect(onChange).not.toHaveBeenCalled()
     vi.advanceTimersByTime(WHEEL_SETTLE_MS)
     expect(onChange).toHaveBeenCalledTimes(1)
@@ -1163,7 +1157,7 @@ describe('InputController', () => {
 
   it('a non-gesture store write clears an active Preview transform so the next scrub measures an untransformed box', () => {
     const z1 = makeZoomResult(0.8)
-    viewport.zoom_around.mockReturnValue(z1)
+    viewport.zoomAround.mockReturnValue(z1)
     const { store, phase } = mount(canvas, viewport, onChange)
 
     // Active zoom Preview transform on the canvas.
@@ -1188,7 +1182,7 @@ describe('InputController', () => {
   })
 
   it('wheel calls preventDefault', () => {
-    viewport.zoom_around.mockReturnValue(makeZoomResult(1))
+    viewport.zoomAround.mockReturnValue(makeZoomResult(1))
     mount(canvas, viewport, onChange)
 
     const event = new WheelEvent('wheel', {

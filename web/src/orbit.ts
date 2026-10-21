@@ -1,6 +1,6 @@
-import type { Viewport } from '../wasm/fractal_wasm.js'
 import { cssToComplex, revealedCount, traceOrbit, type ViewGeometry } from './orbit-math.js'
 import type { FractalMode } from './settings.js'
+import type { Viewport } from './viewport.js'
 import type { ViewportStore } from './viewport-store.js'
 
 // Inner padding of the plot box, as a fraction of its side, so the fitted orbit
@@ -32,23 +32,15 @@ interface ProbePoint {
 }
 
 /**
- * Flatten a viewport plus the CSS box it is drawn over into the `ViewGeometry`
- * the projection helpers need. Returns null for a degenerate box (a
+ * Pair a viewport with the CSS box it is drawn over: the `ViewGeometry` the
+ * projection helpers need. Returns null for a degenerate box (a
  * `display:none` or pre-layout canvas), so callers can bail rather than feed
  * NaN coordinates into `cssToComplex`. Shared by the orbit overlay and the Julia
  * c-picker (O2, #92) so the two derive the cursor→complex mapping identically.
  */
 export function viewGeometry(vp: Viewport, rect: DOMRect): ViewGeometry | null {
   if (rect.width <= 0 || rect.height <= 0) return null
-  return {
-    centerRe: vp.center_re(),
-    centerIm: vp.center_im(),
-    zoom: vp.zoom(),
-    logicalW: vp.width(),
-    logicalH: vp.height(),
-    rectW: rect.width,
-    rectH: rect.height,
-  }
+  return { viewport: vp, rectW: rect.width, rectH: rect.height }
 }
 
 /** {@link viewGeometry} for the authoritative viewport over `surface`'s live box. */

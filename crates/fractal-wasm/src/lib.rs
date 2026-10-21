@@ -370,13 +370,13 @@ impl Viewport {
         })
     }
 
-    // Flat-primitive accessors. Slice 6 introduces a coordinating
-    // Web Worker that owns its own WASM instance; a `Viewport` class
-    // instance cannot survive `postMessage` (structured-clone breaks
-    // wasm-bindgen class identity across realms), so the main thread
-    // reads these five scalars off its `Viewport` and ships them as
-    // primitives. The worker reconstructs a fresh `Viewport` on the
-    // far side via the existing constructor.
+    // Flat-primitive accessors. The main thread once read these five
+    // scalars off its `Viewport` to post a render request (a wasm-bindgen
+    // instance can't survive `postMessage`), and the worker rebuilt one
+    // with the constructor. The main thread now keeps a TypeScript port
+    // instead (ADR-0015), so the worker's constructor call is the app's
+    // only use of this class. The methods and accessors stay as the
+    // reference that port is tested against (#169).
 
     #[wasm_bindgen]
     pub fn center_re(&self) -> f64 {

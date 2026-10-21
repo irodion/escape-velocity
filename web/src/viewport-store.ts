@@ -1,4 +1,4 @@
-import type { Viewport } from '../wasm/fractal_wasm.js'
+import type { Viewport } from './viewport.js'
 
 /**
  * Who wrote a viewport — carried alongside every `set` so a subscriber can

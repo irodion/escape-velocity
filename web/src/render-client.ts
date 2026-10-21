@@ -537,9 +537,8 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
   /**
    * Request a full compute → colorize → paint for `viewport`. Fire-and-
    * forget: returns immediately, the paint lands on a later worker
-   * response. The viewport is passed as flat primitives (read off the
-   * `Viewport` getters in `main.ts`) because a wasm-bindgen `Viewport`
-   * instance cannot survive `postMessage`.
+   * response. The view arrives as the request's flat fields: `main.ts`
+   * scales the stored viewport's zoom and grid by the render scale first.
    */
   function render(
     viewport: { centerRe: number; centerIm: number; zoom: number; width: number; height: number },

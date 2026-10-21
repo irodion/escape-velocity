@@ -4,11 +4,11 @@ import {
   complexToCss,
   cssToBufferPixel,
   cssToComplex,
-  pixelScale,
   revealedCount,
   traceOrbit,
   type ViewGeometry,
 } from './orbit-math.js'
+import { pixelScale, Viewport } from './viewport.js'
 
 describe('traceOrbit', () => {
   it('keeps an interior point bounded for the full maxIter (z₀=0, c=0 stays at 0)', () => {
@@ -74,15 +74,8 @@ describe('revealedCount', () => {
 
 describe('complexToCss / cssToComplex', () => {
   // Display ratio 1 (buffer == CSS box) keeps the anchors easy to reason about.
-  const view: ViewGeometry = {
-    centerRe: -0.5,
-    centerIm: 0.1,
-    zoom: 1,
-    logicalW: 800,
-    logicalH: 600,
-    rectW: 800,
-    rectH: 600,
-  }
+  const viewport = new Viewport(-0.5, 0.1, 1, 800, 600)
+  const view: ViewGeometry = { viewport, rectW: 800, rectH: 600 }
 
   it('round-trips an arbitrary CSS pixel within fp tolerance', () => {
     const c = cssToComplex(123.5, 456.25, view)
@@ -92,16 +85,16 @@ describe('complexToCss / cssToComplex', () => {
   })
 
   it('maps the grid centre to the viewport centre', () => {
-    // The geometric centre of the pixel grid is (logicalW-1)/2, (logicalH-1)/2.
+    // The geometric centre of the pixel grid is (width-1)/2, (height-1)/2.
     const c = cssToComplex((800 - 1) / 2, (600 - 1) / 2, view)
-    expect(c.re).toBeCloseTo(view.centerRe, 12)
-    expect(c.im).toBeCloseTo(view.centerIm, 12)
+    expect(c.re).toBeCloseTo(viewport.centerRe, 12)
+    expect(c.im).toBeCloseTo(viewport.centerIm, 12)
   })
 
   it('reproduces the Rust pixel_to_complex_f anchor at the top-left pixel', () => {
     // Cross-check the literal formula (not the implementation): for center
     // (0,0), zoom 1, 800×600, pixel (0,0) is (−399.5·scale, +299.5·scale).
-    const ref: ViewGeometry = { ...view, centerRe: 0, centerIm: 0 }
+    const ref: ViewGeometry = { ...view, viewport: new Viewport(0, 0, 1, 800, 600) }
     const scale = pixelScale(1)
     const c = cssToComplex(0, 0, ref)
     expect(c.re).toBeCloseTo(-399.5 * scale, 12)
@@ -114,8 +107,8 @@ describe('complexToCss / cssToComplex', () => {
     // centre — 2× the logical coordinate at this ratio.
     const stretched: ViewGeometry = { ...view, rectW: 1600, rectH: 1200 }
     const c = cssToComplex(399.5 * 2, 299.5 * 2, stretched)
-    expect(c.re).toBeCloseTo(view.centerRe, 12)
-    expect(c.im).toBeCloseTo(view.centerIm, 12)
+    expect(c.re).toBeCloseTo(viewport.centerRe, 12)
+    expect(c.im).toBeCloseTo(viewport.centerIm, 12)
   })
 })
 

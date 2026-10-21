@@ -47,6 +47,7 @@ Numbering is zero-padded to four digits and never reused.
 | 0012 | [Instant zoom feedback via a transform Preview and a debounced Settle](0012-instant-zoom-feedback-transform-preview.md) | Accepted |
 | 0013 | [Distance Estimate as a selectable Field](0013-distance-estimate-as-a-field.md) | Accepted |
 | 0014 | [Pointer Events for input; two-finger pinch-zoom reusing the Preview/Settle](0014-pointer-events-and-pinch-zoom.md) | Accepted |
+| 0015 | [Viewport maths in TypeScript on the main thread; WASM only in the worker](0015-main-thread-viewport-in-typescript.md) | Accepted |
 
 ## Adding a new ADR
 
