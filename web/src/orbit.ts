@@ -40,7 +40,7 @@ interface ProbePoint {
  */
 export function viewGeometry(vp: Viewport, rect: DOMRect): ViewGeometry | null {
   if (rect.width <= 0 || rect.height <= 0) return null
-  return { viewport: vp, rectW: rect.width, rectH: rect.height }
+  return { viewport: vp, rect }
 }
 
 /** {@link viewGeometry} for the authoritative viewport over `surface`'s live box. */

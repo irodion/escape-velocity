@@ -27,7 +27,8 @@
 //! The main thread pans, zooms and maps the cursor with a TypeScript
 //! port of this type, `web/src/viewport.ts`, so it never loads the WASM
 //! module (ADR-0015). The port keeps every formula's operation order, so
-//! the two agree bit for bit. A change here needs the same change there.
+//! the two agree bit for bit. A change here needs the same change there;
+//! `web/src/viewport-parity.test.ts` fails when they disagree.
 //!
 //! See ADR-0011 for why the scale is keyed to a fixed reference width
 //! rather than the live buffer width.

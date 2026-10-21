@@ -15,7 +15,7 @@ import { defaultModeForField, isModeValidForField } from './field-modes.js'
 import { createGesturePhaseStore } from './gesture-phase.js'
 import { InputController } from './input.js'
 import { PixelInspector } from './inspector.js'
-import { OrbitOverlay, viewGeometry } from './orbit.js'
+import { OrbitOverlay } from './orbit.js'
 import { cssToComplex } from './orbit-math.js'
 import { mountProgress } from './progress.js'
 import { createPwaLifecycle } from './pwa-lifecycle.js'
@@ -39,7 +39,7 @@ import {
   type ViewState,
   zoomDepth,
 } from './view-state.js'
-import { Viewport } from './viewport.js'
+import { clampZoom, Viewport } from './viewport.js'
 import { createViewportStore } from './viewport-store.js'
 import { fieldEnum, kindEnum, modeEnum, PALETTE_ACCENT, paletteEnum } from './wasm-enums.js'
 import type { RenderRequest } from './worker/protocol.js'
@@ -254,13 +254,16 @@ const measureLogicalSize = (): { width: number; height: number } => {
 // frame instead of always opening on the hardcoded seahorse. `parse` is
 // tolerant, so any field the hash omits or mangles falls back to the constant
 // default below and a junk hash degrades to the default view rather than
-// failing. Two values get a domain repair the codec can't own: `maxIter` is
-// snapped to a real slider stop (a stale count would otherwise throw in the
-// `Controls` constructor), and an incoherent (field, normalisation) pair is
-// replaced with the field's default — the same rule `Controls` enforces — so
-// `current`, the form, and the rendered frame always agree. `re`/`im` are
-// finite and `zoom` is finite & > 0 by `parse`'s contract, exactly what the
-// `Viewport` constructor validates, so it never throws on resolved input.
+// failing. Three values get a domain repair the codec can't own: `zoom` is
+// clamped to the range a gesture can reach (`clampZoom`; a zoom like 1e-310
+// would overflow the pixel maths, so every pan and zoom from it would throw),
+// `maxIter` is snapped to a real slider stop (a stale count would otherwise
+// throw in the `Controls` constructor), and an incoherent (field,
+// normalisation) pair is replaced with the field's default — the same rule
+// `Controls` enforces — so `current`, the form, and the rendered frame always
+// agree. `re`/`im` are finite and `zoom` is finite & > 0 by `parse`'s
+// contract, exactly what the `Viewport` constructor validates, so it never
+// throws on resolved input.
 //
 // Render scale is NOT carried in the hash (it's a device quality knob, not
 // part of the shared view), so the caller passes the scale to preserve: the
@@ -282,7 +285,8 @@ const resolveView = (
   hash: string,
   renderScale: number,
 ): { view: ViewState; settings: Settings } => {
-  const view: ViewState = { ...DEFAULT_VIEW, ...(parse(hash) ?? {}) }
+  const parsed: ViewState = { ...DEFAULT_VIEW, ...(parse(hash) ?? {}) }
+  const view: ViewState = { ...parsed, zoom: clampZoom(parsed.zoom) }
   const settings: Settings = {
     maxIter: nearestMaxIterStop(view.maxIter),
     renderScale,
@@ -513,24 +517,22 @@ input = new InputController(
   //    point and switches to Julia (O2, #92).
   //  - any other click seeds/pins the orbit at that point (E1, #94).
   // Both map the click through the frame it landed on, not the store, which
-  // lags a zoom Preview still on screen.
+  // lags a zoom Preview still on screen. The frame is a `ViewGeometry`, and
+  // the controller never reports a click on a degenerate box.
   (cssX, cssY, frame, modifiers) => {
-    const view = viewGeometry(frame.viewport, frame.rect)
     // A click that *began* while the drawer was open is a light-dismiss, not a
     // c-pick (the live `.open` class can't be used — the dismiss already
     // cleared it on the canvas `pointerup`; see `drawerOpenAtPress`).
     if (modifiers.altKey && current.mode === 'mandelbrot' && !drawerOpenAtPress) {
-      if (view !== null) {
-        const { re, im } = cssToComplex(cssX, cssY, view)
-        const next = pickJuliaSettings(current, re, im)
-        // Mirror the picked settings into the form (no emit), then run the
-        // dispatcher exactly as the hashchange handler does: branch 1 (mode
-        // change) resets to the Julia default view and rerenders with the
-        // picked c, and `syncView` persists the new view to the URL.
-        controls.applySettings(next)
-        applySettings(next)
-        syncView()
-      }
+      const { re, im } = cssToComplex(cssX, cssY, frame)
+      const next = pickJuliaSettings(current, re, im)
+      // Mirror the picked settings into the form (no emit), then run the
+      // dispatcher exactly as the hashchange handler does: branch 1 (mode
+      // change) resets to the Julia default view and rerenders with the
+      // picked c, and `syncView` persists the new view to the URL.
+      controls.applySettings(next)
+      applySettings(next)
+      syncView()
       return
     }
     // A click that began while the drawer was open is a light-dismiss, not an
@@ -539,7 +541,7 @@ input = new InputController(
     // controller's `pointerup` runs — so the same press-time flag must suppress
     // the pin. The flag re-arms on the next `pointerdown`, so no reset is needed.
     if (drawerOpenAtPress) return
-    orbitOverlay.pin(cssX, cssY, view)
+    orbitOverlay.pin(cssX, cssY, frame)
   },
 )
 

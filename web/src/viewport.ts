@@ -12,7 +12,7 @@
  * So this is a mirror, and every formula keeps Rust's operation order. Both
  * sides compute in IEEE-754 binary64 with no fused multiply-add, so the two
  * agree bit for bit, not merely within a tolerance. Change one, change the
- * other (#169 tests them against each other).
+ * other: `viewport-parity.test.ts` compares them on the real module (#169).
  *
  * An immutable value: every operation returns a new viewport. Its fields are
  * plain numbers, so there is nothing to free and nothing to flatten before a
@@ -41,6 +41,41 @@ export const MAX_ZOOM = 1e13
 /** Complex-plane size of one pixel at `zoom`, the same on both axes (`Viewport::pixel_scale`). */
 export function pixelScale(zoom: number): number {
   return BASE_RE_SPAN / REFERENCE_WIDTH / zoom
+}
+
+/** `zoom` clamped to `[MIN_ZOOM, MAX_ZOOM]`, as `zoom_around` clamps it. */
+export function clampZoom(zoom: number): number {
+  return Math.min(Math.max(zoom, MIN_ZOOM), MAX_ZOOM)
+}
+
+/** The CSS size of the box a viewport is displayed in (`getBoundingClientRect`'s). */
+export interface BoxSize {
+  readonly width: number
+  readonly height: number
+}
+
+/**
+ * The grid position of the sample drawn under CSS point `(cssX, cssY)` of the
+ * box the viewport is displayed in (B5, #76). Every CSS → grid mapping goes
+ * through here: the zoom anchor, and the click, hover and inspector readouts.
+ * TypeScript only; the compute never sees CSS pixels.
+ *
+ * Two steps. Scale by the viewport's logical grid over the box, not the
+ * render buffer, so it holds at any render scale. Then go back half a pixel:
+ * the sample at grid coordinate j is drawn across the cell [j, j + 1), so the
+ * cursor's cell-edge position `cssX · scale` sits half a pixel past the
+ * sample it is over.
+ */
+export function cssToGrid(
+  viewport: Viewport,
+  box: BoxSize,
+  cssX: number,
+  cssY: number,
+): { x: number; y: number } {
+  return {
+    x: (cssX * viewport.width) / box.width - 0.5,
+    y: (cssY * viewport.height) / box.height - 0.5,
+  }
 }
 
 export class Viewport {
@@ -131,7 +166,7 @@ export class Viewport {
       throw new Error('zoomAround: factor must be finite and > 0')
     }
     const pre = this.pixelToComplex(pixelX, pixelY)
-    const zoom = Math.min(Math.max(this.zoom * factor, MIN_ZOOM), MAX_ZOOM)
+    const zoom = clampZoom(this.zoom * factor)
     const candidate = new Viewport(this.centerRe, this.centerIm, zoom, this.width, this.height)
     const post = candidate.pixelToComplex(pixelX, pixelY)
     return new Viewport(

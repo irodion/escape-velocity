@@ -1,5 +1,5 @@
 import type { GesturePhaseStore } from './gesture-phase.js'
-import type { Viewport } from './viewport.js'
+import { cssToGrid, type Viewport } from './viewport.js'
 import type { ViewportStore } from './viewport-store.js'
 import {
   applyZoomNotch,
@@ -422,9 +422,10 @@ export class InputController {
     const [midX, midY] = this.midpointBetween(this.pinch.pointerA, this.pinch.pointerB)
     const cssX = midX - rect.left
     const cssY = midY - rect.top
-    // The logical-grid sample under the midpoint anchors the zoom; the raw
-    // (cssX, cssY) anchors the Preview transform (see `cssToGridSample`).
-    const [pixelX, pixelY] = this.cssToGridSample(cssX, cssY, rect)
+    // The grid sample under the midpoint anchors the zoom. The raw
+    // (cssX, cssY) anchors the Preview transform: it pins the true on-screen
+    // position, not a sample, so it takes no half-pixel.
+    const { x: pixelX, y: pixelY } = cssToGrid(this.currentViewport, rect, cssX, cssY)
 
     this.zoomPreview = applyZoomNotch(this.zoomPreview, pixelX, pixelY, cssX, cssY, factor)
     this.currentViewport = this.zoomPreview.viewport
@@ -505,8 +506,8 @@ export class InputController {
     const rect = this.canvas.getBoundingClientRect()
     if (rect.width <= 0 || rect.height <= 0) {
       // A degenerate box (display:none, detached) can't scale the delta — it
-      // would reach the WASM seam as NaN/Infinity and fail its finite-input
-      // check — so commit the viewport unpanned.
+      // would be NaN/Infinity and fail `panByPixels`' finite-input check — so
+      // commit the viewport unpanned.
       this.store.set(this.currentViewport, 'gesture')
       return
     }
@@ -579,32 +580,6 @@ export class InputController {
     return [(a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2]
   }
 
-  /**
-   * Map a CSS-pixel cursor position to the logical-grid sample point that
-   * `Viewport.zoomAround` (and `pixelToComplex`) consume. Both the wheel
-   * and pinch zoom feeders go through here, so the convention lives in one
-   * place (B5, #76).
-   *
-   * Two corrections are folded in:
-   *  - Scale by the viewport's *logical* dimensions over `rect`, not the
-   *    render buffer, so the anchored point is correct at any render scale.
-   *  - Subtract a half-pixel. `pixelToComplex` samples index j at
-   *    coordinate j, so the sample for buffer pixel j is displayed across the
-   *    screen cell [j, j+1) centred at j+0.5. The cursor's CSS coordinate is
-   *    cell-edge, so the buffer position under it is `cssX·scale`; the −0.5
-   *    names the *sample* drawn there — the point that must stay put.
-   *
-   * The raw `(cssX, cssY)` is kept separately by callers to anchor the CSS
-   * Preview transform: that pins the true on-screen position, not a grid
-   * sample, so it must not get the −0.5.
-   */
-  private cssToGridSample(cssX: number, cssY: number, rect: DOMRect): [number, number] {
-    return [
-      (cssX * this.currentViewport.width) / rect.width - 0.5,
-      (cssY * this.currentViewport.height) / rect.height - 0.5,
-    ]
-  }
-
   private readonly handleWheel = (event: WheelEvent): void => {
     event.preventDefault()
     // A notch mid-drag (mouse button held) is ignored: a Preview transform
@@ -646,9 +621,9 @@ export class InputController {
     if (rect === null || rect.width <= 0 || rect.height <= 0) return
     const cssX = event.clientX - rect.left
     const cssY = event.clientY - rect.top
-    // The cursor's logical-grid sample anchors the zoom; the raw (cssX, cssY)
-    // anchors the Preview transform (see `cssToGridSample`).
-    const [pixelX, pixelY] = this.cssToGridSample(cssX, cssY, rect)
+    // The grid sample under the cursor anchors the zoom; the raw (cssX, cssY)
+    // anchors the Preview transform (as for a pinch).
+    const { x: pixelX, y: pixelY } = cssToGrid(this.currentViewport, rect, cssX, cssY)
     const factor = 1.25 ** (-normalizeWheelDelta(event) / 100)
 
     this.zoomPreview = applyZoomNotch(preview, pixelX, pixelY, cssX, cssY, factor)
