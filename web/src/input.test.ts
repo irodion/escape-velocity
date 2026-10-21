@@ -402,7 +402,7 @@ describe('InputController', () => {
     canvas.dispatchEvent(pe('pointermove', { clientX: 103, clientY: 46 }))
     canvas.dispatchEvent(pe('pointerup', { clientX: 104, clientY: 47 }))
 
-    expect(onClick).toHaveBeenCalledWith(104, 47, { altKey: false })
+    expect(onClick).toHaveBeenCalledWith(104, 47, expect.anything(), { altKey: false })
     expect(onInvalidate).not.toHaveBeenCalled()
     expect(offscreenCtxStub.drawImage).not.toHaveBeenCalled()
     expect(ctxStub.drawImage).not.toHaveBeenCalled()
@@ -445,14 +445,17 @@ describe('InputController', () => {
     expect(offscreenCtxStub.drawImage).toHaveBeenCalledWith(canvas, 0, 0)
   })
 
-  it('a tap during a wheel scrub leaves the Preview and its Settle alone', () => {
-    // The click is mapped through the box as displayed, so a Preview it tore
-    // down would put a different point under the finger than the one tapped.
-    // Left alone, the scrub Settles on its own timer with no extra render.
+  it('a tap during a wheel scrub leaves the Preview alone and maps through its zoom', () => {
+    // A Preview torn down by the tap would cancel its Settle and strand the
+    // zoom in the controller. Left alone, the scrub Settles once the press is
+    // over, with no extra render. The tap maps through the frame on screen:
+    // the scrub's zoom over the untransformed box. The store doesn't hold that
+    // zoom yet, and the live box is scaled.
     const zoomed = makeZoomResult(0.8)
     viewport.zoom_around.mockReturnValue(zoomed)
     const onClick = vi.fn()
     const { phase } = mount(canvas, viewport, onChange, undefined, onClick)
+    const layout = canvas.getBoundingClientRect()
 
     canvas.dispatchEvent(
       new WheelEvent('wheel', {
@@ -465,16 +468,79 @@ describe('InputController', () => {
     )
     const transform = canvas.style.transform
     expect(transform).not.toBe('')
+    // What the box measures once the Preview scales it.
+    setRect(canvas, { left: 80, top: 60, width: 640, height: 480 })
     canvas.dispatchEvent(pe('pointerdown', { clientX: 120, clientY: 80 }))
+    // Held past the Settle delay: the Settle waits for the press to end.
+    vi.advanceTimersByTime(WHEEL_SETTLE_MS * 3)
+    expect(onChange).not.toHaveBeenCalled()
     canvas.dispatchEvent(pe('pointerup', { clientX: 120, clientY: 80 }))
 
     expect(onClick).toHaveBeenCalledTimes(1)
+    expect(onClick).toHaveBeenCalledWith(
+      120,
+      80,
+      { viewport: zoomed, rect: layout },
+      { altKey: false },
+    )
+    expect(onClick.mock.calls[0][2].viewport).toBe(zoomed)
     expect(canvas.style.transform).toBe(transform)
     expect(phase.get()).toBe('preview')
     expect(onChange).not.toHaveBeenCalled()
     vi.advanceTimersByTime(WHEEL_SETTLE_MS)
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledWith(zoomed)
+  })
+
+  it('a tap on a Settled zoom still awaiting its frame maps through the zoom on screen', () => {
+    // After the Settle the store holds the zoom, but the old frame stays
+    // CSS-scaled until the new one paints, so the live box is still scaled. A
+    // notch landing before that paint moves the Preview past the store again.
+    // Either way the tap maps through the zoom the Preview shows, over the
+    // untransformed box, until the fresh frame paints.
+    const zoomed = makeZoomResult(1.25)
+    const zoomedAgain = makeZoomResult(1.5625)
+    viewport.zoom_around.mockReturnValue(zoomed)
+    zoomed.zoom_around.mockReturnValue(zoomedAgain)
+    const onClick = vi.fn()
+    const { controller, store } = mount(canvas, viewport, onChange, undefined, onClick)
+    const layout = canvas.getBoundingClientRect()
+    const notch = (): void => {
+      canvas.dispatchEvent(
+        new WheelEvent('wheel', {
+          deltaY: -100,
+          clientX: 200,
+          clientY: 150,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+    }
+    const tapFrame = (): unknown => {
+      canvas.dispatchEvent(pe('pointerdown', { clientX: 120, clientY: 80 }))
+      canvas.dispatchEvent(pe('pointerup', { clientX: 120, clientY: 80 }))
+      return onClick.mock.lastCall?.[2]
+    }
+
+    notch()
+    vi.advanceTimersByTime(WHEEL_SETTLE_MS)
+    expect(store.get()).toBe(zoomed)
+    setRect(canvas, { left: -100, top: -75, width: 1000, height: 750 })
+    expect(tapFrame()).toEqual({ viewport: zoomed, rect: layout })
+    expect(onClick).toHaveBeenLastCalledWith(120, 80, expect.anything(), { altKey: false })
+
+    notch()
+    expect(store.get()).toBe(zoomed)
+    const frame = tapFrame() as { viewport: unknown; rect: DOMRect }
+    expect(frame.viewport).toBe(zoomedAgain)
+    expect(frame.rect).toBe(layout)
+
+    // Once the fresh frame paints, the box is measured live again.
+    controller.onRenderPainted()
+    setRect(canvas, { left: 10, top: 20, width: 800, height: 600 })
+    const live = canvas.getBoundingClientRect()
+    expect((tapFrame() as { rect: DOMRect }).rect).toBe(live)
+    expect(onClick).toHaveBeenLastCalledWith(110, 60, expect.anything(), { altKey: false })
   })
 
   it('a cancelled press is not a click; a cancelled pan commits where it was last shown', () => {
@@ -507,15 +573,22 @@ describe('InputController', () => {
     const store = createViewportStore(viewport as unknown as Viewport)
     new InputController(canvas, store, createGesturePhaseStore(), undefined, onClick)
 
-    // A plain in-slop tap: altKey false, CSS position relative to the box.
+    // A plain in-slop tap: altKey false, CSS position relative to the box, and
+    // the frame it landed on: the store's viewport over that box.
+    const box = canvas.getBoundingClientRect()
     canvas.dispatchEvent(pe('pointerdown', { clientX: 120, clientY: 80 }))
     canvas.dispatchEvent(pe('pointerup', { clientX: 120, clientY: 80 }))
-    expect(onClick).toHaveBeenLastCalledWith(120, 80, { altKey: false })
+    expect(onClick).toHaveBeenLastCalledWith(
+      120,
+      80,
+      { viewport: store.get(), rect: box },
+      { altKey: false },
+    )
 
     // An Alt-tap at a different point: altKey true (read from the up event).
     canvas.dispatchEvent(pe('pointerdown', { clientX: 200, clientY: 150, altKey: true }))
     canvas.dispatchEvent(pe('pointerup', { clientX: 200, clientY: 150, altKey: true }))
-    expect(onClick).toHaveBeenLastCalledWith(200, 150, { altKey: true })
+    expect(onClick).toHaveBeenLastCalledWith(200, 150, expect.anything(), { altKey: true })
   })
 
   it('pinches: two pointers zoom around the midpoint, Settling once when a finger lifts', () => {
@@ -862,10 +935,14 @@ describe('InputController', () => {
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
     expect(canvas.style.transform).not.toBe('')
     expect(onInvalidate).toHaveBeenCalledTimes(1)
+    // A press held past the Settle delay holds the Settle: it may become a pan,
+    // which would discard the render the Settle dispatched.
+    vi.advanceTimersByTime(WHEEL_SETTLE_MS * 3)
+    expect(onChange).not.toHaveBeenCalled()
 
-    // The drag starts before the Settle fires: it tears the Preview down without
-    // rendering (firing the zoom's Settle would paint an intermediate frame
-    // mid-drag) and discards any in-flight render (bringing the total to two).
+    // The drag starts: it tears the Preview down without rendering (firing the
+    // zoom's Settle would paint an intermediate frame mid-drag) and discards
+    // any in-flight render (bringing the total to two).
     canvas.dispatchEvent(pe('pointermove', { clientX: 115, clientY: 60 }))
     expect(canvas.style.transform).toBe('')
     expect(onInvalidate).toHaveBeenCalledTimes(2)

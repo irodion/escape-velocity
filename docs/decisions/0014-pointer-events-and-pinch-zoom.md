@@ -36,7 +36,8 @@ two-finger pinch path that reuses the ADR-0012 accumulator.
    in a `Map` keyed by `pointerId`: one pointer pans (the existing in-buffer
    drag-shift preview, unchanged), two pointers pinch, and a press that moves
    less than `PAN_DEADZONE_PX` is a click/tap (the existing deadzone branch that
-   feeds the orbit pin and Julia c-picker). Migrating off mouse events also
+   feeds the orbit pin and Julia c-picker; since replaced by `CLICK_SLOP_PX`, see
+   the 2026-10-17 update below). Migrating off mouse events also
    removes the double-handling hazard of synthesised compatibility mouse events
    on touch.
 
@@ -157,3 +158,12 @@ displacement against a 0.5 logical-pixel deadzone.
 - **`pointercancel`** still tears a gesture down the same way `pointerup` does
   (Decision 4), with one exception: a cancelled press is never a click. A
   cancelled pan commits from the pointer's last tracked move.
+- **A press holds a pending wheel Settle** until it ends. If it becomes a pan,
+  the pan carries the zoom; if it is a click, the Settle fires once it is over.
+- **A click maps through the frame on screen,** not the store. While a Preview
+  transform is up, the old frame shows the controller's working viewport over
+  the untransformed box. The store lags that viewport until the Settle, and
+  again when a notch lands before the Settle's frame paints. So the controller
+  hands its consumer the viewport and box along with the position
+  (`ClickFrame`), rather than letting the consumer pair the store with a box it
+  measures itself.

@@ -147,7 +147,8 @@ export const CLICK_SLOP_PX = 4
  * the pending Settle window tears the Preview down without rendering: the
  * accumulated zoom rides in the gesture's start viewport, so its commit issues
  * a single render rather than the zoom and the gesture each issuing one. A
- * click leaves the Preview and its Settle alone.
+ * press holds a pending Settle until it ends, since it may become such a pan.
+ * A click leaves the Preview alone, and its Settle fires once the press is over.
  *
  * ## Gesture phase
  *
@@ -190,7 +191,8 @@ export class InputController {
   // The canvas's *untransformed* layout box, captured at the start of a
   // scrub/pinch. `getBoundingClientRect` reflects the live CSS transform, so
   // once the Preview has scaled the canvas, re-reading it would feed
-  // drifting, scaled cursor coordinates into the zoom — see `handleWheel`.
+  // drifting, scaled cursor coordinates into the zoom — see `handleWheel`. A
+  // click on the Preview maps through it for the same reason (see `click`).
   private scrubRect: DOMRect | null = null
   // Reusable offscreen canvas holding the drag snapshot. Cached across
   // gestures so a pan never allocates a fresh buffer; `captureSnapshot`
@@ -199,9 +201,10 @@ export class InputController {
 
   // Blit the current canvas into the cached offscreen buffer and return
   // it, sizing the buffer to match. Returns null if the offscreen 2D
-  // context is unavailable (pointerdown then bails, as it does for a null
-  // main context). The full-surface `drawImage` at (0,0) overwrites the
-  // whole buffer, so no clear is needed even when the buffer is reused.
+  // context is unavailable (`startDrag` then drops the press, as pointerdown
+  // ignores one for a null main context). The full-surface `drawImage` at
+  // (0,0) overwrites the whole buffer, so no clear is needed even when the
+  // buffer is reused.
   private captureSnapshot(): HTMLCanvasElement | null {
     const off = this.snapshotCanvas ?? document.createElement('canvas')
     this.snapshotCanvas = off
@@ -288,9 +291,9 @@ export class InputController {
 
   // Publish the gesture phase from this controller's own state. A press counts
   // as dragging from pointerdown, even over a live Preview it may yet leave
-  // alone as a click. Otherwise the states don't overlap: a pan starts by
-  // tearing down any Preview, a pinch by dropping the pan, and the wheel is
-  // ignored mid-press. A pinch counts as a Preview from its second finger,
+  // alone as a click (see `GesturePhase`). Otherwise the states don't overlap:
+  // a pan starts by tearing down any Preview, a pinch by dropping the pan, and
+  // the wheel is ignored mid-press. A pinch counts as a Preview from its second finger,
   // before its first move scales anything.
   private publishPhase(): void {
     const previewing = this.previewShown || this.pinch !== null
@@ -466,18 +469,19 @@ export class InputController {
     }
 
     if (this.dragState !== null) {
-      // A cancel's own coordinates can be zeroed; the last move is reliable.
-      this.endDrag(event, event.type === 'pointercancel' ? last : event)
+      this.endDrag(event, last)
     }
   }
 
-  // End a one-pointer press released (or cancelled) at `at`: a click if it
-  // never left the click slop, otherwise a pan, committed.
-  private endDrag(event: PointerEvent, at: PointerPosition): void {
+  // End a one-pointer press: a click if it never left the click slop,
+  // otherwise a pan, committed. `last` is the pointer's last tracked position.
+  private endDrag(event: PointerEvent, last: PointerPosition): void {
     const drag = this.dragState
     if (drag === null) return
     this.dropDrag()
 
+    // A cancel's own coordinates can be zeroed; the last move is reliable.
+    const at = event.type === 'pointercancel' ? last : event
     const dxCss = at.clientX - drag.startClientX
     const dyCss = at.clientY - drag.startClientY
     if (drag.snapshot === null) {
@@ -539,15 +543,22 @@ export class InputController {
   // (Alt-click picks the Julia constant) without this layer knowing either
   // intent — it stays presentation-free.
   //
-  // The click commits nothing. A press leaves a live zoom Preview alone, so the
-  // position is measured against the box as displayed — the same box the
-  // consumer measures — and an unsettled scrub still Settles on its timer.
+  // The click commits nothing and leaves a live zoom Preview alone, so it maps
+  // through the frame as displayed: `currentViewport` over the untransformed
+  // box, which the Preview transform makes the old frame show. Neither the
+  // store nor the live box will do. The store lags a scrub until the Settle,
+  // and again if a notch lands before the Settle's frame paints. The live box
+  // is scaled by the transform.
   private click(event: PointerEvent): void {
-    const rect = this.canvas.getBoundingClientRect()
+    // `scrubRect` is the box measured, untransformed, when the Preview began.
+    const rect = (this.previewShown ? this.scrubRect : null) ?? this.canvas.getBoundingClientRect()
     if (rect.width <= 0 || rect.height <= 0) return
-    this.onClick(event.clientX - rect.left, event.clientY - rect.top, {
-      altKey: event.altKey,
-    })
+    this.onClick(
+      event.clientX - rect.left,
+      event.clientY - rect.top,
+      { viewport: this.currentViewport, rect },
+      { altKey: event.altKey },
+    )
   }
 
   // Euclidean distance, in client (CSS) pixels, between two tracked pointers.
@@ -658,6 +669,13 @@ export class InputController {
    * `'gesture'` write, so it does not tear the kept Preview down.
    */
   private readonly settleZoom = (): void => {
+    // A press is down: hold the Settle until it ends. If the press becomes a
+    // pan, `startDrag` tears the Preview down and the pan's commit carries the
+    // zoom, so a render dispatched now would only be discarded.
+    if (this.dragState !== null) {
+      this.settleTimer = setTimeout(this.settleZoom, WHEEL_SETTLE_MS)
+      return
+    }
     this.settleTimer = undefined
     if (this.zoomPreview === null) return
     this.store.set(this.zoomPreview.viewport, 'gesture')
@@ -730,14 +748,15 @@ export class InputController {
     // presentation-free. Defaults to a no-op for tests that don't wire it.
     private readonly onInvalidate: () => void = () => {},
     // Called on a click/tap (a press released within `CLICK_SLOP_PX`)
-    // with the click's CSS-pixel position relative to the canvas and the
-    // modifier-key state. Drives the orbit visualizer's pin (E1, #94) on a
-    // plain click and the Julia c-picker (O2, #92) on an Alt-click; a no-op by
-    // default, so the controller stays presentation-free and existing tests
-    // need no wiring.
+    // with the click's CSS-pixel position relative to `frame.rect`, the frame
+    // that position lands on (see `click`), and the modifier-key state. Drives
+    // the orbit visualizer's pin (E1, #94) on a plain click and the Julia
+    // c-picker (O2, #92) on an Alt-click; a no-op by default, so the controller
+    // stays presentation-free and existing tests need no wiring.
     private readonly onClick: (
       cssX: number,
       cssY: number,
+      frame: ClickFrame,
       modifiers: { altKey: boolean },
     ) => void = () => {},
   ) {
@@ -779,9 +798,19 @@ interface DragState {
   snapshot: HTMLCanvasElement | null
 }
 
+/**
+ * The frame a click landed on: `viewport` as drawn over `rect`, the CSS box
+ * (untransformed) that the click's position is relative to. The consumer maps
+ * the click through these rather than the store and a box it measures itself.
+ */
+export interface ClickFrame {
+  readonly viewport: Viewport
+  readonly rect: DOMRect
+}
+
 // Whether a press displaced by (dxCss, dyCss) is still a click (see
-// `CLICK_SLOP_PX`).
-function withinClickSlop(dxCss: number, dyCss: number): boolean {
+// `CLICK_SLOP_PX`). Shared with the drawer's light-dismiss.
+export function withinClickSlop(dxCss: number, dyCss: number): boolean {
   return Math.abs(dxCss) <= CLICK_SLOP_PX && Math.abs(dyCss) <= CLICK_SLOP_PX
 }
 

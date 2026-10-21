@@ -20,14 +20,14 @@
  * test in `drawer.test.ts`.
  */
 
-import { CLICK_SLOP_PX } from './input.js'
+import { withinClickSlop } from './input.js'
 
 // A deliberate *click* on the fractal travels no more than `CLICK_SLOP_PX` CSS
 // pixels between press and release. Past it, the gesture is a pan-drag — which
 // must leave the drawer open so the user can reframe the view while tuning a
-// control. The slop is the input controller's own click-vs-pan threshold, so a
-// press that dismisses never also pans. A wheel-zoom fires no mouse press at
-// all, so it never reaches the dismiss path.
+// control. The test is the input controller's own click-vs-pan test
+// (`withinClickSlop`), so a press that dismisses never also pans. A wheel-zoom
+// fires no mouse press at all, so it never reaches the dismiss path.
 
 // The toggle's glyph is *drawn*, not an emoji: a crosshair that echoes the
 // canvas's `crosshair` cursor (the affordance points at what it controls),
@@ -168,8 +168,7 @@ export function mountDrawer(
       activePointers.add(event.pointerId)
     })
     const movedFar = (event: PointerEvent): boolean =>
-      Math.abs(event.clientX - downX) > CLICK_SLOP_PX ||
-      Math.abs(event.clientY - downY) > CLICK_SLOP_PX
+      !withinClickSlop(event.clientX - downX, event.clientY - downY)
     // Past the slop the press is a pan, and stays one even if it returns.
     dismissSurface.addEventListener('pointermove', (event) => {
       if (event.pointerId === armedPointerId && movedFar(event)) armedPointerId = null

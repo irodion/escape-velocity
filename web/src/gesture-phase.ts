@@ -3,8 +3,10 @@
  *
  *  - `idle`     — none: the canvas shows a settled frame, pixel for pixel the
  *    store's viewport.
- *  - `dragging` — a one-pointer pan is in progress; the canvas buffer holds the
- *    drag snapshot shifted by the pointer.
+ *  - `dragging` — a one-pointer press is down. Once it leaves the click slop
+ *    it is a pan, and the canvas buffer holds the drag snapshot shifted by the
+ *    pointer; until then it may be a click, and a zoom Preview it pressed on
+ *    stays on screen.
  *  - `preview`  — a zoom Preview (ADR-0012): a pinch in progress, or a wheel
  *    scrub CSS-scaling the frame, including a Settled zoom whose fresh frame
  *    hasn't painted yet.
