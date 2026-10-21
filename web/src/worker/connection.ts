@@ -9,7 +9,9 @@
  * did: export kept waiting out its timeout on a `boot-error` the live client
  * already surfaced). A client gets `onReady`, the traffic after boot through
  * `onMessage`, and every way the worker can turn out unusable as one
- * `onFatal` with a message fit for a person to read.
+ * `onFatal` with a message fit for a person to read. The worker is terminated
+ * then: nothing more can come of it, and a hung one would otherwise keep its
+ * WASM memory and pool threads for the life of the page.
  *
  * The watchdog has two modes. `'boot'` covers the boot only, and `ready`
  * stops it: the live client's worker idles for long stretches once booted.
@@ -29,8 +31,9 @@ export interface ConnectionHandlers {
   readonly onMessage: (msg: WorkerReply) => void
   /**
    * The worker is unusable: its boot failed or hung, it threw at the top
-   * level, or (`'stall'` mode) it went silent. Called at most once, and
-   * nothing is delivered after it.
+   * level, or (`'stall'` mode) it went silent. Called at most once, after the
+   * worker is terminated; nothing is delivered after it, not even a reply to
+   * a request still in flight.
    */
   readonly onFatal: (message: string) => void
 }
@@ -43,7 +46,11 @@ export interface ConnectionOptions {
 }
 
 export interface WorkerConnection {
-  /** Post a request. A no-op once the connection is fatal or closed. */
+  /**
+   * Post a request. Throws before `onReady`: the worker attaches its handler
+   * only once booted, so an earlier message would be lost without a word. A
+   * no-op once the connection is fatal or closed, which the caller was told.
+   */
   readonly post: (msg: MainToWorker) => void
   /** Stop the watchdog and terminate the worker. Nothing is delivered after it. */
   readonly close: () => void
@@ -78,7 +85,12 @@ export function connectWorker(
     stopWatchdog()
     timer = setTimeout(() => {
       timer = undefined
-      fail(ready ? stalledMessage(timeoutMs) : bootTimeoutMessage(timeoutMs, wasmInstantiated))
+      const stage = ready ? null : bootStage(wasmInstantiated)
+      fail(
+        watch === 'boot' && stage !== null
+          ? bootTimeoutMessage(timeoutMs, stage)
+          : stalledMessage(timeoutMs, stage),
+      )
     }, timeoutMs)
   }
   const fail = (message: string): void => {
@@ -87,6 +99,7 @@ export function connectWorker(
     }
     ended = true
     stopWatchdog()
+    worker.terminate()
     handlers.onFatal(message)
   }
 
@@ -123,8 +136,12 @@ export function connectWorker(
   // A top-level throw in the worker (WASM instantiation, or the cross-origin
   // isolation gate in worker.ts) fires here, not `onmessage`. No reply will
   // ever come. `preventDefault` suppresses the browser's own console report;
-  // the client logs the fatal more legibly.
+  // the client logs the fatal more legibly. Once the connection has ended
+  // there is no fatal left to report it as, so the browser keeps its report.
   worker.onerror = (event: ErrorEvent): void => {
+    if (ended) {
+      return
+    }
     event.preventDefault()
     fail(
       event.message ||
@@ -137,9 +154,13 @@ export function connectWorker(
 
   return {
     post: (msg) => {
-      if (!ended) {
-        worker.postMessage(msg)
+      if (ended) {
+        return
       }
+      if (!ready) {
+        throw new Error(`posted a '${msg.kind}' to the render worker before it was ready`)
+      }
+      worker.postMessage(msg)
     },
     close: () => {
       ended = true
@@ -178,24 +199,30 @@ function bootErrorMessage(err: BootError): string {
   }
 }
 
-// A timeout, not a thrown error: the worker hung rather than rejecting (a
-// rejection would have arrived as `boot-error`). The boot-stage heartbeat
-// localises it: if WASM instantiated, the thread pool is what never came up;
-// if not, instantiation itself stalled.
-function bootTimeoutMessage(timeoutMs: number, wasmInstantiated: boolean): string {
-  const where = wasmInstantiated
+// Where a boot that went quiet stalled. A timeout, not a thrown error: the
+// worker hung rather than rejecting (a rejection would have arrived as
+// `boot-error`). The boot-stage heartbeat localises it: if WASM instantiated,
+// the thread pool is what never came up; if not, instantiation itself stalled.
+function bootStage(wasmInstantiated: boolean): string {
+  return wasmInstantiated
     ? 'its multithreaded worker pool did not come up'
     : 'the WebAssembly module did not finish loading'
+}
+
+// The `'boot'` watchdog: the boot as a whole overran its time.
+function bootTimeoutMessage(timeoutMs: number, stage: string): string {
   return (
-    `The renderer did not start within ${timeoutMs / 1000}s: ${where}. ` +
+    `The renderer did not start within ${timeoutMs / 1000}s: ${stage}. ` +
     'This can be an unsupported browser, lost cross-origin isolation ' +
     '(SharedArrayBuffer), or a stale cached build — try fully closing the ' +
     'tab and reopening, or reload in a private window.'
   )
 }
 
-// A booted worker that went silent mid-request (`'stall'` mode): stuck, or
-// dead without posting a terminal message.
-function stalledMessage(timeoutMs: number): string {
-  return `The renderer stopped responding: nothing from it for ${timeoutMs / 1000}s.`
+// The `'stall'` watchdog: the worker went silent, stuck or dead without a
+// terminal message. Every message re-armed it, so name the gap, not a total;
+// `stage` says where, if it hadn't finished booting.
+function stalledMessage(timeoutMs: number, stage: string | null): string {
+  const where = stage === null ? '' : ` (while starting: ${stage})`
+  return `The renderer stopped responding: nothing from it for ${timeoutMs / 1000}s${where}.`
 }

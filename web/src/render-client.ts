@@ -222,8 +222,8 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
   let pending: ClientRequest | null = null
   let ready = false
   // Set once the connection reports the worker unusable (see `reportFatal`).
-  // A dead worker will never respond, so `issue` and `flush` no-op rather
-  // than parking requests in a slot that can't drain.
+  // A dead worker will never respond, so `flush` sends nothing more: a request
+  // issued after it waits in the pending slot for good.
   let dead = false
   // The canvas context to paint the next fresh response onto. Only a current
   // response paints (see the module doc), and `targetCtx` always tracks the
@@ -349,10 +349,15 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
   /**
    * The connection found the worker unusable (its boot failed or hung, or it
    * threw at the top level; called at most once): mark it dead, log, and hand
-   * the message to the host surface, if injected.
+   * the message to the host surface, if injected. A request in flight gets no
+   * reply now, so end its progress indicator here.
    */
   function reportFatal(message: string): void {
     dead = true
+    if (inFlight) {
+      inFlight = false
+      progress.end()
+    }
     console.error(`render worker fatal: ${message}`)
     deps.onFatal?.(message)
   }

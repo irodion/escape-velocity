@@ -39,11 +39,11 @@ import type { RenderRequest, RenderResponse } from './worker/protocol.js'
 // Inactivity watchdog for an export render (the connection's `'stall'` mode):
 // give up and free the UI once the worker has gone this long without posting
 // anything. Every message (boot heartbeat, `ready`, each band's `progress`)
-// re-arms it, so it never bounds a slow-but-progressing render — a deep, 16M px frame can legitimately run well
-// past a minute in total (#157). What it catches is a worker that never settles
-// (a stuck boot — the same failure the live client guards with its own boot
-// watchdog — or a worker that dies without posting a terminal message), which
-// would otherwise leave the export buttons disabled forever with no way to retry.
+// re-arms it, so it never bounds a slow-but-progressing render — a deep, 16M px
+// frame can legitimately run well past a minute in total (#157). What it
+// catches is a worker that never settles (a stuck boot, or a worker that dies
+// without posting a terminal message), which would otherwise leave the export
+// buttons disabled forever with no way to retry.
 const EXPORT_STALL_TIMEOUT_MS = 60_000
 
 // Pixel budget for an export buffer (#157). Deliberately separate from the
@@ -193,7 +193,8 @@ export function renderOnce(
           // A band's `progress` needs nothing here: the connection's stall
           // watchdog already counted it. A one-shot export shows no bar.
         },
-        onFatal: fail,
+        // The connection has already terminated the worker.
+        onFatal: (message) => reject(new Error(message)),
       },
       { timeoutMs: EXPORT_STALL_TIMEOUT_MS, watch: 'stall' },
     )

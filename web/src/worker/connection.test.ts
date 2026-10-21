@@ -23,7 +23,7 @@ describe('connectWorker', () => {
     vi.useRealTimers()
   })
 
-  it('builds the worker once and posts requests to it', () => {
+  it('builds the worker once and posts requests to it once ready', () => {
     let built = 0
     const worker = new FakeWorker()
     const connection = connectWorker(
@@ -33,8 +33,12 @@ describe('connectWorker', () => {
       },
       { onReady: () => {}, onMessage: () => {}, onFatal: () => {} },
     )
-    connection.post(REQUEST)
     expect(built).toBe(1)
+    // The worker attaches its handler only once booted, so an earlier post
+    // would vanish: it throws instead.
+    expect(() => connection.post(REQUEST)).toThrow('before it was ready')
+    worker.send(READY)
+    connection.post(REQUEST)
     expect(worker.posted).toEqual([REQUEST])
   })
 
@@ -81,10 +85,13 @@ describe('connectWorker', () => {
     expect(bare.onFatal).toHaveBeenCalledWith(expect.stringContaining('cross-origin isolated'))
   })
 
-  it('reports a fatal once and delivers nothing after it', () => {
+  it('reports a fatal once, terminates the worker, and delivers nothing after it', () => {
     const { worker, connection, onReady, onMessage, onFatal } = connect({ timeoutMs: 5000 })
     worker.send({ kind: 'boot-error', stage: 'isolation', message: '' })
-    worker.fail('late')
+    expect(worker.terminated).toBe(true)
+    // A later error has no fatal left to become, so the browser keeps its own
+    // report of it rather than having it vanish.
+    expect(worker.fail('late').defaultPrevented).toBe(false)
     vi.advanceTimersByTime(5000) // the watchdog is stopped, not fired
     worker.send(READY)
     worker.send(PROGRESS)
@@ -94,6 +101,13 @@ describe('connectWorker', () => {
     expect(onReady).not.toHaveBeenCalled()
     expect(onMessage).not.toHaveBeenCalled()
     expect(worker.posted).toHaveLength(0)
+  })
+
+  it('terminates a worker the watchdog gives up on', () => {
+    const { worker, onFatal } = connect({ timeoutMs: 5000 })
+    vi.advanceTimersByTime(5000)
+    expect(onFatal).toHaveBeenCalledTimes(1)
+    expect(worker.terminated).toBe(true)
   })
 
   describe("the 'boot' watchdog", () => {
@@ -140,11 +154,17 @@ describe('connectWorker', () => {
       expect(onFatal.mock.calls[0][0]).toContain('stopped responding')
     })
 
-    it('names the boot stage when it fires before ready', () => {
+    it('names the boot stage when it fires before ready, as a gap, not a total', () => {
+      // The heartbeat re-armed it, so the boot ran longer than the timeout:
+      // the message mustn't claim it didn't start "within" it.
       const { worker, onFatal } = connect({ timeoutMs: 1000, watch: 'stall' })
+      vi.advanceTimersByTime(900)
       worker.send(BOOT)
       vi.advanceTimersByTime(1000)
-      expect(onFatal.mock.calls[0][0]).toContain('worker pool did not come up')
+      const message = onFatal.mock.calls[0][0] as string
+      expect(message).toContain('nothing from it for 1s')
+      expect(message).toContain('worker pool did not come up')
+      expect(message).not.toContain('within')
     })
   })
 

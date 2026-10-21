@@ -26,9 +26,12 @@ export class FakeWorker {
 
   /** Fire `onerror`, as a top-level throw in the worker would. */
   fail(message: string): { defaultPrevented: boolean } {
-    const event = { message, defaultPrevented: false, preventDefault: () => {} }
-    event.preventDefault = () => {
-      event.defaultPrevented = true
+    const event = {
+      message,
+      defaultPrevented: false,
+      preventDefault(): void {
+        event.defaultPrevented = true
+      },
     }
     this.onerror?.(event as unknown as ErrorEvent)
     return event

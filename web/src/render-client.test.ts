@@ -67,7 +67,7 @@ function makeClient(deps?: {
 } {
   const worker = new FakeWorker()
   const client = createRenderClient({
-    workerFactory: () => worker as unknown as Worker,
+    workerFactory: () => worker.asWorker(),
     ...deps,
   }) as unknown as TestRenderClient
   return { client, worker }
@@ -96,11 +96,11 @@ function deliver(
   worker: FakeWorker,
   data: RenderResponse | RenderError | ProgressResponse | Aborted | { kind: 'ready' },
 ): void {
-  worker.onmessage?.({ data } as MessageEvent)
+  worker.send(data)
 }
 
 function deliverError(worker: FakeWorker, epoch: number, message: string): void {
-  worker.onmessage?.({ data: { kind: 'error', epoch, message } } as MessageEvent)
+  worker.send({ kind: 'error', epoch, message })
 }
 
 function deliverProgress(
@@ -109,11 +109,11 @@ function deliverProgress(
   rowsDone: number,
   rowsTotal: number,
 ): void {
-  worker.onmessage?.({ data: { kind: 'progress', epoch, rowsDone, rowsTotal } } as MessageEvent)
+  worker.send({ kind: 'progress', epoch, rowsDone, rowsTotal })
 }
 
 function deliverAborted(worker: FakeWorker, epoch: number): void {
-  worker.onmessage?.({ data: { kind: 'aborted', epoch } } as MessageEvent)
+  worker.send({ kind: 'aborted', epoch })
 }
 
 function readyMsg(): { kind: 'ready' } {
@@ -170,7 +170,7 @@ describe('render-client', () => {
     createRenderClient({
       workerFactory: () => {
         calls += 1
-        return worker as unknown as Worker
+        return worker.asWorker()
       },
     })
     // The factory is the seam a future side-by-side view reuses; the client
@@ -601,17 +601,34 @@ describe('render-client', () => {
 
   it('reports a worker fatal to onFatal and stops dispatching (B4)', () => {
     const fatal = vi.fn()
+    const reporter = { begin: vi.fn(), report: vi.fn(), end: vi.fn() }
     vi.spyOn(console, 'error').mockImplementation(() => {})
-    const { client, worker } = makeClient({ onFatal: fatal })
-    deliver(worker, readyMsg())
+    const { client, worker, ctx } = readyWithStableFrame({ onFatal: fatal, progress: reporter })
+    reporter.begin.mockClear()
 
     worker.fail('LinkError: shared memory unavailable')
     expect(fatal).toHaveBeenCalledTimes(1)
     expect(fatal).toHaveBeenCalledWith('LinkError: shared memory unavailable')
 
-    // A dead worker can't drain the slot, so nothing is parked in it or sent.
+    // A dead worker will never reply, so the client dispatches nothing more:
+    // a render after it never starts (no progress indicator left hanging),
+    // and the probe refuses.
+    doRender(client, ctx)
+    expect(reporter.begin).not.toHaveBeenCalled()
+    expect(client.probe(1, 1, PALETTE_VIRIDIS, MODE_CYCLED)).toBe(false)
+  })
+
+  it('ends the progress of a render in flight when the worker turns fatal', () => {
+    // No reply will come for it, so the indicator mustn't stay up.
+    const reporter = { begin: vi.fn(), report: vi.fn(), end: vi.fn() }
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { client, worker } = makeClient({ progress: reporter })
+    deliver(worker, readyMsg())
     doRender(client, makeCtx())
-    expect(worker.posted).toHaveLength(0)
+    expect(reporter.begin).toHaveBeenCalledTimes(1)
+
+    worker.fail('worker died')
+    expect(reporter.end).toHaveBeenCalledTimes(1)
   })
 
   it('arms a 5 s boot watchdog only when a fatal surface is injected (B4)', () => {
@@ -784,9 +801,17 @@ function postedProbes(worker: FakeWorker): ProbeMsg[] {
 }
 
 function deliverProbeResponse(worker: FakeWorker, seq: number, probe: Partial<PixelProbe>): void {
-  worker.onmessage?.({
-    data: { kind: 'probe-response', seq, raw: 0, t: 0, inside: false, r: 0, g: 0, b: 0, ...probe },
-  } as MessageEvent)
+  worker.send({
+    kind: 'probe-response',
+    seq,
+    raw: 0,
+    t: 0,
+    inside: false,
+    r: 0,
+    g: 0,
+    b: 0,
+    ...probe,
+  })
 }
 
 // Drive the client into the exact window a hover may probe in: ready, one render
