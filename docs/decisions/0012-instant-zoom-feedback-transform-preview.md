@@ -59,7 +59,8 @@ tears the Preview down *without* rendering: the authoritative Viewport already
 carries the accumulated zoom, so it rides into the pan's start viewport and the
 pan's mouseup issues the single render — the zoom is never separately
 re-rendered (and an already in-flight Settle render is discarded so it can't
-paint mid-drag). Zoom-out is
+paint mid-drag). (Since #180 the pan does this on its first move past the
+click slop, not at the press; see ADR-0014's 2026-10-17 update.) Zoom-out is
 letterboxed with black (the outside-the-set colour) and zoom-in overflow is
 clipped with `overflow: hidden`. Pan is untouched; the zoom transform is
 additive.

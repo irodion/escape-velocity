@@ -16,7 +16,7 @@ import { defaultModeForField, isModeValidForField } from './field-modes.js'
 import { createGesturePhaseStore } from './gesture-phase.js'
 import { InputController } from './input.js'
 import { PixelInspector } from './inspector.js'
-import { OrbitOverlay, viewGeometryFromStore } from './orbit.js'
+import { OrbitOverlay, viewGeometry } from './orbit.js'
 import { cssToComplex } from './orbit-math.js'
 import { mountProgress } from './progress.js'
 import { createPwaLifecycle } from './pwa-lifecycle.js'
@@ -531,16 +531,18 @@ input = new InputController(
   // transform out from under the gesture (ADR-0012).
   discardInFlight,
   // A click (no drag) routes by modifier, reusing the controller's canonical
-  // click-vs-pan classification (the deadzone branch):
+  // click-vs-pan classification (`CLICK_SLOP_PX`):
   //  - Alt-click in Mandelbrot mode picks the Julia constant at the clicked
   //    point and switches to Julia (O2, #92).
   //  - any other click seeds/pins the orbit at that point (E1, #94).
-  (cssX, cssY, modifiers) => {
+  // Both map the click through the frame it landed on, not the store, which
+  // lags a zoom Preview still on screen.
+  (cssX, cssY, frame, modifiers) => {
+    const view = viewGeometry(frame.viewport, frame.rect)
     // A click that *began* while the drawer was open is a light-dismiss, not a
     // c-pick (the live `.open` class can't be used — the dismiss already
     // cleared it on the canvas `pointerup`; see `drawerOpenAtPress`).
     if (modifiers.altKey && current.mode === 'mandelbrot' && !drawerOpenAtPress) {
-      const view = viewGeometryFromStore(store, canvas)
       if (view !== null) {
         const { re, im } = cssToComplex(cssX, cssY, view)
         const next = pickJuliaSettings(current, re, im)
@@ -560,7 +562,7 @@ input = new InputController(
     // controller's `pointerup` runs — so the same press-time flag must suppress
     // the pin. The flag re-arms on the next `pointerdown`, so no reset is needed.
     if (drawerOpenAtPress) return
-    orbitOverlay.pin(cssX, cssY)
+    orbitOverlay.pin(cssX, cssY, view)
   },
 )
 

@@ -36,7 +36,8 @@ two-finger pinch path that reuses the ADR-0012 accumulator.
    in a `Map` keyed by `pointerId`: one pointer pans (the existing in-buffer
    drag-shift preview, unchanged), two pointers pinch, and a press that moves
    less than `PAN_DEADZONE_PX` is a click/tap (the existing deadzone branch that
-   feeds the orbit pin and Julia c-picker). Migrating off mouse events also
+   feeds the orbit pin and Julia c-picker; since replaced by `CLICK_SLOP_PX`, see
+   the 2026-10-17 update below). Migrating off mouse events also
    removes the double-handling hazard of synthesised compatibility mouse events
    on touch.
 
@@ -137,3 +138,32 @@ with no reliance on synthesised events.
 - [CONTEXT.md](../../CONTEXT.md) — the *Preview* and *Settle* glossary terms.
 - Issue #88 (U1) — the bug this ADR backs; B1 (#72) and B3 (#74), the mouseup
   commit-semantics fixes already folded into the migrated handlers.
+
+## Update — 2026-10-17 (#180, #184)
+
+The click/pan split in Decision 1 moved from the release to the first move
+that leaves a slop. A press is a click until a move takes it more than
+`CLICK_SLOP_PX` (4 CSS px, shared with the drawer's light-dismiss) from where
+it went down. It used to be classified only at release, by its net
+displacement against a 0.5 logical-pixel deadzone.
+
+- **A press starts nothing.** The pan starts on leaving the slop: that's when
+  the controller snapshots the canvas, tears down a live zoom Preview and
+  discards the in-flight render. So a click leaves a Preview and its pending
+  Settle alone, and a frame that paints while the press sits still is the one
+  the drag shifts (#184).
+- **A started drag always commits,** even one released back at its start. It
+  has discarded the in-flight render, so skipping the commit left the canvas on
+  the frame from before the press (#180). It is never reported as a click.
+- **`pointercancel`** still tears a gesture down the same way `pointerup` does
+  (Decision 4), with one exception: a cancelled press is never a click. A
+  cancelled pan commits from the pointer's last tracked move.
+- **A press holds a pending wheel Settle** until it ends. If it becomes a pan,
+  the pan carries the zoom; if it is a click, the Settle fires once it is over.
+- **A click maps through the frame on screen,** not the store. While a Preview
+  transform is up, the old frame shows the controller's working viewport over
+  the untransformed box. The store lags that viewport until the Settle, and
+  again when a notch lands before the Settle's frame paints. So the controller
+  hands its consumer the viewport and box along with the position
+  (`ClickFrame`), rather than letting the consumer pair the store with a box it
+  measures itself.

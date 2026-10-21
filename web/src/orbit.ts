@@ -1,3 +1,4 @@
+import type { Viewport } from '../wasm/fractal_wasm.js'
 import { cssToComplex, revealedCount, traceOrbit, type ViewGeometry } from './orbit-math.js'
 import type { FractalMode } from './settings.js'
 import type { ViewportStore } from './viewport-store.js'
@@ -31,19 +32,14 @@ interface ProbePoint {
 }
 
 /**
- * Flatten the authoritative viewport plus a surface's CSS box into the
- * `ViewGeometry` the projection helpers need. Returns null for a degenerate box
- * (a `display:none` or pre-layout canvas), so callers can bail rather than feed
+ * Flatten a viewport plus the CSS box it is drawn over into the `ViewGeometry`
+ * the projection helpers need. Returns null for a degenerate box (a
+ * `display:none` or pre-layout canvas), so callers can bail rather than feed
  * NaN coordinates into `cssToComplex`. Shared by the orbit overlay and the Julia
  * c-picker (O2, #92) so the two derive the cursor→complex mapping identically.
  */
-export function viewGeometryFromStore(
-  store: ViewportStore,
-  surface: HTMLElement,
-  rect: DOMRect = surface.getBoundingClientRect(),
-): ViewGeometry | null {
+export function viewGeometry(vp: Viewport, rect: DOMRect): ViewGeometry | null {
   if (rect.width <= 0 || rect.height <= 0) return null
-  const vp = store.get()
   return {
     centerRe: vp.center_re(),
     centerIm: vp.center_im(),
@@ -53,6 +49,15 @@ export function viewGeometryFromStore(
     rectW: rect.width,
     rectH: rect.height,
   }
+}
+
+/** {@link viewGeometry} for the authoritative viewport over `surface`'s live box. */
+export function viewGeometryFromStore(
+  store: ViewportStore,
+  surface: HTMLElement,
+  rect: DOMRect = surface.getBoundingClientRect(),
+): ViewGeometry | null {
+  return viewGeometry(store.get(), rect)
 }
 
 /**
@@ -129,10 +134,12 @@ export class OrbitOverlay {
     document.addEventListener('keydown', this.handleKeydown)
   }
 
-  /** Pin the orbit at a CSS pixel on the surface (fed by InputController's click). */
-  pin(cssX: number, cssY: number): void {
+  /**
+   * Pin the orbit at a CSS pixel of `view`: the frame InputController's click
+   * landed on, or by default the store's viewport over the surface's live box.
+   */
+  pin(cssX: number, cssY: number, view: ViewGeometry | null = this.geometry()): void {
     if (!this.enabled || this.isDrawerOpen()) return
-    const view = this.geometry()
     if (view === null) return
     this.pinned = cssToComplex(cssX, cssY, view)
     this.start()
