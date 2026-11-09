@@ -1,12 +1,18 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 # CodeRabbit settings: https://docs.coderabbit.ai/reference/configuration
+# CodeRabbit ignores unknown keys silently; the schema above lets an editor
+# flag a misspelt one before it quietly falls back to the default.
 language: en-US
 reviews:
   # The summary goes in CodeRabbit's walkthrough comment. The PR description
   # belongs to the author: a summary written into it raced with the author's
-  # own edits and overwrote them. (`@coderabbitai summary` in a description
-  # would still pull it in, so leave that placeholder out.)
+  # own edits and overwrote them.
   high_level_summary: false
   high_level_summary_in_walkthrough: true
+  # A description containing this placeholder still gets the summary written
+  # into it, even with `high_level_summary: false`. The default
+  # (`@coderabbitai summary`) is easy to paste from elsewhere; this is not.
+  high_level_summary_placeholder: "<!-- coderabbit: no summary in the description -->"
   auto_review:
     enabled: true
     auto_incremental_review: true
