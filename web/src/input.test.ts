@@ -126,13 +126,22 @@ function mount(
   onInvalidate?: () => void,
   onClick?: ConstructorParameters<typeof InputController>[4],
   canvasContent?: CanvasContentStore,
+  canLongPress?: () => boolean,
 ): { controller: InputController; store: ViewportStore; phase: GesturePhaseStore } {
   const store = createViewportStore(vp as unknown as Viewport)
   store.subscribe((next, source) => {
     if (source === 'gesture') onChange(next)
   })
   const phase = createGesturePhaseStore()
-  const controller = new InputController(canvas, store, phase, onInvalidate, onClick, canvasContent)
+  const controller = new InputController(
+    canvas,
+    store,
+    phase,
+    onInvalidate,
+    onClick,
+    canvasContent,
+    canLongPress,
+  )
   return { controller, store, phase }
 }
 
@@ -800,6 +809,54 @@ describe('InputController', () => {
       canvas.dispatchEvent(touch('pointerdown', 200, 100, 2))
       vi.advanceTimersByTime(LONG_PRESS_MS * 2)
       expect(onClick).not.toHaveBeenCalled()
+    })
+
+    it('where no long-press is wanted, a held finger still pans or taps', () => {
+      // Julia mode, or the drawer open: nothing for a long-press to do.
+      viewport.panByPixels.mockReturnValue(makeViewportDouble())
+      const onClick = vi.fn()
+      mount(canvas, viewport, onChange, undefined, onClick, undefined, () => false)
+
+      // Rest, then drag: a pan.
+      canvas.dispatchEvent(touch('pointerdown', 120, 80))
+      vi.advanceTimersByTime(LONG_PRESS_MS + 100)
+      canvas.dispatchEvent(touch('pointermove', 160, 80))
+      canvas.dispatchEvent(touch('pointerup', 160, 80))
+      expect(onChange).toHaveBeenCalledTimes(1)
+      expect(onClick).not.toHaveBeenCalled()
+
+      // Rest, then lift: a plain tap.
+      canvas.dispatchEvent(touch('pointerdown', 120, 80))
+      vi.advanceTimersByTime(LONG_PRESS_MS + 100)
+      canvas.dispatchEvent(touch('pointerup', 120, 80))
+      expect(onClick).toHaveBeenCalledTimes(1)
+      expect(onClick).toHaveBeenLastCalledWith(120, 80, expect.anything(), {
+        altKey: false,
+        longPress: false,
+      })
+    })
+
+    it('after a long-press, a second finger starts nothing until every finger lifts', () => {
+      viewport.zoomAround.mockReturnValue(makeZoomResult(2))
+      const onClick = vi.fn()
+      const onInvalidate = vi.fn()
+      const { phase } = mount(canvas, viewport, onChange, onInvalidate, onClick)
+      canvas.dispatchEvent(touch('pointerdown', 120, 80, 1))
+      vi.advanceTimersByTime(LONG_PRESS_MS)
+      expect(onClick).toHaveBeenCalledTimes(1)
+
+      // A second finger: no pinch, so the pick's render isn't discarded.
+      canvas.dispatchEvent(touch('pointerdown', 220, 80, 2))
+      canvas.dispatchEvent(touch('pointermove', 300, 80, 2))
+      expect(viewport.zoomAround).not.toHaveBeenCalled()
+      expect(onInvalidate).not.toHaveBeenCalled()
+      expect(phase.get()).toBe('idle')
+      canvas.dispatchEvent(touch('pointerup', 300, 80, 2))
+      canvas.dispatchEvent(touch('pointerup', 120, 80, 1))
+
+      // All lifted: the next press is a fresh gesture again.
+      canvas.dispatchEvent(touch('pointerdown', 120, 80, 3))
+      expect(phase.get()).toBe('dragging')
     })
 
     it('a cancelled press never fires', () => {

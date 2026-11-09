@@ -198,7 +198,9 @@ export class InputController {
   // finger *before* that paint would begin a new pinch that measures a
   // transformed `getBoundingClientRect` and re-bases the Preview to identity
   // over the wrong frame — a desynced zoom anchor. While set, every pointerdown
-  // is tracked (so the count still drains) but starts no new gesture.
+  // is tracked (so the count still drains) but starts no new gesture. A
+  // long-press sets it too: its finger is still down when it picks c, and a
+  // second finger must not start a pinch that discards the pick's render.
   private pinchLockout = false
   // The in-progress zoom Preview (wheel scrub or pinch), or null when none is
   // active. It survives a Settle so a follow-up notch landing before the fresh
@@ -298,13 +300,20 @@ export class InputController {
   // it as a click at the press's current position with `longPress` set, then end
   // the press, so the lift that follows is not a second click and a later move
   // doesn't start a pan.
+  //
+  // Only when the consumer has a use for it (`canLongPress`): otherwise the
+  // press carries on untouched, so a finger that rests and then drags still
+  // pans, and one that lifts is a plain tap. (A pan cancels the timer before it
+  // can fire, so a press that gets here is still inside the slop.)
   private readonly fireLongPress = (): void => {
     this.longPressTimer = undefined
     const drag = this.dragState
-    if (drag === null || drag.snapshot !== null) return
+    if (drag === null || !this.canLongPress()) return
     const at = this.activePointers.get(drag.pointerId)
     if (at === undefined) return
     this.dropDrag()
+    // The finger is still down: start nothing more until every finger lifts.
+    this.pinchLockout = true
     this.click(at.clientX, at.clientY, { altKey: false, longPress: true })
   }
 
@@ -525,6 +534,7 @@ export class InputController {
     // leaves ≥ 1 finger), so it can't clear the lockout it is about to set.
     if (this.activePointers.size === 0) {
       this.pinchLockout = false
+      this.touchPress = false
     }
 
     if (this.pinch !== null) {
@@ -836,6 +846,10 @@ export class InputController {
     // (`canvas-content.ts`). main.ts shares one with the cursor mappings; a
     // private one by default, for tests that don't read it.
     private readonly canvasContent: CanvasContentStore = createCanvasContentStore(),
+    // Whether a touch long-press would do anything right now (main.ts: picking
+    // c, in Mandelbrot mode with the drawer closed). When it wouldn't, a held
+    // finger stays an ordinary press. Defaults to yes, for tests.
+    private readonly canLongPress: () => boolean = () => true,
   ) {
     this.currentViewport = store.get()
     // Any viewport write the controller did *not* author (a refit, a

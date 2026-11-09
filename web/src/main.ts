@@ -590,7 +590,9 @@ input = new InputController(
     const pickC = modifiers.altKey || modifiers.longPress
     if (pickC && current.mode === 'mandelbrot' && !drawerOpenAtPress) {
       // The long-press fires while the finger is still down, so a short buzz
-      // says it took (where the device supports it; iOS Safari doesn't).
+      // says it took. Where the device supports it (iOS Safari doesn't), and
+      // once the page has had a tap: Chrome blocks vibrate before any user
+      // activation, which a touch pointerdown doesn't grant.
       if (modifiers.longPress) navigator.vibrate?.(15)
       const { re, im } = cssToComplex(cssX, cssY, frame)
       const next = pickJuliaSettings(current, re, im)
@@ -612,6 +614,9 @@ input = new InputController(
     orbitOverlay.pin(cssX, cssY, frame)
   },
   canvasContent,
+  // A touch long-press only picks c, in Mandelbrot mode with the drawer closed.
+  // Anywhere else a held finger stays an ordinary press, so it can still pan.
+  () => current.mode === 'mandelbrot' && !controlsForm.classList.contains('open'),
 )
 
 // Fit-to-window: re-fit the viewport whenever the canvas's measured box
