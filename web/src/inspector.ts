@@ -1,9 +1,9 @@
-import { viewGeometryFromStore } from './orbit.js'
-import { cssToBufferPixel, cssToComplex, logicalBuffer, type RenderBuffer } from './orbit-math.js'
+import { liveScreenFrame } from './orbit.js'
+import { cssToBufferPixel, cssToComplex } from './orbit-math.js'
 import type { PixelProbe } from './render-client.js'
 import type { FieldName, FractalMode } from './settings.js'
 import { formatAxis } from './view-state.js'
-import type { ViewportStore } from './viewport-store.js'
+import type { Viewport } from './viewport.js'
 
 /**
  * The pixel inspector (E2, #95) — "why is this pixel this colour?".
@@ -24,8 +24,8 @@ import type { ViewportStore } from './viewport-store.js'
  * gates probes on the cached buffer being stable, so this module stays simple:
  * it throttles hover to one probe per frame and renders whatever comes back.
  *
- * Presentation-only and viewport-independent like the orbit overlay: it reads
- * the `ViewportStore` to map the cursor but never subscribes to it.
+ * Presentation-only and viewport-independent like the orbit overlay: it maps
+ * the cursor through the frame actually painted, never the store.
  */
 export class PixelInspector {
   private readonly swatch: HTMLElement
@@ -50,7 +50,8 @@ export class PixelInspector {
   constructor(
     private readonly root: HTMLElement,
     private readonly surface: HTMLCanvasElement,
-    private readonly store: ViewportStore,
+    // The viewport the frame on screen was rendered from (`liveScreenFrame`).
+    private readonly paintedFrame: () => Viewport | null,
     initial: { mode: FractalMode; field: FieldName; enabled: boolean },
     // Issue a probe for render-buffer pixel `(px, py)`, returning whether it was
     // actually sent (the client refuses while the cached buffer is unstable).
@@ -59,9 +60,6 @@ export class PixelInspector {
     private readonly probe: (px: number, py: number) => boolean,
     // Whether a gesture owns the canvas (the InputController's phase, #159).
     private readonly isGestureActive: () => boolean,
-    // The render buffer behind a viewport, so the readout names the sample the
-    // worker computed (`cssToComplex`). Defaults to render scale 1.
-    private readonly renderBuffer: RenderBuffer = logicalBuffer,
   ) {
     this.mode = initial.mode
     this.field = initial.field
@@ -152,20 +150,23 @@ export class PixelInspector {
     const cursor = this.pendingCursor
     this.pendingCursor = null
     if (!this.enabled || cursor === null) return
-    // One layout read per frame, shared between the view geometry and the
+    // One layout read per frame, shared between the painted frame's box and the
     // cursor→CSS-pixel offset.
     const rect = this.surface.getBoundingClientRect()
-    const view = viewGeometryFromStore(this.store, this.surface, rect)
-    if (view === null) return
+    const frame = liveScreenFrame(this.paintedFrame, this.surface, rect)
+    if (frame === null) return
     const x = cursor.clientX - rect.left
     const y = cursor.clientY - rect.top
+    // The pixel and its coordinate both come from the painted frame. The client
+    // only serves a probe while the worker's cached frame is the one on screen,
+    // so the colour that comes back belongs to this pixel too.
     const pixel = cssToBufferPixel(
       x,
       y,
       rect.width,
       rect.height,
-      this.surface.width,
-      this.surface.height,
+      frame.rendered.width,
+      frame.rendered.height,
     )
     if (pixel === null) return
     // Only advance the readout if the probe is actually issued. When the render
@@ -173,10 +174,7 @@ export class PixelInspector {
     // the whole HUD stays frozen on its last coherent reading instead of showing
     // a fresh coordinate paired with a stale value.
     if (!this.probe(pixel.px, pixel.py)) return
-    // The probe indexes the cached buffer, which is the canvas's backing
-    // store; the readout projects through the frame's geometry. Probes are
-    // refused while a render rewrites the buffer, so the two agree here.
-    this.lastCoord = cssToComplex(x, y, view, this.renderBuffer(view.viewport))
+    this.lastCoord = cssToComplex(x, y, frame)
     this.renderCoord()
   }
 

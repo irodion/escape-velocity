@@ -16,11 +16,11 @@ import { createGesturePhaseStore } from './gesture-phase.js'
 import { InputController } from './input.js'
 import { PixelInspector } from './inspector.js'
 import { OrbitOverlay } from './orbit.js'
-import { cssToComplex } from './orbit-math.js'
+import { cssToComplex, type ScreenFrame } from './orbit-math.js'
 import { mountProgress } from './progress.js'
 import { createPwaLifecycle } from './pwa-lifecycle.js'
 import { mountPwaUi } from './pwa-ui.js'
-import { type BufferDims, computeBufferDims } from './render-buffer.js'
+import { computeBufferDims } from './render-buffer.js'
 import { createRenderClient } from './render-client.js'
 import type {
   FieldName,
@@ -214,6 +214,13 @@ let inspector: PixelInspector | undefined
 // The same shape for the input controller: it needs the client's
 // `discardInFlight`, and the client's paint needs its `onRenderPainted`.
 let input: InputController | undefined
+// The viewport the frame on screen was rendered from: its request's centre,
+// zoom × effective render scale, and buffer size. The hover, pin, Alt-click and
+// inspector mappings project through it, not the store: after a render-scale
+// change, a resize or a permalink jump the old frame stays up until the new one
+// paints, and the cursor is over its pixels. Null until the first paint.
+let paintedFrame: Viewport | null = null
+const currentPaintedFrame = (): Viewport | null => paintedFrame
 // Which gesture owns the canvas. The InputController (built last) is its only
 // writer; the modules built before it read it through `isGestureActive`.
 const gesture = createGesturePhaseStore()
@@ -233,10 +240,20 @@ const { render, recolorize, probe, discardInFlight } = createRenderClient({
   // inspector is constructed (no probe can be issued before then anyway).
   onProbeResult: (result) => inspector?.showResult(result),
   isGestureActive,
-  // `input` is always set by the time this runs: everything from here to the
-  // controller's construction runs synchronously, so no response can paint in
-  // between.
-  onRenderPainted: () => input?.onRenderPainted(),
+  // Record the frame going on screen: the cursor mappings project through it
+  // (`paintedFrame`). `input` is always set by the time this runs: everything
+  // from here to the controller's construction runs synchronously, so no
+  // response can paint in between.
+  onRenderPainted: (frame) => {
+    paintedFrame = new Viewport(
+      frame.centerRe,
+      frame.centerIm,
+      frame.zoom,
+      frame.width,
+      frame.height,
+    )
+    input?.onRenderPainted()
+  },
 })
 
 // Version signal (O2, #92): announce which build is running. For a
@@ -347,13 +364,6 @@ const applyAccent = (palette: PaletteName): void => {
   document.documentElement.style.setProperty('--accent', PALETTE_ACCENT[palette])
 }
 
-// The buffer a viewport renders into at the live render scale and pixel
-// budget: its size and the effective scale its zoom is multiplied by. The one
-// derivation `rerender` and the cursor mappings share, so a pick, an orbit or
-// an inspector readout names exactly the sample the worker computed.
-const renderBuffer = (viewport: Viewport): BufferDims =>
-  computeBufferDims(viewport.width, viewport.height, current.renderScale, MAX_RENDER_PIXELS)
-
 const rerender = (): void => {
   // Render scale + the pixel budget are applied here, at the render
   // seam. `computeBufferDims` turns the logical (display) size into the
@@ -367,7 +377,12 @@ const rerender = (): void => {
   // and the canvas backing store is sized to match when the frame paints
   // (see `paint` in render-client).
   const viewport = store.get()
-  const { width, height, scale } = renderBuffer(viewport)
+  const { width, height, scale } = computeBufferDims(
+    viewport.width,
+    viewport.height,
+    current.renderScale,
+    MAX_RENDER_PIXELS,
+  )
   render(
     {
       centerRe: viewport.centerRe,
@@ -486,9 +501,9 @@ store.subscribe((_viewport, source) => {
   syncView(source !== 'refit')
 })
 
-// Orbit visualizer (E1, #94). A presentation-only overlay: it reads the
-// authoritative viewport from the store to map the cursor to a complex point,
-// but never subscribes — the orbit diagram is viewport-independent (see
+// Orbit visualizer (E1, #94). A presentation-only overlay: it maps the cursor
+// through the painted frame to a complex point, never the store, which it
+// doesn't subscribe to either — the orbit diagram is viewport-independent (see
 // orbit.ts) — and is fed the compute parameters by `applySettings`/`hashchange`
 // below. Constructed before the InputController so its `pin` is in scope for the
 // controller's click callback. The drawer-open guard makes a light-dismiss
@@ -496,7 +511,7 @@ store.subscribe((_viewport, source) => {
 const orbitOverlay = new OrbitOverlay(
   orbitCanvas,
   canvas,
-  store,
+  currentPaintedFrame,
   {
     mode: current.mode,
     cRe: current.cRe,
@@ -506,7 +521,6 @@ const orbitOverlay = new OrbitOverlay(
   },
   () => controlsForm.classList.contains('open'),
   isGestureActive,
-  renderBuffer,
 )
 
 // Pixel inspector (E2, #95). Presentation-only like the orbit overlay: it maps
@@ -517,11 +531,10 @@ const orbitOverlay = new OrbitOverlay(
 inspector = new PixelInspector(
   inspectorHud,
   canvas,
-  store,
+  currentPaintedFrame,
   { mode: current.mode, field: current.field, enabled: current.inspect },
   (px, py) => probe(px, py, paletteEnum(current.palette), modeEnum(current.normalisation)),
   isGestureActive,
-  renderBuffer,
 )
 
 // Whether the controls drawer was open at the *start* of the current press.
@@ -553,15 +566,22 @@ input = new InputController(
   //  - Alt-click in Mandelbrot mode picks the Julia constant at the clicked
   //    point and switches to Julia (O2, #92).
   //  - any other click seeds/pins the orbit at that point (E1, #94).
-  // Both map the click through the frame it landed on, not the store, which
-  // lags a zoom Preview still on screen. The frame is a `ViewGeometry`, and
-  // the controller never reports a click on a degenerate box.
-  (cssX, cssY, frame, modifiers) => {
+  // Both map the click through the painted frame under it, carried back through
+  // the zoom Preview transform when one is on screen (`clickFrame.preview`),
+  // not the store, which lags a Preview and leads a frame still rendering. The
+  // controller never reports a click on a degenerate box.
+  (cssX, cssY, clickFrame, modifiers) => {
+    if (paintedFrame === null) return // nothing on screen to pick from yet
+    const frame: ScreenFrame = {
+      rendered: paintedFrame,
+      rect: clickFrame.rect,
+      preview: clickFrame.preview,
+    }
     // A click that *began* while the drawer was open is a light-dismiss, not a
     // c-pick (the live `.open` class can't be used — the dismiss already
     // cleared it on the canvas `pointerup`; see `drawerOpenAtPress`).
     if (modifiers.altKey && current.mode === 'mandelbrot' && !drawerOpenAtPress) {
-      const { re, im } = cssToComplex(cssX, cssY, frame, renderBuffer(frame.viewport))
+      const { re, im } = cssToComplex(cssX, cssY, frame)
       const next = pickJuliaSettings(current, re, im)
       // Mirror the picked settings into the form (no emit), then run the
       // dispatcher exactly as the hashchange handler does: branch 1 (mode

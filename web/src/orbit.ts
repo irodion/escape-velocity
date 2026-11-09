@@ -1,13 +1,6 @@
-import {
-  cssToComplex,
-  logicalBuffer,
-  type RenderBuffer,
-  revealedCount,
-  traceOrbit,
-  type ViewGeometry,
-} from './orbit-math.js'
+import { cssToComplex, revealedCount, type ScreenFrame, traceOrbit } from './orbit-math.js'
 import type { FractalMode } from './settings.js'
-import type { ViewportStore } from './viewport-store.js'
+import type { Viewport } from './viewport.js'
 
 // Inner padding of the plot box, as a fraction of its side, so the fitted orbit
 // and the |z| = 2 circle have a margin from the panel edge.
@@ -38,19 +31,22 @@ interface ProbePoint {
 }
 
 /**
- * The authoritative viewport paired with the CSS box `surface` is drawn in: the
- * `ViewGeometry` the projection helpers need. Returns null for a degenerate box
- * (a `display:none` or pre-layout canvas), so callers bail rather than feed NaN
- * coordinates into `cssToComplex`. The orbit overlay and the pixel inspector
- * read the cursor's point through it.
+ * The frame on screen over `surface`'s live CSS box, with no Preview on it: the
+ * `ScreenFrame` a hover maps the cursor through. `paintedFrame` is the viewport
+ * the painted buffer was rendered from (null before the first paint). Returns
+ * null for that, or for a degenerate box (a `display:none` or pre-layout
+ * canvas), so callers bail rather than feed NaN coordinates into
+ * `cssToComplex`. The orbit overlay and the pixel inspector read the cursor's
+ * point through it.
  */
-export function viewGeometryFromStore(
-  store: ViewportStore,
+export function liveScreenFrame(
+  paintedFrame: () => Viewport | null,
   surface: HTMLElement,
   rect: DOMRect = surface.getBoundingClientRect(),
-): ViewGeometry | null {
+): ScreenFrame | null {
   if (rect.width <= 0 || rect.height <= 0) return null
-  return { viewport: store.get(), rect }
+  const rendered = paintedFrame()
+  return rendered === null ? null : { rendered, rect }
 }
 
 /**
@@ -71,8 +67,8 @@ export function viewGeometryFromStore(
  * plane (e.g. a Mandelbrot orbit starts at the origin, which is usually
  * off-screen) — the high-level shape matters more than the absolute position. It
  * is therefore viewport-independent: panning/zooming the fractal does not change
- * a pinned orbit, so the overlay does not subscribe to the `ViewportStore`; it
- * only reads it (via the fractal surface) to map the cursor to a complex point.
+ * a pinned orbit, so the overlay does not subscribe to the `ViewportStore`. It
+ * maps the cursor through the frame actually painted on the fractal surface.
  *
  * ## Mode semantics
  * - Mandelbrot: the point under the cursor is `c`; the orbit starts at `z₀ = 0`.
@@ -96,7 +92,8 @@ export class OrbitOverlay {
   constructor(
     private readonly overlay: HTMLCanvasElement,
     private readonly surface: HTMLCanvasElement,
-    private readonly store: ViewportStore,
+    // The viewport the frame on screen was rendered from (`liveScreenFrame`).
+    private readonly paintedFrame: () => Viewport | null,
     initial: { mode: FractalMode; cRe: number; cIm: number; maxIter: number; enabled: boolean },
     // Whether the controls drawer is open. A click that lands while it is open
     // is a light-dismiss, not a pin — so we suppress pinning then (and `Escape`
@@ -106,9 +103,6 @@ export class OrbitOverlay {
     // drag shifts the image and a zoom Preview scales it, so the
     // cursor→complex mapping is wrong until the store settles.
     private readonly isGestureActive: () => boolean,
-    // The render buffer behind a viewport, so a pick names the sample the
-    // worker computed (`cssToComplex`). Defaults to render scale 1.
-    private readonly renderBuffer: RenderBuffer = logicalBuffer,
   ) {
     this.ctx = overlay.getContext('2d')
     this.mode = initial.mode
@@ -131,13 +125,14 @@ export class OrbitOverlay {
   }
 
   /**
-   * Pin the orbit at a CSS pixel of `view`: the frame InputController's click
-   * landed on, or by default the store's viewport over the surface's live box.
+   * Pin the orbit at a CSS pixel of `frame`: the frame InputController's click
+   * landed on (with any zoom Preview on it), or by default the painted frame
+   * over the surface's live box.
    */
-  pin(cssX: number, cssY: number, view: ViewGeometry | null = this.geometry()): void {
+  pin(cssX: number, cssY: number, frame: ScreenFrame | null = this.screenFrame()): void {
     if (!this.enabled || this.isDrawerOpen()) return
-    if (view === null) return
-    this.pinned = cssToComplex(cssX, cssY, view, this.renderBuffer(view.viewport))
+    if (frame === null) return
+    this.pinned = cssToComplex(cssX, cssY, frame)
     this.start()
   }
 
@@ -187,11 +182,9 @@ export class OrbitOverlay {
     // would be wrong until the store settles.
     if (this.isGestureActive()) return
     const rect = this.surface.getBoundingClientRect()
-    const view = viewGeometryFromStore(this.store, this.surface, rect)
-    if (view === null) return
-    const x = event.clientX - rect.left
-    const y = event.clientY - rect.top
-    this.hover = cssToComplex(x, y, view, this.renderBuffer(view.viewport))
+    const frame = liveScreenFrame(this.paintedFrame, this.surface, rect)
+    if (frame === null) return
+    this.hover = cssToComplex(event.clientX - rect.left, event.clientY - rect.top, frame)
     this.start()
   }
 
@@ -257,8 +250,8 @@ export class OrbitOverlay {
     this.rafHandle = requestAnimationFrame(this.tick)
   }
 
-  private geometry(): ViewGeometry | null {
-    return viewGeometryFromStore(this.store, this.surface)
+  private screenFrame(): ScreenFrame | null {
+    return liveScreenFrame(this.paintedFrame, this.surface)
   }
 
   private refreshAccent(): void {

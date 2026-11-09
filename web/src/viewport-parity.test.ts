@@ -64,10 +64,10 @@ beforeAll(async () => {
 })
 
 describe('the TypeScript Viewport against the Rust one', () => {
-  it('agrees bit for bit on pans, zooms, resizes and wheel scrubs over random views', () => {
+  it('agrees bit for bit on projections, pans, zooms, resizes and wheel scrubs over random views', () => {
     const between = generator(0x5eed169)
     const mismatches: string[] = []
-    const compare = (what: string, a: Fields, b: Fields): void => {
+    const compare = (what: string, a: readonly number[], b: readonly number[]): void => {
       if (mismatches.length < 5 && !a.every((x, i) => Object.is(x, b[i]))) {
         mismatches.push(`${what}: ts ${a.join(', ')} / rust ${b.join(', ')}`)
       }
@@ -82,6 +82,13 @@ describe('the TypeScript Viewport against the Rust one', () => {
       const height = 1 + Math.floor(between(0, 4000))
       const view = new Viewport(re, im, zoom, width, height)
       const wasm = new WasmViewport(re, im, zoom, width, height)
+
+      // The kernel's per-pixel projection, which the cursor picks reproduce
+      // through the port (`cssToComplex`): any pixel of the grid.
+      const cx = Math.floor(between(0, width))
+      const cy = Math.floor(between(0, height))
+      const point = view.pixelToComplex(cx, cy)
+      compare(`project #${i}`, [point.re, point.im], [...wasm.pixel_to_complex(cx, cy)])
 
       const px = between(-100, width + 100)
       const py = between(-100, height + 100)

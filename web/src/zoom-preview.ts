@@ -29,6 +29,17 @@ import type { Viewport } from './viewport.js'
  * two can never drift, so the Settle frame always matches what was on
  * screen — no snap at the clamp.
  */
+/**
+ * The Preview's CSS transform on the canvas, with `transform-origin: 0 0`: a
+ * point `p` of the untransformed box is shown at `scale·p + (tx, ty)`. A
+ * `ZoomPreview` is one; a click on the Preview is carried back through it.
+ */
+export interface PreviewTransform {
+  readonly scale: number
+  readonly tx: number
+  readonly ty: number
+}
+
 export interface ZoomPreview {
   /** Authoritative viewport, advanced via `zoomAround` per notch. */
   readonly viewport: Viewport

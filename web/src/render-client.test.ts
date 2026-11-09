@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { createRenderClient, type PixelProbe, type ProgressReporter } from './render-client.js'
+import {
+  createRenderClient,
+  type FrameGeometry,
+  type PixelProbe,
+  type ProgressReporter,
+} from './render-client.js'
 import { FakeWorker } from './testing/fake-worker.js'
 import type {
   Aborted,
@@ -61,7 +66,7 @@ function makeClient(deps?: {
   progress?: ProgressReporter
   onProbeResult?: (probe: PixelProbe) => void
   isGestureActive?: () => boolean
-  onRenderPainted?: () => void
+  onRenderPainted?: (frame: FrameGeometry) => void
 }): {
   client: TestRenderClient
   worker: FakeWorker
@@ -224,6 +229,30 @@ describe('render-client', () => {
     // tick, so the swap from Preview to true frame is atomic (no snap-back).
     const paintOrder = (ctx.putImageData as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]
     expect(onRenderPainted.mock.invocationCallOrder[0]).toBeLessThan(paintOrder)
+  })
+
+  it('hands onRenderPainted the geometry of the frame it paints, not a superseded one', () => {
+    const onRenderPainted = vi.fn()
+    const { client, worker } = makeClient({ onRenderPainted })
+    const ctx = makeCtx()
+    deliver(worker, readyMsg())
+    doRender(client, ctx) // epoch 1, dispatched
+    client.render(
+      VIEWPORT_B,
+      ctx,
+      256,
+      PALETTE_VIRIDIS,
+      MODE_CYCLED,
+      KIND_MANDELBROT,
+      -0.7,
+      0.27015,
+      FIELD_ESCAPE_TIME,
+    ) // epoch 2, queued behind it
+    deliver(worker, response(1)) // superseded: not painted
+    expect(onRenderPainted).not.toHaveBeenCalled()
+    deliver(worker, response(2))
+    expect(onRenderPainted).toHaveBeenCalledTimes(1)
+    expect(onRenderPainted).toHaveBeenCalledWith(expect.objectContaining(VIEWPORT_B))
   })
 
   it('does not end the Preview on a recolorize paint (B2: palette change mid-scrub)', () => {

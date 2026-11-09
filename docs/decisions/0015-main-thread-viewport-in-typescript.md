@@ -49,9 +49,13 @@ Having both paid the costs of both:
    position, which the zoom anchor scales about. The Alt-click picker, the
    orbit and the inspector readout instead name the sample the pixel under
    the cursor was rendered from: `cssToComplex` takes the render-buffer pixel
-   the inspector probes and projects it through the rendered frame's own
-   viewport (the zoom times the effective render scale, on the floored
-   buffer), exactly as the kernel did. Both end in `pixelToComplex`. `orbit-math`'s own copy of the
+   the inspector probes and projects it through the viewport of the frame
+   actually painted (its request's zoom, the logical zoom times the
+   effective render scale, on the floored buffer), exactly as the kernel did.
+   The render client reports that geometry when it paints, so a frame still
+   rendering doesn't move picks off the pixels on screen, and a click on a
+   zoom Preview is carried back through its transform first. Both end in
+   `pixelToComplex`. `orbit-math`'s own copy of the
    constants and the pixel scale is gone, so the main thread has one
    implementation. So is its inverse, `complexToCss`, which nothing but its
    tests called. (The click, hover and inspector mappings used to skip the
@@ -74,8 +78,9 @@ Having both paid the costs of both:
    sides compute in IEEE-754 binary64 with each operation rounded on its own
    (no fused multiply-add), so the two agree bit for bit, not within a
    tolerance. [viewport-parity.test.ts](../../web/src/viewport-parity.test.ts)
-   loads the real module in Vitest and compares the two on random pans,
-   zooms (clamps included), resizes and eight-notch wheel scrubs (#169).
+   loads the real module in Vitest and compares the two on random per-pixel
+   projections, pans, zooms (clamps included), resizes and eight-notch wheel
+   scrubs (#169).
 
 ## Consequences
 
@@ -95,9 +100,10 @@ Having both paid the costs of both:
 - Boot time barely changes. The worker was created before the main-thread
   `init()`, so the two boots already overlapped. This is a simplicity
   decision, not a speed one.
-- The binding's `pan_by_pixels`, `zoom_around`, `with_resolution` and getters
-  are no longer called by the app. They stay as the reference the parity test
-  compares the port against, so they still ship in the module.
+- The binding's `pan_by_pixels`, `zoom_around`, `with_resolution`, getters
+  and `pixel_to_complex` (added for the test) are not called by the app. They
+  stay as the reference the parity test compares the port against, so they
+  still ship in the module.
 - The orbit overlay's single-point iteration (`traceOrbit`, `BAILOUT_SQR`)
   stays a TypeScript mirror of the kernel, as it was (E1, #94).
 

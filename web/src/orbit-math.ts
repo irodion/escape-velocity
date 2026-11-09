@@ -1,13 +1,13 @@
-import type { BufferDims } from './render-buffer.js'
-import { type BoxSize, Viewport } from './viewport.js'
+import type { BoxSize, Viewport } from './viewport.js'
+import type { PreviewTransform } from './zoom-preview.js'
 
 /**
  * Pure maths for the orbit visualizer (E1, #94): iterate a single point's
  * `z = z² + c` orbit in plain TS, and map a CSS pixel on the canvas to the
  * complex point drawn there.
  *
- * The projection is the viewport's own, snapped to the centre of the rendered
- * pixel under the cursor (`cssToComplex`). The iteration and `BAILOUT_SQR` are a
+ * The projection is the painted frame's own: the sample of the rendered pixel
+ * under the cursor (`cssToComplex`). The iteration and `BAILOUT_SQR` are a
  * deliberate mirror of the Rust source of truth (`lib.rs`'s `BAILOUT_SQR` and
  * `escape_time.rs`'s iteration): iterating one point is microseconds, so E1
  * stays entirely on the TS side with no wasm/protocol change (per the issue).
@@ -23,12 +23,16 @@ import { type BoxSize, Viewport } from './viewport.js'
 export const BAILOUT_SQR = 65_536
 
 /**
- * A viewport plus the CSS box its canvas is displayed in. The input
- * controller's `ClickFrame` is one.
+ * The frame on screen, as the cursor sees it. `rendered` is the viewport the
+ * worker rendered the painted buffer from: the buffer's own size, at the zoom
+ * times the effective render scale (the render request's fields). `rect` is the
+ * untransformed CSS box it is stretched over, and `preview` the zoom Preview's
+ * transform on it, if one is shown.
  */
-export interface ViewGeometry {
-  readonly viewport: Viewport
+export interface ScreenFrame {
+  readonly rendered: Viewport
   readonly rect: BoxSize
+  readonly preview?: PreviewTransform | null
 }
 
 /**
@@ -90,52 +94,32 @@ export function revealedCount(
 }
 
 /**
- * The render buffer a viewport is drawn into: its size and the effective
- * render scale (`computeBufferDims`). `main.ts` derives it the way `rerender`
- * does, so a pick sees the buffer the worker computed.
- */
-export type RenderBuffer = (viewport: Viewport) => BufferDims
-
-/** The buffer at render scale 1: the viewport's own logical grid. */
-export const logicalBuffer: RenderBuffer = (viewport) => ({
-  width: viewport.width,
-  height: viewport.height,
-  scale: 1,
-})
-
-/**
  * Map a CSS pixel on the surface back to the complex point the pixel beneath
- * the cursor was rendered from: the sample of the containing **buffer** pixel
- * (`cssToBufferPixel`'s pixel), not the cursor's exact sub-pixel point. A pick,
- * a traced orbit and the inspector's readout therefore name the same sample the
- * inspector probes, wherever in the pixel the cursor sits.
+ * the cursor was rendered from: the sample of the containing pixel of the
+ * painted buffer (`cssToBufferPixel`'s pixel), not the cursor's exact sub-pixel
+ * point. A pick, a traced orbit and the inspector's readout therefore name the
+ * same sample the inspector probes, wherever in the pixel the cursor sits.
  *
- * `buffer` is the frame the worker rendered: its size, and the effective scale
- * its zoom was multiplied by (`main.ts`'s `rerender`). The sample is projected
- * through that frame's own viewport, as the kernel projects it
- * (`pixel_to_complex` on the request's viewport), so it is exact even when the
- * buffer size was floored, at a fractional scale or under the pixel budget.
+ * Everything comes from the frame actually on screen, not the one last
+ * requested: after a render-scale change, a resize or a permalink jump the old
+ * frame stays up (CSS-stretched) until the new one paints, and the cursor is
+ * over its pixels. The sample is projected through `rendered`, the viewport the
+ * kernel sampled the buffer from (`pixel_to_complex` on the request), so it is
+ * exact even when the buffer size was floored. Under a zoom Preview the point
+ * is first carried back through the transform onto the untransformed frame; a
+ * cursor beyond the painted frame's edge (a zoom-out Preview) clamps to the
+ * nearest edge pixel.
  *
  * The zoom anchor deliberately does not snap: it keeps the continuous
  * `cssToGrid` point so a wheel notch scales about the cursor itself.
  */
-export function cssToComplex(
-  x: number,
-  y: number,
-  view: ViewGeometry,
-  buffer: BufferDims = logicalBuffer(view.viewport),
-): { re: number; im: number } {
-  const { viewport, rect } = view
-  const rendered = new Viewport(
-    viewport.centerRe,
-    viewport.centerIm,
-    viewport.zoom * buffer.scale,
-    buffer.width,
-    buffer.height,
-  )
+export function cssToComplex(x: number, y: number, frame: ScreenFrame): { re: number; im: number } {
+  const { rendered, rect, preview } = frame
+  const fx = preview ? (x - preview.tx) / preview.scale : x
+  const fy = preview ? (y - preview.ty) / preview.scale : y
   return rendered.pixelToComplex(
-    containingCell(x, rect.width, buffer.width),
-    containingCell(y, rect.height, buffer.height),
+    containingCell(fx, rect.width, rendered.width),
+    containingCell(fy, rect.height, rendered.height),
   )
 }
 

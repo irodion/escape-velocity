@@ -160,12 +160,20 @@ export interface RenderClientDeps {
   readonly isGestureActive?: () => boolean
   /**
    * Called synchronously right before a *render* response is painted — not a
-   * recolorize. `main.ts` wires the InputController's `onRenderPainted`, which
-   * ends a live zoom Preview, so the Preview→true-frame swap is atomic
-   * (ADR-0012). Defaults to a no-op.
+   * recolorize — with the geometry that frame was rendered at (its request's
+   * centre, zoom and buffer size). `main.ts` records it as the frame on screen,
+   * which the cursor mappings project through, and calls the InputController's
+   * `onRenderPainted`, which ends a live zoom Preview, so the Preview→true-frame
+   * swap is atomic (ADR-0012). Defaults to a no-op.
    */
-  readonly onRenderPainted?: () => void
+  readonly onRenderPainted?: (frame: FrameGeometry) => void
 }
+
+/** The geometry a render was computed at: its request's view fields. */
+export type FrameGeometry = Pick<
+  RenderRequest,
+  'centerRe' | 'centerIm' | 'zoom' | 'width' | 'height'
+>
 
 /**
  * The fire-and-forget surface `main.ts` dispatches against. All pipeline state
@@ -219,6 +227,10 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
   // abandoned partway, or after one that failed.
   let cachedFrameEpoch: number | null = null
   let shownFrameEpoch: number | null = null
+  // The geometry of the render on the worker, captured at dispatch, and of the
+  // frame its cache holds once that render lands: what a paint puts on screen.
+  let inFlightFrame: FrameGeometry | null = null
+  let cachedFrame: FrameGeometry | null = null
   let inFlight = false
   // The kind of the request currently on the worker, captured at dispatch.
   // `onmessage` reads it to tell which epoch a response must match and what
@@ -337,6 +349,7 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     // throws leaves the two apart, and a recolorize re-tints that frame.
     if (inFlightKind === 'render') {
       cachedFrameEpoch = msg.epoch
+      cachedFrame = inFlightFrame
       // A recolorize queued behind it paints this frame instead, in the new
       // colours, so it doesn't show in the old ones first.
       if (msg.epoch === latestFrameEpoch && pending?.kind !== 'recolorize' && targetCtx !== null) {
@@ -412,6 +425,9 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     const req = pending
     pending = null
     inFlightKind = req.kind
+    if (req.kind === 'render') {
+      inFlightFrame = req
+    }
     // Arm the progress indicator at the true dispatch time so its debounce
     // measures from when the worker actually starts (P2). Only a render does
     // per-band work; a recolorize is the fast path and never reports.
@@ -534,8 +550,8 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     // at the wrong scale until the Settle render lands. So it leaves the
     // Preview for the frame that ends the scrub. Outside a scrub there is no
     // Preview and the input layer ignores the call.
-    if (newFrame) {
-      onRenderPainted()
+    if (newFrame && cachedFrame !== null) {
+      onRenderPainted(cachedFrame)
     }
     const image = new ImageData(response.rgba, response.width, response.height)
     ctx.putImageData(image, 0, 0)

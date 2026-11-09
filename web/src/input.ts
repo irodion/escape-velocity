@@ -4,6 +4,7 @@ import type { ViewportStore } from './viewport-store.js'
 import {
   applyZoomNotch,
   beginZoomPreview,
+  type PreviewTransform,
   type ZoomPreview,
   zoomPreviewTransform,
 } from './zoom-preview.js'
@@ -188,6 +189,9 @@ export class InputController {
   // Outlives `zoomPreview`'s gesture: a Settle keeps it until the fresh frame
   // paints (`onRenderPainted`).
   private previewShown = false
+  // The transform applied while `previewShown`, so a click can be carried back
+  // through it onto the painted frame (see `click`).
+  private shownPreview: ZoomPreview | null = null
   private settleTimer: ReturnType<typeof setTimeout> | undefined
   // The canvas's *untransformed* layout box, captured at the start of a
   // scrub/pinch. `getBoundingClientRect` reflects the live CSS transform, so
@@ -305,6 +309,7 @@ export class InputController {
   private showPreview(preview: ZoomPreview): void {
     this.canvas.style.transform = zoomPreviewTransform(preview)
     this.previewShown = true
+    this.shownPreview = preview
     this.publishPhase()
   }
 
@@ -313,6 +318,7 @@ export class InputController {
     if (!this.previewShown) return
     this.canvas.style.transform = ''
     this.previewShown = false
+    this.shownPreview = null
     this.publishPhase()
   }
 
@@ -558,7 +564,15 @@ export class InputController {
     this.onClick(
       event.clientX - rect.left,
       event.clientY - rect.top,
-      { viewport: this.currentViewport, rect },
+      {
+        viewport: this.currentViewport,
+        rect,
+        preview: this.shownPreview && {
+          scale: this.shownPreview.scale,
+          tx: this.shownPreview.tx,
+          ty: this.shownPreview.ty,
+        },
+      },
       { altKey: event.altKey },
     )
   }
@@ -776,12 +790,15 @@ interface DragState {
 
 /**
  * The frame a click landed on: `viewport` as drawn over `rect`, the CSS box
- * (untransformed) that the click's position is relative to. The consumer maps
- * the click through these rather than the store and a box it measures itself.
+ * (untransformed) that the click's position is relative to, and `preview`, the
+ * zoom Preview transform on the canvas when one is shown (null otherwise). The
+ * consumer maps the click through these rather than the store and a box it
+ * measures itself.
  */
 export interface ClickFrame {
   readonly viewport: Viewport
   readonly rect: DOMRect
+  readonly preview: PreviewTransform | null
 }
 
 // Whether a press displaced by (dxCss, dyCss) is still a click (see
