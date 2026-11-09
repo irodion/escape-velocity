@@ -130,6 +130,60 @@ jobs:
         working-directory: web
         run: pnpm build
 
+      - name: Upload the build for the E2E job
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 3
+
+  e2e:
+    name: E2E
+    # Tests the build the `web` job made, in real Chromium (#93): the worker,
+    # WASM threads, cross-origin isolation and painted pixels that jsdom can't
+    # reach. Taking `dist/` as an artifact skips a second nightly WASM build.
+    needs: web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.30.1
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Chromium
+        working-directory: web
+        run: pnpm exec playwright install --with-deps chromium
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: web/dist
+
+      - name: Playwright
+        working-directory: web
+        run: pnpm e2e:only
+
+      - name: Upload traces of failed tests
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-traces
+          path: web/test-results
+          retention-days: 7
+
   vet:
     name: Dependency check (safedep/vet)
     runs-on: ubuntu-latest
