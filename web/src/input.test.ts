@@ -471,10 +471,16 @@ describe('InputController', () => {
     canvas.dispatchEvent(pe('pointerup', { clientX: 120, clientY: 80 }))
 
     expect(onClick).toHaveBeenCalledTimes(1)
+    // The Preview transform rides along, so the consumer can carry the tap
+    // back onto the painted frame: a 0.8× zoom-out about (200, 150).
     expect(onClick).toHaveBeenCalledWith(
       120,
       80,
-      { viewport: zoomed, rect: layout },
+      {
+        viewport: zoomed,
+        rect: layout,
+        preview: { scale: 0.8, tx: expect.closeTo(40, 9), ty: expect.closeTo(30, 9) },
+      },
       { altKey: false },
     )
     expect(onClick.mock.calls[0][2].viewport).toBe(zoomed)
@@ -520,20 +526,27 @@ describe('InputController', () => {
     vi.advanceTimersByTime(WHEEL_SETTLE_MS)
     expect(store.get()).toBe(zoomed)
     setRect(canvas, { left: -100, top: -75, width: 1000, height: 750 })
-    expect(tapFrame()).toEqual({ viewport: zoomed, rect: layout })
+    expect(tapFrame()).toEqual({
+      viewport: zoomed,
+      rect: layout,
+      preview: { scale: 1.25, tx: expect.closeTo(-50, 9), ty: expect.closeTo(-37.5, 9) },
+    })
     expect(onClick).toHaveBeenLastCalledWith(120, 80, expect.anything(), { altKey: false })
 
     notch()
     expect(store.get()).toBe(zoomed)
-    const frame = tapFrame() as { viewport: unknown; rect: DOMRect }
+    const frame = tapFrame() as { viewport: unknown; rect: DOMRect; preview: { scale: number } }
     expect(frame.viewport).toBe(zoomedAgain)
     expect(frame.rect).toBe(layout)
+    expect(frame.preview.scale).toBeCloseTo(1.5625, 12)
 
     // Once the fresh frame paints, the box is measured live again.
     controller.onRenderPainted()
     setRect(canvas, { left: 10, top: 20, width: 800, height: 600 })
     const live = canvas.getBoundingClientRect()
-    expect((tapFrame() as { rect: DOMRect }).rect).toBe(live)
+    const painted = tapFrame() as { rect: DOMRect; preview: unknown }
+    expect(painted.rect).toBe(live)
+    expect(painted.preview).toBeNull()
     expect(onClick).toHaveBeenLastCalledWith(110, 60, expect.anything(), { altKey: false })
   })
 
@@ -568,14 +581,15 @@ describe('InputController', () => {
     new InputController(canvas, store, createGesturePhaseStore(), undefined, onClick)
 
     // A plain in-slop tap: altKey false, CSS position relative to the box, and
-    // the frame it landed on: the store's viewport over that box.
+    // the frame it landed on: the store's viewport over that box, with no
+    // Preview on it.
     const box = canvas.getBoundingClientRect()
     canvas.dispatchEvent(pe('pointerdown', { clientX: 120, clientY: 80 }))
     canvas.dispatchEvent(pe('pointerup', { clientX: 120, clientY: 80 }))
     expect(onClick).toHaveBeenLastCalledWith(
       120,
       80,
-      { viewport: store.get(), rect: box },
+      { viewport: store.get(), rect: box, preview: null },
       { altKey: false },
     )
 

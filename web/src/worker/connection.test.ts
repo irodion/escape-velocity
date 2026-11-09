@@ -74,6 +74,14 @@ describe('connectWorker', () => {
     }
   })
 
+  it('reports ready once, ignoring a repeated ready', () => {
+    const { worker, onReady, onMessage } = connect()
+    worker.send(READY)
+    worker.send(READY)
+    expect(onReady).toHaveBeenCalledTimes(1)
+    expect(onMessage).not.toHaveBeenCalled()
+  })
+
   it('reports a top-level worker throw (onerror), suppressing the browser report', () => {
     const { worker, onFatal } = connect()
     const event = worker.fail('LinkError: shared memory unavailable')

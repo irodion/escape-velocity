@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { OrbitOverlay } from './orbit.js'
 import { Viewport } from './viewport.js'
-import type { ViewportStore } from './viewport-store.js'
 
 // A 2D context stub that just tallies calls — the overlay's drawing is exercised
 // for its state transitions, not its pixels (same spirit as drawer.test.ts under
@@ -61,13 +60,12 @@ function setup(initialEnabled = true) {
   overlay.getBoundingClientRect = () => rect(240, 240)
   surface.getBoundingClientRect = () => rect(800, 600)
 
-  const store = { get: () => viewport() } as unknown as ViewportStore
   const drawer = { open: false }
   const gesture = { active: false }
   const overlayInstance = new OrbitOverlay(
     overlay,
     surface,
-    store,
+    () => viewport(),
     { mode: 'mandelbrot', cRe: -0.7, cIm: 0.27015, maxIter: 64, enabled: initialEnabled },
     () => drawer.open,
     () => gesture.active,

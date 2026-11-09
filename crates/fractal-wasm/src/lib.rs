@@ -402,6 +402,17 @@ impl Viewport {
     pub fn height(&self) -> u32 {
         self.inner.height
     }
+
+    /// The complex point the kernel samples for pixel `(px, py)`, as
+    /// `[re, im]`: `fractal_core::Viewport::pixel_to_complex`, the exact
+    /// projection `compute_band` uses. Not called by the app; it pins the
+    /// TypeScript port's `pixelToComplex`, which the cursor picks project
+    /// through, to the kernel (`viewport-parity.test.ts`).
+    #[wasm_bindgen]
+    pub fn pixel_to_complex(&self, px: u32, py: u32) -> Vec<f64> {
+        let c = self.inner.pixel_to_complex(px, py);
+        vec![c.re, c.im]
+    }
 }
 
 /// Validate the Julia `c` payload at the WASM↔JS boundary and translate the

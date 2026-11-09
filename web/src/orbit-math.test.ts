@@ -4,11 +4,12 @@ import {
   cssToBufferPixel,
   cssToComplex,
   revealedCount,
+  type ScreenFrame,
   traceOrbit,
-  type ViewGeometry,
 } from './orbit-math.js'
 import { computeBufferDims } from './render-buffer.js'
-import { pixelScale, Viewport } from './viewport.js'
+import { cssToGrid, pixelScale, Viewport } from './viewport.js'
+import { applyZoomNotch, beginZoomPreview } from './zoom-preview.js'
 
 describe('traceOrbit', () => {
   it('keeps an interior point bounded for the full maxIter (z₀=0, c=0 stays at 0)', () => {
@@ -75,7 +76,7 @@ describe('revealedCount', () => {
 describe('cssToComplex', () => {
   // Display ratio 1 (buffer == CSS box) keeps the anchors easy to reason about.
   const viewport = new Viewport(-0.5, 0.1, 1, 800, 600)
-  const view: ViewGeometry = { viewport, rect: { width: 800, height: 600 } }
+  const view: ScreenFrame = { rendered: viewport, rect: { width: 800, height: 600 } }
 
   it('picks the sample drawn under the cursor, the pixel the inspector probes', () => {
     // A cursor in the middle of cell (100, 50) is over buffer pixel (100, 50),
@@ -106,17 +107,18 @@ describe('cssToComplex', () => {
     // Cross-check the literal formula (not the implementation): for center
     // (0,0), zoom 1, 800×600, pixel (0,0) is (−399.5·scale, +299.5·scale),
     // drawn under the top-left cell.
-    const ref: ViewGeometry = { ...view, viewport: new Viewport(0, 0, 1, 800, 600) }
+    const ref: ScreenFrame = { ...view, rendered: new Viewport(0, 0, 1, 800, 600) }
     const scale = pixelScale(1)
     const c = cssToComplex(0.5, 0.5, ref)
     expect(c.re).toBeCloseTo(-399.5 * scale, 12)
     expect(c.im).toBeCloseTo(299.5 * scale, 12)
   })
 
-  it('honours the CSS↔logical display ratio when the canvas is stretched', () => {
-    // A 1600×1200 CSS box over the 800×600 grid: CSS (801, 601) is in logical
-    // cell (400, 300).
-    const stretched: ViewGeometry = { ...view, rect: { width: 1600, height: 1200 } }
+  it('honours the CSS↔buffer display ratio when the frame is stretched', () => {
+    // A 1600×1200 CSS box over the 800×600 buffer: CSS (801, 601) is in
+    // buffer cell (400, 300). The same holds for an old frame stretched over a
+    // resized window until the new one paints.
+    const stretched: ScreenFrame = { ...view, rect: { width: 1600, height: 1200 } }
     expect(cssToComplex(801, 601, stretched)).toEqual(viewport.pixelToComplex(400, 300))
   })
 
@@ -149,10 +151,41 @@ describe('cssToComplex', () => {
     ] as const) {
       const pixel = cssToBufferPixel(x, y, w, h, buffer.width, buffer.height)
       if (pixel === null) throw new Error('degenerate box')
-      expect(cssToComplex(x, y, { viewport: logical, rect }, buffer)).toEqual(
+      expect(cssToComplex(x, y, { rendered, rect })).toEqual(
         rendered.pixelToComplex(pixel.px, pixel.py),
       )
     }
+  })
+
+  describe('under a zoom Preview', () => {
+    // A two-notch scrub about an off-centre cursor: the Preview scales the
+    // painted frame about that point, so the frame's pixel under the cursor
+    // there is the one it was under before the scrub.
+    const rect = { width: 800, height: 600 }
+    const [ax, ay] = [250.3, 170.6]
+    const grid = cssToGrid(viewport, rect, ax, ay)
+    let preview = beginZoomPreview(viewport)
+    for (let i = 0; i < 2; i++) preview = applyZoomNotch(preview, grid.x, grid.y, ax, ay, 1.25)
+
+    it('carries the cursor back through the transform onto the painted frame', () => {
+      // The anchor is a fixed point of the transform.
+      expect(cssToComplex(ax, ay, { ...view, preview })).toEqual(cssToComplex(ax, ay, view))
+      // Elsewhere, the shown point p came from the frame's (p − t) / scale.
+      const [x, y] = [612.4, 77.9]
+      const fx = (x - preview.tx) / preview.scale
+      const fy = (y - preview.ty) / preview.scale
+      expect(cssToComplex(x, y, { ...view, preview })).toEqual(
+        viewport.pixelToComplex(Math.floor(fx), Math.floor(fy)),
+      )
+    })
+
+    it('clamps a cursor beyond a zoomed-out frame to its nearest edge pixel', () => {
+      const out = { scale: 0.5, tx: 200, ty: 150 } // the frame shrunk about the centre
+      expect(cssToComplex(10, 10, { ...view, preview: out })).toEqual(viewport.pixelToComplex(0, 0))
+      expect(cssToComplex(790, 590, { ...view, preview: out })).toEqual(
+        viewport.pixelToComplex(799, 599),
+      )
+    })
   })
 })
 

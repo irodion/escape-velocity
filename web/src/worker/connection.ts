@@ -122,6 +122,9 @@ export function connectWorker(
         fail(bootErrorMessage(msg))
         return
       case 'ready':
+        // Boot completes once: a repeated `ready` (a misbehaving or injected
+        // worker) must not run the client's once-only `onReady` again.
+        if (ready) return
         ready = true
         if (watch === 'boot') {
           stopWatchdog()
