@@ -1,9 +1,8 @@
 import { liveScreenFrame } from './orbit.js'
-import { cssToBufferPixel, cssToComplex } from './orbit-math.js'
+import { type CanvasFrame, cssToPaintedPixel } from './orbit-math.js'
 import type { PixelProbe } from './render-client.js'
 import type { FieldName, FractalMode } from './settings.js'
 import { formatAxis } from './view-state.js'
-import type { Viewport } from './viewport.js'
 
 /**
  * The pixel inspector (E2, #95) — "why is this pixel this colour?".
@@ -50,8 +49,8 @@ export class PixelInspector {
   constructor(
     private readonly root: HTMLElement,
     private readonly surface: HTMLCanvasElement,
-    // The viewport the frame on screen was rendered from (`liveScreenFrame`).
-    private readonly paintedFrame: () => Viewport | null,
+    // The painted frame in the canvas buffer (`liveScreenFrame`).
+    private readonly canvasFrame: () => CanvasFrame | null,
     initial: { mode: FractalMode; field: FieldName; enabled: boolean },
     // Issue a probe for render-buffer pixel `(px, py)`, returning whether it was
     // actually sent (the client refuses while the cached buffer is unstable).
@@ -153,28 +152,20 @@ export class PixelInspector {
     // One layout read per frame, shared between the painted frame's box and the
     // cursor→CSS-pixel offset.
     const rect = this.surface.getBoundingClientRect()
-    const frame = liveScreenFrame(this.paintedFrame, this.surface, rect)
+    const frame = liveScreenFrame(this.canvasFrame, this.surface, rect)
     if (frame === null) return
     const x = cursor.clientX - rect.left
     const y = cursor.clientY - rect.top
     // The pixel and its coordinate both come from the painted frame. The client
     // only serves a probe while the worker's cached frame is the one on screen,
     // so the colour that comes back belongs to this pixel too.
-    const pixel = cssToBufferPixel(
-      x,
-      y,
-      rect.width,
-      rect.height,
-      frame.rendered.width,
-      frame.rendered.height,
-    )
-    if (pixel === null) return
+    const pixel = cssToPaintedPixel(x, y, frame)
     // Only advance the readout if the probe is actually issued. When the render
     // client refuses it (a render is rewriting the buffer, or a Preview is live),
     // the whole HUD stays frozen on its last coherent reading instead of showing
     // a fresh coordinate paired with a stale value.
     if (!this.probe(pixel.px, pixel.py)) return
-    this.lastCoord = cssToComplex(x, y, frame)
+    this.lastCoord = frame.rendered.pixelToComplex(pixel.px, pixel.py)
     this.renderCoord()
   }
 

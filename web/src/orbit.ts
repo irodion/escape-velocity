@@ -1,6 +1,11 @@
-import { cssToComplex, revealedCount, type ScreenFrame, traceOrbit } from './orbit-math.js'
+import {
+  type CanvasFrame,
+  cssToComplex,
+  revealedCount,
+  type ScreenFrame,
+  traceOrbit,
+} from './orbit-math.js'
 import type { FractalMode } from './settings.js'
-import type { Viewport } from './viewport.js'
 
 // Inner padding of the plot box, as a fraction of its side, so the fitted orbit
 // and the |z| = 2 circle have a margin from the panel edge.
@@ -32,21 +37,20 @@ interface ProbePoint {
 
 /**
  * The frame on screen over `surface`'s live CSS box, with no Preview on it: the
- * `ScreenFrame` a hover maps the cursor through. `paintedFrame` is the viewport
- * the painted buffer was rendered from (null before the first paint). Returns
- * null for that, or for a degenerate box (a `display:none` or pre-layout
- * canvas), so callers bail rather than feed NaN coordinates into
- * `cssToComplex`. The orbit overlay and the pixel inspector read the cursor's
- * point through it.
+ * `ScreenFrame` a hover maps the cursor through. `canvasFrame` is the painted
+ * frame in the canvas buffer (null before the first paint). Returns null for
+ * that, or for a degenerate box (a `display:none` or pre-layout canvas), so
+ * callers bail rather than feed NaN coordinates into `cssToComplex`. The orbit
+ * overlay and the pixel inspector read the cursor's point through it.
  */
 export function liveScreenFrame(
-  paintedFrame: () => Viewport | null,
+  canvasFrame: () => CanvasFrame | null,
   surface: HTMLElement,
   rect: DOMRect = surface.getBoundingClientRect(),
 ): ScreenFrame | null {
   if (rect.width <= 0 || rect.height <= 0) return null
-  const rendered = paintedFrame()
-  return rendered === null ? null : { rendered, rect }
+  const frame = canvasFrame()
+  return frame === null ? null : { ...frame, rect }
 }
 
 /**
@@ -92,8 +96,8 @@ export class OrbitOverlay {
   constructor(
     private readonly overlay: HTMLCanvasElement,
     private readonly surface: HTMLCanvasElement,
-    // The viewport the frame on screen was rendered from (`liveScreenFrame`).
-    private readonly paintedFrame: () => Viewport | null,
+    // The painted frame in the canvas buffer (`liveScreenFrame`).
+    private readonly canvasFrame: () => CanvasFrame | null,
     initial: { mode: FractalMode; cRe: number; cIm: number; maxIter: number; enabled: boolean },
     // Whether the controls drawer is open. A click that lands while it is open
     // is a light-dismiss, not a pin — so we suppress pinning then (and `Escape`
@@ -182,7 +186,7 @@ export class OrbitOverlay {
     // would be wrong until the store settles.
     if (this.isGestureActive()) return
     const rect = this.surface.getBoundingClientRect()
-    const frame = liveScreenFrame(this.paintedFrame, this.surface, rect)
+    const frame = liveScreenFrame(this.canvasFrame, this.surface, rect)
     if (frame === null) return
     this.hover = cssToComplex(event.clientX - rect.left, event.clientY - rect.top, frame)
     this.start()
@@ -251,7 +255,7 @@ export class OrbitOverlay {
   }
 
   private screenFrame(): ScreenFrame | null {
-    return liveScreenFrame(this.paintedFrame, this.surface)
+    return liveScreenFrame(this.canvasFrame, this.surface)
   }
 
   private refreshAccent(): void {

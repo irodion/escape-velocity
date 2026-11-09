@@ -192,12 +192,18 @@ export class InputController {
   // The transform applied while `previewShown`, so a click can be carried back
   // through it onto the painted frame (see `click`).
   private shownPreview: ZoomPreview | null = null
+  // How far pans have redrawn the painted frame within the canvas buffer, in
+  // buffer pixels, since it painted: each drag blits its snapshot (which holds
+  // any earlier shift) at its offset, and the commit leaves it there until the
+  // fresh frame paints (`onRenderPainted`). Read through `canvasShift`.
+  private shift: BufferShift = NO_SHIFT
   private settleTimer: ReturnType<typeof setTimeout> | undefined
   // The canvas's *untransformed* layout box, captured at the start of a
   // scrub/pinch. `getBoundingClientRect` reflects the live CSS transform, so
   // once the Preview has scaled the canvas, re-reading it would feed
-  // drifting, scaled cursor coordinates into the zoom — see `handleWheel`. A
-  // click on the Preview maps through it for the same reason (see `click`).
+  // drifting, scaled cursor coordinates into the zoom — see `handleWheel`. (A
+  // click on the Preview instead undoes the transform on the live box; see
+  // `click`.)
   private scrubRect: DOMRect | null = null
   // Reusable offscreen canvas holding the drag snapshot. Cached across
   // gestures so a pan never allocates a fresh buffer; `captureSnapshot`
@@ -256,6 +262,7 @@ export class InputController {
       startClientX: event.clientX,
       startClientY: event.clientY,
       snapshot: null,
+      baseShift: NO_SHIFT,
     }
     this.canvas.classList.add('dragging')
     this.publishPhase()
@@ -273,6 +280,7 @@ export class InputController {
       return null
     }
     drag.snapshot = snapshot
+    drag.baseShift = this.shift
     // A pan starting mid-zoom tears the Preview down *without* rendering: the
     // accumulated zoom already rides in `currentViewport`, which the pan starts
     // from, so firing the zoom's Settle here would only dispatch an
@@ -407,6 +415,7 @@ export class InputController {
     ctx.fillStyle = 'black'
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height)
     ctx.drawImage(snapshot, dxInternal, dyInternal)
+    this.shift = { dx: drag.baseShift.dx + dxInternal, dy: drag.baseShift.dy + dyInternal }
   }
 
   // Fold one pinch move into the zoom Preview: the change in inter-pointer
@@ -553,13 +562,27 @@ export class InputController {
   //
   // The click commits nothing and leaves a live zoom Preview alone, so it maps
   // through the frame as displayed: `currentViewport` over the untransformed
-  // box, which the Preview transform makes the old frame show. Neither the
-  // store nor the live box will do. The store lags a scrub until the Settle,
-  // and again if a notch lands before the Settle's frame paints. The live box
-  // is scaled by the transform.
+  // box, which the Preview transform makes the old frame show, with that
+  // transform alongside. Neither the store nor the live box will do as they
+  // are. The store lags a scrub until the Settle, and again if a notch lands
+  // before the Settle's frame paints. The live box is scaled by the transform.
   private click(event: PointerEvent): void {
-    // `scrubRect` is the box measured, untransformed, when the Preview began.
-    const rect = (this.previewShown ? this.scrubRect : null) ?? this.canvas.getBoundingClientRect()
+    const live = this.canvas.getBoundingClientRect()
+    const preview = this.shownPreview
+    // Under a Preview, the untransformed box is the live one with the
+    // transform undone (`transform-origin: 0 0`, so the box's corner moves by
+    // `t` and its size scales). Derived from the live box rather than the one
+    // measured when the scrub began, so a resize mid-Preview, before the refit
+    // tears it down, still maps against the box on screen.
+    const rect =
+      preview === null
+        ? live
+        : new DOMRect(
+            live.left - preview.tx,
+            live.top - preview.ty,
+            live.width / preview.scale,
+            live.height / preview.scale,
+          )
     if (rect.width <= 0 || rect.height <= 0) return
     this.onClick(
       event.clientX - rect.left,
@@ -567,11 +590,7 @@ export class InputController {
       {
         viewport: this.currentViewport,
         rect,
-        preview: this.shownPreview && {
-          scale: this.shownPreview.scale,
-          tx: this.shownPreview.tx,
-          ty: this.shownPreview.ty,
-        },
+        preview: preview && { scale: preview.scale, tx: preview.tx, ty: preview.ty },
       },
       { altKey: event.altKey },
     )
@@ -723,6 +742,17 @@ export class InputController {
    */
   onRenderPainted(): void {
     this.hidePreview()
+    this.shift = NO_SHIFT
+  }
+
+  /**
+   * How far pans have shifted the painted frame within the canvas buffer since
+   * it painted, in buffer pixels: the drag's blit, which stays on screen until
+   * the pan's own frame paints. A pick undoes it to find the painted pixel
+   * under the cursor (`cssToComplex`).
+   */
+  canvasShift(): BufferShift {
+    return this.shift
   }
 
   constructor(
@@ -786,7 +816,19 @@ interface DragState {
   // re-blit it with `drawImage` (GPU path) rather than `putImageData` (#82).
   // Null until a move leaves the click slop and the pan starts (`startDrag`).
   snapshot: HTMLCanvasElement | null
+  // The canvas shift the snapshot was taken at (`startDrag`): the drag's blit
+  // adds to it.
+  baseShift: BufferShift
 }
+
+/** A shift of the canvas buffer's contents, in buffer pixels. */
+export interface BufferShift {
+  readonly dx: number
+  readonly dy: number
+}
+
+/** No shift: the painted buffer where it was painted. */
+export const NO_SHIFT: BufferShift = { dx: 0, dy: 0 }
 
 /**
  * The frame a click landed on: `viewport` as drawn over `rect`, the CSS box
