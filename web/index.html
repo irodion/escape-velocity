@@ -163,6 +163,11 @@
            pinches for page zoom, so the InputController's Pointer Events never
            see them. `none` hands every touch to us — pan, pinch, and tap. */
         touch-action: none;
+        /* A held finger is the touch c-pick (#132), not a request for the
+           browser's callout or a text selection. */
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        user-select: none;
         /* Anchor the wheel-zoom Preview transform at the top-left so the
            `zoom-preview` affine (p ↦ scale·p + t) holds exactly. */
         transform-origin: 0 0;

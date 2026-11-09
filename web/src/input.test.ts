@@ -5,7 +5,7 @@ import {
   paintedFrame,
 } from './canvas-content.js'
 import { createGesturePhaseStore, type GesturePhaseStore } from './gesture-phase.js'
-import { InputController, WHEEL_SETTLE_MS } from './input.js'
+import { InputController, LONG_PRESS_MS, WHEEL_SETTLE_MS } from './input.js'
 import { Viewport as RealViewport, type Viewport } from './viewport.js'
 import { createViewportStore, type ViewportStore } from './viewport-store.js'
 
@@ -82,6 +82,7 @@ function pe(
     pointerId?: number
     button?: number
     altKey?: boolean
+    pointerType?: string
   },
 ): PointerEvent {
   return new PointerEvent(type, { bubbles: true, pointerId: 1, button: 0, ...init })
@@ -504,7 +505,10 @@ describe('InputController', () => {
     canvas.dispatchEvent(pe('pointermove', { clientX: 103, clientY: 46 }))
     canvas.dispatchEvent(pe('pointerup', { clientX: 104, clientY: 47 }))
 
-    expect(onClick).toHaveBeenCalledWith(104, 47, expect.anything(), { altKey: false })
+    expect(onClick).toHaveBeenCalledWith(104, 47, expect.anything(), {
+      altKey: false,
+      longPress: false,
+    })
     expect(onInvalidate).not.toHaveBeenCalled()
     expect(offscreenCtxStub.drawImage).not.toHaveBeenCalled()
     expect(ctxStub.drawImage).not.toHaveBeenCalled()
@@ -595,7 +599,7 @@ describe('InputController', () => {
           ty: expect.closeTo(30, 9),
         }),
       },
-      { altKey: false },
+      { altKey: false, longPress: false },
     )
     expect(onClick.mock.calls[0][2].viewport).toBe(zoomed)
     expect(canvas.style.transform).toBe(transform)
@@ -650,7 +654,10 @@ describe('InputController', () => {
         ty: expect.closeTo(-37.5, 9),
       }),
     })
-    expect(onClick).toHaveBeenLastCalledWith(120, 80, expect.anything(), { altKey: false })
+    expect(onClick).toHaveBeenLastCalledWith(120, 80, expect.anything(), {
+      altKey: false,
+      longPress: false,
+    })
 
     notch()
     expect(store.get()).toBe(zoomed)
@@ -668,7 +675,10 @@ describe('InputController', () => {
     const painted = tapFrame() as { rect: DOMRect; preview: unknown }
     expect(painted.rect).toBe(live)
     expect(painted.preview).toBeNull()
-    expect(onClick).toHaveBeenLastCalledWith(110, 60, expect.anything(), { altKey: false })
+    expect(onClick).toHaveBeenLastCalledWith(110, 60, expect.anything(), {
+      altKey: false,
+      longPress: false,
+    })
   })
 
   it('a cancelled press is not a click; a cancelled pan commits where it was last shown', () => {
@@ -717,6 +727,116 @@ describe('InputController', () => {
     expect(y).toBeCloseTo(200, 9)
   })
 
+  describe('long-press, the touch c-pick (#132)', () => {
+    const touch = (type: string, x: number, y: number, pointerId = 1): PointerEvent =>
+      pe(type, { clientX: x, clientY: y, pointerId, pointerType: 'touch' })
+    const LONG = { altKey: false, longPress: true }
+
+    it('a touch press held still fires one click with longPress, and the lift adds nothing', () => {
+      const onClick = vi.fn()
+      const { phase } = mount(canvas, viewport, onChange, undefined, onClick)
+      canvas.dispatchEvent(touch('pointerdown', 120, 80))
+      vi.advanceTimersByTime(LONG_PRESS_MS - 1)
+      expect(onClick).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(1)
+      expect(onClick).toHaveBeenCalledTimes(1)
+      expect(onClick).toHaveBeenLastCalledWith(120, 80, expect.anything(), LONG)
+      // The press is over: the canvas is free while the finger is still down.
+      expect(phase.get()).toBe('idle')
+
+      canvas.dispatchEvent(touch('pointerup', 120, 80))
+      expect(onClick).toHaveBeenCalledTimes(1)
+      expect(onChange).not.toHaveBeenCalled()
+    })
+
+    it('fires at the finger’s latest position after jitter inside the slop', () => {
+      const onClick = vi.fn()
+      mount(canvas, viewport, onChange, undefined, onClick)
+      canvas.dispatchEvent(touch('pointerdown', 120, 80))
+      canvas.dispatchEvent(touch('pointermove', 122, 79))
+      vi.advanceTimersByTime(LONG_PRESS_MS)
+      expect(onClick).toHaveBeenLastCalledWith(122, 79, expect.anything(), LONG)
+    })
+
+    it('a short touch press is a plain tap', () => {
+      const onClick = vi.fn()
+      mount(canvas, viewport, onChange, undefined, onClick)
+      canvas.dispatchEvent(touch('pointerdown', 120, 80))
+      vi.advanceTimersByTime(LONG_PRESS_MS - 100)
+      canvas.dispatchEvent(touch('pointerup', 120, 80))
+      vi.advanceTimersByTime(LONG_PRESS_MS)
+      expect(onClick).toHaveBeenCalledTimes(1)
+      expect(onClick).toHaveBeenLastCalledWith(120, 80, expect.anything(), {
+        altKey: false,
+        longPress: false,
+      })
+    })
+
+    it('a press that pans is never a long-press, and moves after a long-press don’t pan', () => {
+      viewport.panByPixels.mockReturnValue(makeViewportDouble())
+      const onClick = vi.fn()
+      mount(canvas, viewport, onChange, undefined, onClick)
+      canvas.dispatchEvent(touch('pointerdown', 120, 80))
+      canvas.dispatchEvent(touch('pointermove', 160, 80))
+      vi.advanceTimersByTime(LONG_PRESS_MS * 2)
+      expect(onClick).not.toHaveBeenCalled()
+      canvas.dispatchEvent(touch('pointerup', 160, 80))
+      expect(onChange).toHaveBeenCalledTimes(1)
+
+      onChange.mockClear()
+      canvas.dispatchEvent(touch('pointerdown', 120, 80))
+      vi.advanceTimersByTime(LONG_PRESS_MS)
+      expect(onClick).toHaveBeenCalledTimes(1)
+      canvas.dispatchEvent(touch('pointermove', 200, 80))
+      canvas.dispatchEvent(touch('pointerup', 200, 80))
+      expect(onChange).not.toHaveBeenCalled()
+    })
+
+    it('a second finger makes it a pinch, not a long-press', () => {
+      viewport.zoomAround.mockReturnValue(makeZoomResult(2))
+      const onClick = vi.fn()
+      mount(canvas, viewport, onChange, undefined, onClick)
+      canvas.dispatchEvent(touch('pointerdown', 100, 100, 1))
+      canvas.dispatchEvent(touch('pointerdown', 200, 100, 2))
+      vi.advanceTimersByTime(LONG_PRESS_MS * 2)
+      expect(onClick).not.toHaveBeenCalled()
+    })
+
+    it('a cancelled press never fires', () => {
+      const onClick = vi.fn()
+      mount(canvas, viewport, onChange, undefined, onClick)
+      canvas.dispatchEvent(touch('pointerdown', 120, 80))
+      canvas.dispatchEvent(touch('pointercancel', 120, 80))
+      vi.advanceTimersByTime(LONG_PRESS_MS * 2)
+      expect(onClick).not.toHaveBeenCalled()
+    })
+
+    it('a mouse press held still is an ordinary click on release (it has Alt-click)', () => {
+      const onClick = vi.fn()
+      mount(canvas, viewport, onChange, undefined, onClick)
+      canvas.dispatchEvent(pe('pointerdown', { clientX: 120, clientY: 80, pointerType: 'mouse' }))
+      vi.advanceTimersByTime(LONG_PRESS_MS * 2)
+      expect(onClick).not.toHaveBeenCalled()
+      canvas.dispatchEvent(pe('pointerup', { clientX: 120, clientY: 80, pointerType: 'mouse' }))
+      expect(onClick).toHaveBeenLastCalledWith(120, 80, expect.anything(), {
+        altKey: false,
+        longPress: false,
+      })
+    })
+
+    it('cancels the browser’s context menu during a touch press, not a mouse right-click', () => {
+      mount(canvas, viewport, onChange)
+      const menu = (): boolean =>
+        canvas.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
+      // A right-click starts no press, so its menu stays.
+      expect(menu()).toBe(true)
+      canvas.dispatchEvent(touch('pointerdown', 120, 80))
+      expect(menu()).toBe(false)
+      canvas.dispatchEvent(touch('pointerup', 120, 80))
+      expect(menu()).toBe(true)
+    })
+  })
+
   it('threads the tap position and modifier-key state to the click consumer (O2, #92)', () => {
     // The click branch feeds the orbit pin (E1) and the Julia c-picker
     // (O2): the picker needs the Alt-key flag to distinguish a c-pick from a
@@ -736,13 +856,16 @@ describe('InputController', () => {
       120,
       80,
       { viewport: store.get(), rect: box, preview: null },
-      { altKey: false },
+      { altKey: false, longPress: false },
     )
 
     // An Alt-tap at a different point: altKey true (read from the up event).
     canvas.dispatchEvent(pe('pointerdown', { clientX: 200, clientY: 150, altKey: true }))
     canvas.dispatchEvent(pe('pointerup', { clientX: 200, clientY: 150, altKey: true }))
-    expect(onClick).toHaveBeenLastCalledWith(200, 150, expect.anything(), { altKey: true })
+    expect(onClick).toHaveBeenLastCalledWith(200, 150, expect.anything(), {
+      altKey: true,
+      longPress: false,
+    })
   })
 
   it('pinches: two pointers zoom around the midpoint, Settling once when a finger lifts', () => {
