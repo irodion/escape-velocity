@@ -189,9 +189,12 @@ export function cssToPaintedPixel(
 }
 
 // The cell of `cells` that frame coordinate `at` falls in, or null outside the
-// visible span `[lo, hi]` (the part of the frame still in the buffer). The far
-// edge itself belongs to the last cell.
+// visible span `[lo, hi)` (the part of the frame still in the buffer). `hi` is
+// the first coordinate not on screen, so it's excluded, except where it is the
+// frame's own far edge: a cursor exactly on the canvas's last edge belongs to
+// the last cell.
 function containingCell(at: number, lo: number, hi: number, cells: number): number | null {
-  if (!(at >= lo && at <= hi)) return null
+  const onFarEdge = at === hi && hi === cells
+  if (!(at >= lo && (at < hi || onFarEdge))) return null
   return Math.min(Math.floor(at), cells - 1)
 }
