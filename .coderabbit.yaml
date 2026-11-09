@@ -13,9 +13,11 @@ reviews:
   # into it, even with `high_level_summary: false`. The default
   # (`@coderabbitai summary`) is easy to paste from elsewhere; this is not.
   high_level_summary_placeholder: "<!-- coderabbit: no summary in the description -->"
+  # CodeRabbit doesn't review repositories with fewer than 10 stars
+  # automatically, whatever this says: until then, ask for each review with
+  # a `@coderabbitai review` comment. Once automatic reviews apply, these
+  # review every push (the default pauses after 5 reviewed commits).
   auto_review:
     enabled: true
     auto_incremental_review: true
-    # Review every push. By default reviews pause after 5 reviewed commits,
-    # after which each push needed a manual `@coderabbitai review`.
     auto_pause_after_reviewed_commits: 0
