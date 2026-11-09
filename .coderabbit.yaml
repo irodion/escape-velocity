@@ -1,0 +1,15 @@
+# CodeRabbit settings: https://docs.coderabbit.ai/reference/configuration
+language: en-US
+reviews:
+  # The summary goes in CodeRabbit's walkthrough comment. The PR description
+  # belongs to the author: a summary written into it raced with the author's
+  # own edits and overwrote them. (`@coderabbitai summary` in a description
+  # would still pull it in, so leave that placeholder out.)
+  high_level_summary: false
+  high_level_summary_in_walkthrough: true
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    # Review every push. By default reviews pause after 5 reviewed commits,
+    # after which each push needed a manual `@coderabbitai review`.
+    auto_pause_after_reviewed_commits: 0
