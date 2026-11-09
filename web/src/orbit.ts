@@ -1,4 +1,3 @@
-import type { CanvasFrame } from './canvas-content.js'
 import { cssToComplex, revealedCount, type ScreenFrame, traceOrbit } from './orbit-math.js'
 import type { FractalMode } from './settings.js'
 
@@ -28,27 +27,6 @@ const TAU = Math.PI * 2
 interface ProbePoint {
   readonly re: number
   readonly im: number
-}
-
-/**
- * The frame on screen over `surface`'s live CSS box, with no Preview on it: the
- * `ScreenFrame` a hover maps the cursor through. `canvasFrame` is the frame in
- * the canvas buffer (`canvas-content.ts`; null before the first paint). Returns
- * null for that, or for a degenerate box (a `display:none` or pre-layout
- * canvas), so callers bail rather than feed NaN coordinates into
- * `cssToComplex`. The orbit overlay and the pixel inspector read the cursor's
- * point through it.
- */
-export function liveScreenFrame(
-  canvasFrame: () => CanvasFrame | null,
-  surface: HTMLCanvasElement,
-  rect: DOMRect = surface.getBoundingClientRect(),
-): ScreenFrame | null {
-  if (rect.width <= 0 || rect.height <= 0) return null
-  const frame = canvasFrame()
-  return frame === null
-    ? null
-    : { ...frame, buffer: { width: surface.width, height: surface.height }, rect }
 }
 
 /**
@@ -94,8 +72,10 @@ export class OrbitOverlay {
   constructor(
     private readonly overlay: HTMLCanvasElement,
     private readonly surface: HTMLCanvasElement,
-    // The painted frame in the canvas buffer (`liveScreenFrame`).
-    private readonly canvasFrame: () => CanvasFrame | null,
+    // The frame on screen over a CSS box, with no Preview on it (`screenFrame`
+    // in orbit-math), for a hover; null before the first paint or for a
+    // degenerate box.
+    private readonly screenFrameAt: (rect: DOMRect) => ScreenFrame | null,
     initial: { mode: FractalMode; cRe: number; cIm: number; maxIter: number; enabled: boolean },
     // Whether the controls drawer is open. A click that lands while it is open
     // is a light-dismiss, not a pin — so we suppress pinning then (and `Escape`
@@ -128,12 +108,10 @@ export class OrbitOverlay {
 
   /**
    * Pin the orbit at a CSS pixel of `frame`: the frame InputController's click
-   * landed on (with any zoom Preview on it), or by default the painted frame
-   * over the surface's live box.
+   * landed on, with any zoom Preview on it.
    */
-  pin(cssX: number, cssY: number, frame: ScreenFrame | null = this.screenFrame()): void {
+  pin(cssX: number, cssY: number, frame: ScreenFrame): void {
     if (!this.enabled || this.isDrawerOpen()) return
-    if (frame === null) return
     this.pinned = cssToComplex(cssX, cssY, frame)
     this.start()
   }
@@ -184,7 +162,7 @@ export class OrbitOverlay {
     // would be wrong until the store settles.
     if (this.isGestureActive()) return
     const rect = this.surface.getBoundingClientRect()
-    const frame = liveScreenFrame(this.canvasFrame, this.surface, rect)
+    const frame = this.screenFrameAt(rect)
     if (frame === null) return
     this.hover = cssToComplex(event.clientX - rect.left, event.clientY - rect.top, frame)
     this.start()
@@ -250,10 +228,6 @@ export class OrbitOverlay {
     if (this.animStart === null) this.animStart = timestamp
     this.drawFrame(act, timestamp - this.animStart)
     this.rafHandle = requestAnimationFrame(this.tick)
-  }
-
-  private screenFrame(): ScreenFrame | null {
-    return liveScreenFrame(this.canvasFrame, this.surface)
   }
 
   private refreshAccent(): void {

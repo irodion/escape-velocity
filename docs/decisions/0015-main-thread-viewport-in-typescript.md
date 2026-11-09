@@ -58,8 +58,11 @@ Having both paid the costs of both:
    blit (the snapshot's frame, shifted) or when a pinch puts the snapshot
    back. So a frame still rendering, a pan whose frame hasn't painted, or a
    recolor of the cached frame can't move picks off the pixels on screen. A
-   click on a zoom Preview is carried back through its transform first. Both
-   end in `pixelToComplex`. `orbit-math`'s own copy of the constants and the
+   click on a zoom Preview is carried back through its transform first.
+   Beyond the painted frame (a pan's exposed strip, or outside the old frame
+   under a zoom-out Preview) nothing was rendered, so a pick there takes the
+   exact point under the cursor in the view on screen. Both end in
+   `pixelToComplex`. `orbit-math`'s own copy of the constants and the
    pixel scale is gone, so the main thread has one implementation. So is its
    inverse, `complexToCss`, which nothing but its tests called. (The click,
    hover and inspector mappings used to skip the half pixel and the snap, so

@@ -17,7 +17,7 @@ import { createGesturePhaseStore } from './gesture-phase.js'
 import { InputController } from './input.js'
 import { PixelInspector } from './inspector.js'
 import { OrbitOverlay } from './orbit.js'
-import { cssToComplex, type ScreenFrame } from './orbit-math.js'
+import { cssToComplex, type ScreenFrame, screenFrame } from './orbit-math.js'
 import { mountProgress } from './progress.js'
 import { createPwaLifecycle } from './pwa-lifecycle.js'
 import { mountPwaUi } from './pwa-ui.js'
@@ -44,6 +44,7 @@ import { clampZoom, Viewport } from './viewport.js'
 import { createViewportStore } from './viewport-store.js'
 import { fieldEnum, kindEnum, modeEnum, PALETTE_ACCENT, paletteEnum } from './wasm-enums.js'
 import type { RenderRequest } from './worker/protocol.js'
+import type { PreviewTransform } from './zoom-preview.js'
 
 // PWA install + update lifecycle (Slice 8B). The controller (a deep, tested
 // state machine) is fed the real platform adapters here: the SW registrar is
@@ -500,10 +501,27 @@ store.subscribe((_viewport, source) => {
 // below. Constructed before the InputController so its `pin` is in scope for the
 // controller's click callback. The drawer-open guard makes a light-dismiss
 // click (and `Escape`) defer to the drawer rather than pin/un-pin.
+// The frame on screen over `rect`, as the cursor mappings read it: what the
+// canvas buffer holds, the buffer's size, and the viewport the screen depicts
+// (the store's for a hover; a click passes its own frame's, with any Preview).
+const screenFrameAt = (
+  rect: DOMRect,
+  view: Viewport = store.get(),
+  preview: PreviewTransform | null = null,
+): ScreenFrame | null =>
+  screenFrame(
+    canvasContent.get(),
+    { width: canvas.width, height: canvas.height },
+    rect,
+    view,
+    preview,
+  )
+const hoverFrameAt = (rect: DOMRect): ScreenFrame | null => screenFrameAt(rect)
+
 const orbitOverlay = new OrbitOverlay(
   orbitCanvas,
   canvas,
-  canvasContent.get,
+  hoverFrameAt,
   {
     mode: current.mode,
     cRe: current.cRe,
@@ -523,7 +541,7 @@ const orbitOverlay = new OrbitOverlay(
 inspector = new PixelInspector(
   inspectorHud,
   canvas,
-  canvasContent.get,
+  hoverFrameAt,
   { mode: current.mode, field: current.field, enabled: current.inspect },
   (px, py) => probe(px, py, paletteEnum(current.palette), modeEnum(current.normalisation)),
   isGestureActive,
@@ -564,14 +582,8 @@ input = new InputController(
   // frame still rendering. The controller never reports a click on a
   // degenerate box.
   (cssX, cssY, clickFrame, modifiers) => {
-    const canvasFrame = canvasContent.get()
-    if (canvasFrame === null) return // nothing on screen to pick from yet
-    const frame: ScreenFrame = {
-      ...canvasFrame,
-      buffer: { width: canvas.width, height: canvas.height },
-      rect: clickFrame.rect,
-      preview: clickFrame.preview,
-    }
+    const frame = screenFrameAt(clickFrame.rect, clickFrame.viewport, clickFrame.preview)
+    if (frame === null) return // nothing on screen to pick from yet
     // A click that *began* while the drawer was open is a light-dismiss, not a
     // c-pick (the live `.open` class can't be used — the dismiss already
     // cleared it on the canvas `pointerup`; see `drawerOpenAtPress`).

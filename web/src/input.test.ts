@@ -550,7 +550,11 @@ describe('InputController', () => {
         viewport: zoomed,
         // The untransformed box, recovered from the live one.
         rect: boxNear(layout),
-        preview: { scale: 0.8, tx: expect.closeTo(40, 9), ty: expect.closeTo(30, 9) },
+        preview: expect.objectContaining({
+          scale: 0.8,
+          tx: expect.closeTo(40, 9),
+          ty: expect.closeTo(30, 9),
+        }),
       },
       { altKey: false },
     )
@@ -601,7 +605,11 @@ describe('InputController', () => {
     expect(tapFrame()).toEqual({
       viewport: zoomed,
       rect: boxNear(layout),
-      preview: { scale: 1.25, tx: expect.closeTo(-50, 9), ty: expect.closeTo(-37.5, 9) },
+      preview: expect.objectContaining({
+        scale: 1.25,
+        tx: expect.closeTo(-50, 9),
+        ty: expect.closeTo(-37.5, 9),
+      }),
     })
     expect(onClick).toHaveBeenLastCalledWith(120, 80, expect.anything(), { altKey: false })
 

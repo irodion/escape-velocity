@@ -71,6 +71,7 @@ function makeClient(deps?: {
   const worker = new FakeWorker()
   const client = createRenderClient({
     workerFactory: () => worker.asWorker(),
+    canvasContent: createCanvasContentStore(),
     ...deps,
   }) as unknown as TestRenderClient
   return { client, worker }
@@ -171,6 +172,7 @@ describe('render-client', () => {
     let calls = 0
     const worker = new FakeWorker()
     createRenderClient({
+      canvasContent: createCanvasContentStore(),
       workerFactory: () => {
         calls += 1
         return worker.asWorker()

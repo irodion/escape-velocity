@@ -82,6 +82,8 @@ describe('cssToComplex', () => {
     buffer: { width: 800, height: 600 },
     shift: NO_SHIFT,
     rect: { width: 800, height: 600 },
+    view: viewport,
+    preview: null,
   }
 
   it('picks the sample drawn under the cursor, the pixel the inspector probes', () => {
@@ -158,10 +160,27 @@ describe('cssToComplex', () => {
       // The containing buffer cell, from the CSS point by hand.
       const px = Math.min(Math.floor((x / w) * buffer.width), buffer.width - 1)
       const py = Math.min(Math.floor((y / h) * buffer.height), buffer.height - 1)
-      expect(cssToComplex(x, y, { rendered, buffer, rect, shift: NO_SHIFT })).toEqual(
-        rendered.pixelToComplex(px, py),
-      )
+      expect(
+        cssToComplex(x, y, {
+          rendered,
+          buffer,
+          rect,
+          shift: NO_SHIFT,
+          view: logical,
+          preview: null,
+        }),
+      ).toEqual(rendered.pixelToComplex(px, py))
     }
+  })
+
+  it('names the exact point in the strip a pan exposed, and the drawn pixel elsewhere', () => {
+    // A pan 100 px right, its frame not painted yet: the store already holds
+    // the panned view, and the canvas shows the old frame shifted.
+    const panned = viewport.panByPixels(100, 0)
+    const afterPan: ScreenFrame = { ...view, shift: { dx: 100, dy: 0 }, view: panned }
+    const grid = cssToGrid(panned, view.rect, 50.5, 300.5)
+    expect(cssToComplex(50.5, 300.5, afterPan)).toEqual(panned.pixelToComplex(grid.x, grid.y))
+    expect(cssToComplex(300.5, 300.5, afterPan)).toEqual(viewport.pixelToComplex(200, 300))
   })
 
   describe('under a zoom Preview', () => {
@@ -186,12 +205,21 @@ describe('cssToComplex', () => {
       )
     })
 
-    it('clamps a cursor beyond a zoomed-out frame to its nearest edge pixel', () => {
-      const out = { scale: 0.5, tx: 200, ty: 150 } // the frame shrunk about the centre
-      expect(cssToComplex(10, 10, { ...view, preview: out })).toEqual(viewport.pixelToComplex(0, 0))
-      expect(cssToComplex(790, 590, { ...view, preview: out })).toEqual(
-        viewport.pixelToComplex(799, 599),
-      )
+    it('names the exact point under the cursor beyond a zoomed-out frame', () => {
+      // The frame shrunk about the centre: the screen depicts the zoom-out's
+      // viewport, and outside the old frame nothing was rendered, so the pick
+      // is the point there, not the frame's edge pixel.
+      const out = { scale: 0.5, tx: 200, ty: 150 }
+      const zoomedOut = new Viewport(viewport.centerRe, viewport.centerIm, 0.5, 800, 600)
+      const exact = (x: number, y: number) => {
+        const grid = cssToGrid(zoomedOut, view.rect, x, y)
+        return zoomedOut.pixelToComplex(grid.x, grid.y)
+      }
+      const shrunk = { ...view, view: zoomedOut, preview: out }
+      expect(cssToComplex(10, 10, shrunk)).toEqual(exact(10, 10))
+      expect(cssToComplex(790, 590, shrunk)).toEqual(exact(790, 590))
+      // Inside the old frame, still its drawn pixel: CSS (400, 300) is (400, 300).
+      expect(cssToComplex(400.5, 300.5, shrunk)).toEqual(viewport.pixelToComplex(401, 301))
     })
   })
 })
@@ -202,6 +230,8 @@ describe('cssToPaintedPixel (E2, #95)', () => {
     buffer: { width: bufferW, height: bufferH },
     rect: { width: 800, height: 600 },
     shift: { dx: 0, dy: 0 },
+    view: new Viewport(0, 0, 1, bufferW, bufferH),
+    preview: null,
   })
 
   it('floors a CSS pixel to the containing buffer cell at 1× (buffer == CSS box)', () => {
@@ -222,9 +252,10 @@ describe('cssToPaintedPixel (E2, #95)', () => {
     expect(cssToPaintedPixel(400, 300, frame(400, 300))).toEqual({ px: 200, py: 150 })
   })
 
-  it('clamps a cursor on the far edge into the buffer (never one past the last pixel)', () => {
+  it('counts the far edge as the last pixel, and anything beyond as outside the frame', () => {
     expect(cssToPaintedPixel(800, 600, frame(800, 600))).toEqual({ px: 799, py: 599 })
-    expect(cssToPaintedPixel(-3, -3, frame(800, 600))).toEqual({ px: 0, py: 0 })
+    expect(cssToPaintedPixel(-3, -3, frame(800, 600))).toBeNull()
+    expect(cssToPaintedPixel(803, 300, frame(800, 600))).toBeNull()
   })
 
   it('undoes a pan’s blit: the painted pixel the drag moved under the cursor', () => {
@@ -232,8 +263,8 @@ describe('cssToPaintedPixel (E2, #95)', () => {
     // is buffer (200, 100) on the canvas, which shows painted pixel (169, 88).
     const shifted = { ...frame(1600, 1200), shift: { dx: 30.5, dy: 12 } }
     expect(cssToPaintedPixel(100, 50, shifted)).toEqual({ px: 169, py: 88 })
-    // The black strip the drag exposed at the left/top clamps to the edge.
-    expect(cssToPaintedPixel(5, 2, shifted)).toEqual({ px: 0, py: 0 })
+    // The black strip the drag exposed at the left/top holds no pixel.
+    expect(cssToPaintedPixel(5, 2, shifted)).toBeNull()
   })
 
   it('maps through the canvas buffer, not the frame, when a drag redraws an older, smaller snapshot', () => {
@@ -247,8 +278,8 @@ describe('cssToPaintedPixel (E2, #95)', () => {
       shift: { dx: 20, dy: 0 },
     }
     expect(cssToPaintedPixel(400, 300, resized)).toEqual({ px: 480, py: 375 })
-    // Beyond the snapshot's right edge: the black the blit left, clamped.
-    expect(cssToPaintedPixel(790, 300, resized)).toEqual({ px: 799, py: 375 })
+    // Beyond the snapshot's right edge: the black the blit left, no pixel.
+    expect(cssToPaintedPixel(790, 300, resized)).toBeNull()
   })
 
   it('composes a pan’s blit with a zoom Preview over it', () => {

@@ -1,5 +1,5 @@
 import type { CanvasFrame } from './canvas-content.js'
-import type { BoxSize } from './viewport.js'
+import { type BoxSize, cssToGrid, type Viewport } from './viewport.js'
 import type { PreviewTransform } from './zoom-preview.js'
 
 /**
@@ -8,7 +8,8 @@ import type { PreviewTransform } from './zoom-preview.js'
  * complex point drawn there.
  *
  * The projection is the painted frame's own: the sample of the rendered pixel
- * under the cursor (`cssToComplex`). The iteration and `BAILOUT_SQR` are a
+ * under the cursor (`cssToComplex`), or the exact point where nothing was
+ * rendered. The iteration and `BAILOUT_SQR` are a
  * deliberate mirror of the Rust source of truth (`lib.rs`'s `BAILOUT_SQR` and
  * `escape_time.rs`'s iteration): iterating one point is microseconds, so E1
  * stays entirely on the TS side with no wasm/protocol change (per the issue).
@@ -26,14 +27,35 @@ export const BAILOUT_SQR = 65_536
 /**
  * The frame on screen, as the cursor sees it: the frame in the canvas buffer,
  * the buffer's own size (`canvas.width`/`height`), the untransformed CSS box
- * the canvas is stretched over (`rect`), and the zoom Preview's transform on
- * it, if one is shown. The buffer is the frame's size except while a drag
- * redraws an older snapshot over a frame that painted mid-drag.
+ * the canvas is stretched over (`rect`), the zoom Preview's transform on it
+ * (null when none is shown), and `view`, the viewport the screen depicts over
+ * `rect` (the store's, or the controller's under a Preview). The buffer is the
+ * frame's size except while a drag redraws an older snapshot over a frame that
+ * painted mid-drag.
  */
 export interface ScreenFrame extends CanvasFrame {
   readonly buffer: BoxSize
   readonly rect: BoxSize
-  readonly preview?: PreviewTransform | null
+  readonly preview: PreviewTransform | null
+  readonly view: Viewport
+}
+
+/**
+ * Assemble the `ScreenFrame` the cursor mappings read: the one place one is
+ * built, for a hover (no Preview, the store's view) and for a click (the click
+ * frame's view and Preview). Null when the canvas holds no frame yet, or for a
+ * degenerate box (a `display:none` or pre-layout canvas), so callers bail
+ * rather than feed NaN coordinates into `cssToComplex`.
+ */
+export function screenFrame(
+  content: CanvasFrame | null,
+  buffer: BoxSize,
+  rect: BoxSize,
+  view: Viewport,
+  preview: PreviewTransform | null,
+): ScreenFrame | null {
+  if (content === null || rect.width <= 0 || rect.height <= 0) return null
+  return { ...content, buffer, rect, view, preview }
 }
 
 /**
@@ -109,15 +131,21 @@ export function revealedCount(
  * exact even when the buffer size was floored. Under a zoom Preview the point
  * is first carried back through the transform onto the untransformed canvas,
  * and after a pan that hasn't painted yet, back through the drag's blit onto
- * the painted buffer. A cursor beyond the painted frame's edge (a zoom-out
- * Preview, or the strip a pan exposed) clamps to the nearest edge pixel.
+ * the painted buffer.
+ *
+ * Where the cursor is beyond the painted frame (the strip a pan exposed, or
+ * outside the old frame under a zoom-out Preview), nothing was rendered, so
+ * there is no sample to name: the point is the exact one under the cursor in
+ * `view`, the viewport the screen depicts (`cssToGrid`).
  *
  * The zoom anchor deliberately does not snap: it keeps the continuous
  * `cssToGrid` point so a wheel notch scales about the cursor itself.
  */
 export function cssToComplex(x: number, y: number, frame: ScreenFrame): { re: number; im: number } {
-  const { px, py } = cssToPaintedPixel(x, y, frame)
-  return frame.rendered.pixelToComplex(px, py)
+  const pixel = cssToPaintedPixel(x, y, frame)
+  if (pixel !== null) return frame.rendered.pixelToComplex(pixel.px, pixel.py)
+  const grid = cssToGrid(frame.view, frame.rect, x, y)
+  return frame.view.pixelToComplex(grid.x, grid.y)
 }
 
 /**
@@ -132,25 +160,26 @@ export function cssToComplex(x: number, y: number, frame: ScreenFrame): { re: nu
  * CSS box), so keying off the logical size would probe only the top-left
  * fraction at >1× and clamp along the edges at <1×. A fractional coordinate
  * stays inside its current cell, so this `floor`s to the *containing* pixel
- * rather than the nearest sample centre, then clamps into the buffer (a cursor
- * exactly on the right/bottom edge would otherwise land one past the last
- * pixel). The caller guarantees a non-degenerate box (`liveScreenFrame`, and
- * the controller for a click).
+ * rather than the nearest sample centre (a cursor exactly on the right/bottom
+ * edge counts as the last pixel). Returns null when the point lies beyond the
+ * painted frame, where nothing was rendered.
  */
 export function cssToPaintedPixel(
   x: number,
   y: number,
   frame: ScreenFrame,
-): { px: number; py: number } {
+): { px: number; py: number } | null {
   const { rendered, buffer, rect, preview, shift } = frame
   const fx = preview ? (x - preview.tx) / preview.scale : x
   const fy = preview ? (y - preview.ty) / preview.scale : y
-  return {
-    px: clampCell(Math.floor((fx / rect.width) * buffer.width - shift.dx), rendered.width),
-    py: clampCell(Math.floor((fy / rect.height) * buffer.height - shift.dy), rendered.height),
-  }
+  const px = containingCell((fx / rect.width) * buffer.width - shift.dx, rendered.width)
+  const py = containingCell((fy / rect.height) * buffer.height - shift.dy, rendered.height)
+  return px === null || py === null ? null : { px, py }
 }
 
-function clampCell(cell: number, cells: number): number {
-  return Math.min(Math.max(cell, 0), cells - 1)
+// The cell of `cells` that buffer coordinate `at` falls in, or null beyond
+// them. The far edge itself belongs to the last cell.
+function containingCell(at: number, cells: number): number | null {
+  if (!(at >= 0 && at <= cells)) return null
+  return Math.min(Math.floor(at), cells - 1)
 }

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { OrbitOverlay } from './orbit.js'
+import { screenFrame } from './orbit-math.js'
 import { Viewport } from './viewport.js'
 
 // A 2D context stub that just tallies calls — the overlay's drawing is exercised
@@ -62,24 +63,35 @@ function setup(initialEnabled = true) {
 
   const drawer = { open: false }
   const gesture = { active: false }
+  // The frame on screen: an 800×600 buffer painted from `viewport()`, unshifted.
+  const frameAt = (box: DOMRect) =>
+    screenFrame(
+      { rendered: viewport(), shift: { dx: 0, dy: 0 } },
+      { width: 800, height: 600 },
+      box,
+      viewport(),
+      null,
+    )
+  const frame = frameAt(rect(800, 600))
+  if (frame === null) throw new Error('no frame')
   const overlayInstance = new OrbitOverlay(
     overlay,
     surface,
-    () => ({ rendered: viewport(), shift: { dx: 0, dy: 0 } }),
+    frameAt,
     { mode: 'mandelbrot', cRe: -0.7, cIm: 0.27015, maxIter: 64, enabled: initialEnabled },
     () => drawer.open,
     () => gesture.active,
   )
   // Dots/markers are drawn with arc(); use the tally as a proxy for "drew".
   const drew = (): number => calls.arc ?? 0
-  return { overlayInstance, drew, surface, drawer, gesture }
+  return { overlayInstance, drew, surface, drawer, gesture, frame }
 }
 
 describe('OrbitOverlay', () => {
   it('draws the orbit diagram when a point is pinned', () => {
-    const { overlayInstance, drew } = setup()
+    const { overlayInstance, drew, frame } = setup()
     expect(drew()).toBe(0)
-    overlayInstance.pin(400, 300)
+    overlayInstance.pin(400, 300, frame)
     expect(drew()).toBeGreaterThan(0)
   })
 
@@ -100,8 +112,8 @@ describe('OrbitOverlay', () => {
   })
 
   it('stops and clears when disabled', () => {
-    const { overlayInstance, drew } = setup()
-    overlayInstance.pin(400, 300)
+    const { overlayInstance, drew, frame } = setup()
+    overlayInstance.pin(400, 300, frame)
     const frozen = drew()
     overlayInstance.sync({
       mode: 'mandelbrot',
@@ -115,8 +127,8 @@ describe('OrbitOverlay', () => {
   })
 
   it('clears the pin on a mode switch (the seed flips meaning)', () => {
-    const { overlayInstance, drew } = setup()
-    overlayInstance.pin(400, 300)
+    const { overlayInstance, drew, frame } = setup()
+    overlayInstance.pin(400, 300, frame)
     const frozen = drew()
     // Mode change drops the pin; with nothing active, the overlay stops/clears.
     overlayInstance.sync({ mode: 'julia', cRe: -0.7, cIm: 0.27015, maxIter: 64, enabled: true })
@@ -124,15 +136,15 @@ describe('OrbitOverlay', () => {
   })
 
   it('suppresses a pin while the drawer is open (light-dismiss, not a pin)', () => {
-    const { overlayInstance, drew, drawer } = setup()
+    const { overlayInstance, drew, drawer, frame } = setup()
     drawer.open = true
-    overlayInstance.pin(400, 300)
+    overlayInstance.pin(400, 300, frame)
     expect(drew()).toBe(0)
   })
 
   it('un-pins on Escape when the drawer is closed', () => {
-    const { overlayInstance, drew } = setup()
-    overlayInstance.pin(400, 300)
+    const { overlayInstance, drew, frame } = setup()
+    overlayInstance.pin(400, 300, frame)
     const frozen = drew()
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
     expect(drew()).toBe(frozen)

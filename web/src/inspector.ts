@@ -1,6 +1,4 @@
-import type { CanvasFrame } from './canvas-content.js'
-import { liveScreenFrame } from './orbit.js'
-import { cssToPaintedPixel } from './orbit-math.js'
+import { cssToPaintedPixel, type ScreenFrame } from './orbit-math.js'
 import type { PixelProbe } from './render-client.js'
 import type { FieldName, FractalMode } from './settings.js'
 import { formatAxis } from './view-state.js'
@@ -50,8 +48,9 @@ export class PixelInspector {
   constructor(
     private readonly root: HTMLElement,
     private readonly surface: HTMLCanvasElement,
-    // The painted frame in the canvas buffer (`liveScreenFrame`).
-    private readonly canvasFrame: () => CanvasFrame | null,
+    // The frame on screen over a CSS box, with no Preview on it (`screenFrame`
+    // in orbit-math); null before the first paint or for a degenerate box.
+    private readonly screenFrameAt: (rect: DOMRect) => ScreenFrame | null,
     initial: { mode: FractalMode; field: FieldName; enabled: boolean },
     // Issue a probe for render-buffer pixel `(px, py)`, returning whether it was
     // actually sent (the client refuses while the cached buffer is unstable).
@@ -153,7 +152,7 @@ export class PixelInspector {
     // One layout read per frame, shared between the painted frame's box and the
     // cursor→CSS-pixel offset.
     const rect = this.surface.getBoundingClientRect()
-    const frame = liveScreenFrame(this.canvasFrame, this.surface, rect)
+    const frame = this.screenFrameAt(rect)
     if (frame === null) return
     const x = cursor.clientX - rect.left
     const y = cursor.clientY - rect.top
@@ -161,6 +160,9 @@ export class PixelInspector {
     // only serves a probe while the worker's cached frame is the one on screen,
     // so the colour that comes back belongs to this pixel too.
     const pixel = cssToPaintedPixel(x, y, frame)
+    // Beyond the painted frame (a pan's exposed strip) there is no pixel to
+    // probe; the readout stays on its last reading.
+    if (pixel === null) return
     // Only advance the readout if the probe is actually issued. When the render
     // client refuses it (a render is rewriting the buffer, or a Preview is live),
     // the whole HUD stays frozen on its last coherent reading instead of showing
