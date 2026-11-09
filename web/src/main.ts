@@ -13,10 +13,10 @@ import { buildFilename, computeExportDims, exportRenderedFrame } from './export-
 import { showFatal } from './fatal.js'
 import { defaultModeForField, isModeValidForField } from './field-modes.js'
 import { createGesturePhaseStore } from './gesture-phase.js'
-import { InputController } from './input.js'
+import { InputController, NO_SHIFT } from './input.js'
 import { PixelInspector } from './inspector.js'
 import { OrbitOverlay } from './orbit.js'
-import { cssToComplex, type ScreenFrame } from './orbit-math.js'
+import { type CanvasFrame, cssToComplex, type ScreenFrame } from './orbit-math.js'
 import { mountProgress } from './progress.js'
 import { createPwaLifecycle } from './pwa-lifecycle.js'
 import { mountPwaUi } from './pwa-ui.js'
@@ -218,9 +218,13 @@ let input: InputController | undefined
 // zoom × effective render scale, and buffer size. The hover, pin, Alt-click and
 // inspector mappings project through it, not the store: after a render-scale
 // change, a resize or a permalink jump the old frame stays up until the new one
-// paints, and the cursor is over its pixels. Null until the first paint.
+// paints, and the cursor is over its pixels (shifted, after a pan; see
+// `currentCanvasFrame`). Null until the first paint.
 let paintedFrame: Viewport | null = null
-const currentPaintedFrame = (): Viewport | null => paintedFrame
+// The painted frame as the canvas holds it: shifted by any pan whose own frame
+// hasn't painted yet (the drag's blit stays on screen until then).
+const currentCanvasFrame = (): CanvasFrame | null =>
+  paintedFrame === null ? null : { rendered: paintedFrame, shift: input?.canvasShift() ?? NO_SHIFT }
 // Which gesture owns the canvas. The InputController (built last) is its only
 // writer; the modules built before it read it through `isGestureActive`.
 const gesture = createGesturePhaseStore()
@@ -511,7 +515,7 @@ store.subscribe((_viewport, source) => {
 const orbitOverlay = new OrbitOverlay(
   orbitCanvas,
   canvas,
-  currentPaintedFrame,
+  currentCanvasFrame,
   {
     mode: current.mode,
     cRe: current.cRe,
@@ -531,7 +535,7 @@ const orbitOverlay = new OrbitOverlay(
 inspector = new PixelInspector(
   inspectorHud,
   canvas,
-  currentPaintedFrame,
+  currentCanvasFrame,
   { mode: current.mode, field: current.field, enabled: current.inspect },
   (px, py) => probe(px, py, paletteEnum(current.palette), modeEnum(current.normalisation)),
   isGestureActive,
@@ -571,9 +575,10 @@ input = new InputController(
   // not the store, which lags a Preview and leads a frame still rendering. The
   // controller never reports a click on a degenerate box.
   (cssX, cssY, clickFrame, modifiers) => {
-    if (paintedFrame === null) return // nothing on screen to pick from yet
+    const canvasFrame = currentCanvasFrame()
+    if (canvasFrame === null) return // nothing on screen to pick from yet
     const frame: ScreenFrame = {
-      rendered: paintedFrame,
+      ...canvasFrame,
       rect: clickFrame.rect,
       preview: clickFrame.preview,
     }

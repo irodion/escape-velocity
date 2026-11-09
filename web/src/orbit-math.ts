@@ -1,3 +1,4 @@
+import type { BufferShift } from './input.js'
 import type { BoxSize, Viewport } from './viewport.js'
 import type { PreviewTransform } from './zoom-preview.js'
 
@@ -23,14 +24,23 @@ import type { PreviewTransform } from './zoom-preview.js'
 export const BAILOUT_SQR = 65_536
 
 /**
- * The frame on screen, as the cursor sees it. `rendered` is the viewport the
- * worker rendered the painted buffer from: the buffer's own size, at the zoom
- * times the effective render scale (the render request's fields). `rect` is the
- * untransformed CSS box it is stretched over, and `preview` the zoom Preview's
- * transform on it, if one is shown.
+ * The frame in the canvas buffer. `rendered` is the viewport the worker
+ * rendered the painted buffer from: the buffer's own size, at the zoom times
+ * the effective render scale (the render request's fields). `shift` is how far
+ * a pan has since redrawn that buffer within the canvas (the drag's blit, kept
+ * until the next frame paints).
  */
-export interface ScreenFrame {
+export interface CanvasFrame {
   readonly rendered: Viewport
+  readonly shift: BufferShift
+}
+
+/**
+ * The frame on screen, as the cursor sees it: the canvas frame, the
+ * untransformed CSS box the canvas is stretched over (`rect`), and the zoom
+ * Preview's transform on it, if one is shown.
+ */
+export interface ScreenFrame extends CanvasFrame {
   readonly rect: BoxSize
   readonly preview?: PreviewTransform | null
 }
@@ -96,7 +106,7 @@ export function revealedCount(
 /**
  * Map a CSS pixel on the surface back to the complex point the pixel beneath
  * the cursor was rendered from: the sample of the containing pixel of the
- * painted buffer (`cssToBufferPixel`'s pixel), not the cursor's exact sub-pixel
+ * painted buffer (`cssToPaintedPixel`'s pixel), not the cursor's exact sub-pixel
  * point. A pick, a traced orbit and the inspector's readout therefore name the
  * same sample the inspector probes, wherever in the pixel the cursor sits.
  *
@@ -106,53 +116,50 @@ export function revealedCount(
  * over its pixels. The sample is projected through `rendered`, the viewport the
  * kernel sampled the buffer from (`pixel_to_complex` on the request), so it is
  * exact even when the buffer size was floored. Under a zoom Preview the point
- * is first carried back through the transform onto the untransformed frame; a
- * cursor beyond the painted frame's edge (a zoom-out Preview) clamps to the
- * nearest edge pixel.
+ * is first carried back through the transform onto the untransformed canvas,
+ * and after a pan that hasn't painted yet, back through the drag's blit onto
+ * the painted buffer. A cursor beyond the painted frame's edge (a zoom-out
+ * Preview, or the strip a pan exposed) clamps to the nearest edge pixel.
  *
  * The zoom anchor deliberately does not snap: it keeps the continuous
  * `cssToGrid` point so a wheel notch scales about the cursor itself.
  */
 export function cssToComplex(x: number, y: number, frame: ScreenFrame): { re: number; im: number } {
-  const { rendered, rect, preview } = frame
-  const fx = preview ? (x - preview.tx) / preview.scale : x
-  const fy = preview ? (y - preview.ty) / preview.scale : y
-  return rendered.pixelToComplex(
-    containingCell(fx, rect.width, rendered.width),
-    containingCell(fy, rect.height, rendered.height),
-  )
+  const { px, py } = cssToPaintedPixel(x, y, frame)
+  return frame.rendered.pixelToComplex(px, py)
 }
 
 /**
- * Map a CSS pixel on the surface to the **render-buffer pixel** under it — the
- * row-major `(px, py)` index into the worker's cached Field buffer the pixel
- * inspector probes (E2, #95).
+ * The pixel of the painted buffer under CSS point `(x, y)`: the row-major
+ * index the inspector probes in the worker's cached Field buffer (E2, #95), and
+ * the sample `cssToComplex` names. Undoes, in turn, the Preview's CSS transform,
+ * the stretch of the buffer over the box, and a pan's blit of the buffer within
+ * the canvas.
  *
- * It maps against the canvas **backing store** (`bufferW`/`bufferH` =
- * `canvas.width`/`canvas.height`), *not* the viewport's logical grid: render
+ * It maps against the buffer's size, *not* the viewport's logical grid: render
  * scale decouples the two (a 2× buffer is twice the logical width over the same
  * CSS box), so keying off the logical size would probe only the top-left
- * fraction at >1× and clamp along the edges at <1×. The CSS box (`rectW`/`rectH`)
- * is `getBoundingClientRect`'s size. A fractional CSS coordinate stays inside its
- * current cell, so this `floor`s to the *containing* pixel rather than the
- * nearest sample centre, then clamps into `[0, buffer)` (a cursor exactly on the
- * right/bottom edge would otherwise land one past the last pixel). Returns `null`
- * for a degenerate display box.
+ * fraction at >1× and clamp along the edges at <1×. A fractional coordinate
+ * stays inside its current cell, so this `floor`s to the *containing* pixel
+ * rather than the nearest sample centre, then clamps into the buffer (a cursor
+ * exactly on the right/bottom edge would otherwise land one past the last
+ * pixel). The caller guarantees a non-degenerate box (`liveScreenFrame`, and
+ * the controller for a click).
  */
-export function cssToBufferPixel(
-  cssX: number,
-  cssY: number,
-  rectW: number,
-  rectH: number,
-  bufferW: number,
-  bufferH: number,
-): { px: number; py: number } | null {
-  if (rectW <= 0 || rectH <= 0) return null
-  return { px: containingCell(cssX, rectW, bufferW), py: containingCell(cssY, rectH, bufferH) }
+export function cssToPaintedPixel(
+  x: number,
+  y: number,
+  frame: ScreenFrame,
+): { px: number; py: number } {
+  const { rendered, rect, preview, shift } = frame
+  const fx = preview ? (x - preview.tx) / preview.scale : x
+  const fy = preview ? (y - preview.ty) / preview.scale : y
+  return {
+    px: clampCell(Math.floor((fx / rect.width) * rendered.width - shift.dx), rendered.width),
+    py: clampCell(Math.floor((fy / rect.height) * rendered.height - shift.dy), rendered.height),
+  }
 }
 
-// The index of the cell, out of `cells` across a `span`-wide CSS box, that CSS
-// coordinate `css` falls in, clamped into `[0, cells)`.
-function containingCell(css: number, span: number, cells: number): number {
-  return Math.min(Math.max(Math.floor((css / span) * cells), 0), cells - 1)
+function clampCell(cell: number, cells: number): number {
+  return Math.min(Math.max(cell, 0), cells - 1)
 }

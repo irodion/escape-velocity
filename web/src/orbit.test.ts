@@ -65,7 +65,7 @@ function setup(initialEnabled = true) {
   const overlayInstance = new OrbitOverlay(
     overlay,
     surface,
-    () => viewport(),
+    () => ({ rendered: viewport(), shift: { dx: 0, dy: 0 } }),
     { mode: 'mandelbrot', cRe: -0.7, cIm: 0.27015, maxIter: 64, enabled: initialEnabled },
     () => drawer.open,
     () => gesture.active,

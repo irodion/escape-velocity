@@ -33,6 +33,17 @@ function makeZoomResult(zoom: number): ReturnType<typeof makeViewportDouble> {
   return makeViewportDouble(zoom)
 }
 
+// Matches a box with `rect`'s position and size, to within float noise (a box
+// recovered by undoing a Preview transform is off in the last bits).
+function boxNear(rect: DOMRect): unknown {
+  return expect.objectContaining({
+    left: expect.closeTo(rect.left, 9),
+    top: expect.closeTo(rect.top, 9),
+    width: expect.closeTo(rect.width, 9),
+    height: expect.closeTo(rect.height, 9),
+  })
+}
+
 function setRect(
   canvas: HTMLCanvasElement,
   rect: { left?: number; top?: number; width: number; height: number },
@@ -275,6 +286,38 @@ describe('InputController', () => {
     expect(viewport.panByPixels).toHaveBeenCalledWith(100, 60)
   })
 
+  it('reports the blit a committed pan leaves on the canvas until its frame paints', () => {
+    // After the commit the canvas keeps showing the painted frame shifted by
+    // the drag until the pan's own render paints; a pick must undo that.
+    const panned = makeViewportDouble()
+    viewport.panByPixels.mockReturnValue(panned)
+    panned.panByPixels.mockReturnValue(makeViewportDouble())
+    // An 800×600 buffer at half CSS size: CSS deltas double in buffer pixels.
+    setRect(canvas, { left: 0, top: 0, width: 400, height: 300 })
+    const { controller } = mount(canvas, viewport, onChange)
+    expect(controller.canvasShift()).toEqual({ dx: 0, dy: 0 })
+    const drag = (from: [number, number], to: [number, number]): void => {
+      canvas.dispatchEvent(pe('pointerdown', { clientX: from[0], clientY: from[1] }))
+      canvas.dispatchEvent(pe('pointermove', { clientX: to[0], clientY: to[1] }))
+      canvas.dispatchEvent(pe('pointerup', { clientX: to[0], clientY: to[1] }))
+    }
+
+    drag([100, 50], [150, 80])
+    expect(controller.canvasShift()).toEqual({ dx: 100, dy: 60 })
+
+    // A second pan before the paint blits the already-shifted canvas again.
+    drag([200, 200], [190, 195])
+    expect(controller.canvasShift()).toEqual({ dx: 80, dy: 50 })
+
+    // A tap moves nothing.
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 10, clientY: 10 }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 10, clientY: 10 }))
+    expect(controller.canvasShift()).toEqual({ dx: 80, dy: 50 })
+
+    controller.onRenderPainted()
+    expect(controller.canvasShift()).toEqual({ dx: 0, dy: 0 })
+  })
+
   it('completes the drag when pointerup fires with coordinates outside the canvas', () => {
     // `setPointerCapture` routes the whole gesture to the canvas even when the
     // pointer leaves the box, so a release far outside still reaches the
@@ -462,8 +505,9 @@ describe('InputController', () => {
     )
     const transform = canvas.style.transform
     expect(transform).not.toBe('')
-    // What the box measures once the Preview scales it.
-    setRect(canvas, { left: 80, top: 60, width: 640, height: 480 })
+    // What the box measures once the Preview scales it: 0.8× about (200, 150),
+    // so the corner moves by t = (40, 30) and the size scales.
+    setRect(canvas, { left: 40, top: 30, width: 640, height: 480 })
     canvas.dispatchEvent(pe('pointerdown', { clientX: 120, clientY: 80 }))
     // Held past the Settle delay: the Settle waits for the press to end.
     vi.advanceTimersByTime(WHEEL_SETTLE_MS * 3)
@@ -478,7 +522,8 @@ describe('InputController', () => {
       80,
       {
         viewport: zoomed,
-        rect: layout,
+        // The untransformed box, recovered from the live one.
+        rect: boxNear(layout),
         preview: { scale: 0.8, tx: expect.closeTo(40, 9), ty: expect.closeTo(30, 9) },
       },
       { altKey: false },
@@ -525,19 +570,22 @@ describe('InputController', () => {
     notch()
     vi.advanceTimersByTime(WHEEL_SETTLE_MS)
     expect(store.get()).toBe(zoomed)
-    setRect(canvas, { left: -100, top: -75, width: 1000, height: 750 })
+    // 1.25× about (200, 150): t = (−50, −37.5).
+    setRect(canvas, { left: -50, top: -37.5, width: 1000, height: 750 })
     expect(tapFrame()).toEqual({
       viewport: zoomed,
-      rect: layout,
+      rect: boxNear(layout),
       preview: { scale: 1.25, tx: expect.closeTo(-50, 9), ty: expect.closeTo(-37.5, 9) },
     })
     expect(onClick).toHaveBeenLastCalledWith(120, 80, expect.anything(), { altKey: false })
 
     notch()
     expect(store.get()).toBe(zoomed)
+    // 1.5625× about (200, 150): t = (−112.5, −84.375).
+    setRect(canvas, { left: -112.5, top: -84.375, width: 1250, height: 937.5 })
     const frame = tapFrame() as { viewport: unknown; rect: DOMRect; preview: { scale: number } }
     expect(frame.viewport).toBe(zoomedAgain)
-    expect(frame.rect).toBe(layout)
+    expect(frame.rect).toEqual(boxNear(layout))
     expect(frame.preview.scale).toBeCloseTo(1.5625, 12)
 
     // Once the fresh frame paints, the box is measured live again.
@@ -569,6 +617,31 @@ describe('InputController', () => {
     expect(onClick).not.toHaveBeenCalled()
     expect(viewport.panByPixels).toHaveBeenCalledWith(30, 20)
     expect(onChange).toHaveBeenCalledTimes(1)
+  })
+
+  it('maps a tap on a Preview against the live box after a resize, not the scrub-start one', () => {
+    // A resize mid-Preview leaves the transform up until the debounced refit
+    // tears it down. In that gap the untransformed box is the resized one.
+    viewport.zoomAround.mockReturnValue(makeZoomResult(1.25))
+    const onClick = vi.fn()
+    mount(canvas, viewport, onChange, undefined, onClick)
+    canvas.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: -100,
+        clientX: 200,
+        clientY: 150,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    // The window grows to 1000×750 under the 1.25× Preview (t = (−50, −37.5)).
+    setRect(canvas, { left: -50, top: -37.5, width: 1250, height: 937.5 })
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 300, clientY: 200 }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 300, clientY: 200 }))
+    const [x, y, frame] = onClick.mock.lastCall as [number, number, { rect: DOMRect }]
+    expect(frame.rect).toEqual(boxNear({ left: 0, top: 0, width: 1000, height: 750 } as DOMRect))
+    expect(x).toBeCloseTo(300, 9)
+    expect(y).toBeCloseTo(200, 9)
   })
 
   it('threads the tap position and modifier-key state to the click consumer (O2, #92)', () => {

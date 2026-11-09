@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   BAILOUT_SQR,
-  cssToBufferPixel,
   cssToComplex,
+  cssToPaintedPixel,
   revealedCount,
   type ScreenFrame,
   traceOrbit,
@@ -76,12 +76,17 @@ describe('revealedCount', () => {
 describe('cssToComplex', () => {
   // Display ratio 1 (buffer == CSS box) keeps the anchors easy to reason about.
   const viewport = new Viewport(-0.5, 0.1, 1, 800, 600)
-  const view: ScreenFrame = { rendered: viewport, rect: { width: 800, height: 600 } }
+  const NO_SHIFT = { dx: 0, dy: 0 }
+  const view: ScreenFrame = {
+    rendered: viewport,
+    shift: NO_SHIFT,
+    rect: { width: 800, height: 600 },
+  }
 
   it('picks the sample drawn under the cursor, the pixel the inspector probes', () => {
     // A cursor in the middle of cell (100, 50) is over buffer pixel (100, 50),
     // rendered from the sample at grid coordinate (100, 50), not (100.5, 50.5).
-    expect(cssToBufferPixel(100.5, 50.5, 800, 600, 800, 600)).toEqual({ px: 100, py: 50 })
+    expect(cssToPaintedPixel(100.5, 50.5, view)).toEqual({ px: 100, py: 50 })
     expect(cssToComplex(100.5, 50.5, view)).toEqual(viewport.pixelToComplex(100, 50))
   })
 
@@ -94,7 +99,7 @@ describe('cssToComplex', () => {
       [10.9, 20.9],
       [10.1, 20.7],
     ] as const) {
-      expect(cssToBufferPixel(x, y, 800, 600, 800, 600)).toEqual({ px: 10, py: 20 })
+      expect(cssToPaintedPixel(x, y, view)).toEqual({ px: 10, py: 20 })
       expect(cssToComplex(x, y, view)).toEqual(sample)
     }
   })
@@ -149,10 +154,11 @@ describe('cssToComplex', () => {
       [w - 0.6, h - 0.1],
       [w * 0.731, h * 0.219],
     ] as const) {
-      const pixel = cssToBufferPixel(x, y, w, h, buffer.width, buffer.height)
-      if (pixel === null) throw new Error('degenerate box')
-      expect(cssToComplex(x, y, { rendered, rect })).toEqual(
-        rendered.pixelToComplex(pixel.px, pixel.py),
+      // The containing buffer cell, from the CSS point by hand.
+      const px = Math.min(Math.floor((x / w) * buffer.width), buffer.width - 1)
+      const py = Math.min(Math.floor((y / h) * buffer.height), buffer.height - 1)
+      expect(cssToComplex(x, y, { rendered, rect, shift: NO_SHIFT })).toEqual(
+        rendered.pixelToComplex(px, py),
       )
     }
   })
@@ -189,32 +195,54 @@ describe('cssToComplex', () => {
   })
 })
 
-describe('cssToBufferPixel (E2, #95)', () => {
-  it('floors a CSS pixel to the containing buffer cell at 1× (buffer == CSS box)', () => {
-    // 800×600 CSS box over an 800×600 backing store: a fractional coordinate
-    // stays inside its current cell (floor), not the nearest sample centre.
-    expect(cssToBufferPixel(123.4, 456.6, 800, 600, 800, 600)).toEqual({ px: 123, py: 456 })
+describe('cssToPaintedPixel (E2, #95)', () => {
+  const frame = (bufferW: number, bufferH: number): ScreenFrame => ({
+    rendered: new Viewport(0, 0, 1, bufferW, bufferH),
+    rect: { width: 800, height: 600 },
+    shift: { dx: 0, dy: 0 },
   })
 
-  it('maps against the backing store, not the CSS box, at 2× render scale', () => {
-    // 800×600 CSS box over a 1600×1200 backing store (render scale 2×): the CSS
+  it('floors a CSS pixel to the containing buffer cell at 1× (buffer == CSS box)', () => {
+    // 800×600 CSS box over an 800×600 buffer: a fractional coordinate stays
+    // inside its current cell (floor), not the nearest sample centre.
+    expect(cssToPaintedPixel(123.4, 456.6, frame(800, 600))).toEqual({ px: 123, py: 456 })
+  })
+
+  it('maps against the buffer, not the CSS box, at 2× render scale', () => {
+    // 800×600 CSS box over a 1600×1200 buffer (render scale 2×): the CSS
     // centre reaches the buffer centre and the far edge reaches the far buffer —
     // a CSS-box mapping would only ever address the top-left quarter.
-    expect(cssToBufferPixel(400, 300, 800, 600, 1600, 1200)).toEqual({ px: 800, py: 600 })
-    expect(cssToBufferPixel(799, 599, 800, 600, 1600, 1200)).toEqual({ px: 1598, py: 1198 })
+    expect(cssToPaintedPixel(400, 300, frame(1600, 1200))).toEqual({ px: 800, py: 600 })
+    expect(cssToPaintedPixel(799, 599, frame(1600, 1200))).toEqual({ px: 1598, py: 1198 })
   })
 
-  it('maps against the backing store at 0.5× render scale', () => {
-    // 800×600 CSS box over a 400×300 backing store (render scale 0.5×).
-    expect(cssToBufferPixel(400, 300, 800, 600, 400, 300)).toEqual({ px: 200, py: 150 })
+  it('maps against the buffer at 0.5× render scale', () => {
+    expect(cssToPaintedPixel(400, 300, frame(400, 300))).toEqual({ px: 200, py: 150 })
   })
 
   it('clamps a cursor on the far edge into the buffer (never one past the last pixel)', () => {
-    expect(cssToBufferPixel(800, 600, 800, 600, 800, 600)).toEqual({ px: 799, py: 599 })
-    expect(cssToBufferPixel(-3, -3, 800, 600, 800, 600)).toEqual({ px: 0, py: 0 })
+    expect(cssToPaintedPixel(800, 600, frame(800, 600))).toEqual({ px: 799, py: 599 })
+    expect(cssToPaintedPixel(-3, -3, frame(800, 600))).toEqual({ px: 0, py: 0 })
   })
 
-  it('returns null for a degenerate display box', () => {
-    expect(cssToBufferPixel(10, 10, 0, 600, 800, 600)).toBeNull()
+  it('undoes a pan’s blit: the painted pixel the drag moved under the cursor', () => {
+    // A 2× buffer blitted 30.5 buffer pixels right and 12 down: CSS (100, 50)
+    // is buffer (200, 100) on the canvas, which shows painted pixel (169, 88).
+    const shifted = { ...frame(1600, 1200), shift: { dx: 30.5, dy: 12 } }
+    expect(cssToPaintedPixel(100, 50, shifted)).toEqual({ px: 169, py: 88 })
+    // The black strip the drag exposed at the left/top clamps to the edge.
+    expect(cssToPaintedPixel(5, 2, shifted)).toEqual({ px: 0, py: 0 })
+  })
+
+  it('composes a pan’s blit with a zoom Preview over it', () => {
+    // Preview 2× about the origin over a canvas shifted 10 buffer pixels right:
+    // CSS (100, 100) is untransformed (50, 50), canvas pixel (50, 50), painted
+    // pixel (40, 50).
+    const both = {
+      ...frame(800, 600),
+      shift: { dx: 10, dy: 0 },
+      preview: { scale: 2, tx: 0, ty: 0 },
+    }
+    expect(cssToPaintedPixel(100, 100, both)).toEqual({ px: 40, py: 50 })
   })
 })

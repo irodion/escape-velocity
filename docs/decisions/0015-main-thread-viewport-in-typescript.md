@@ -53,8 +53,9 @@ Having both paid the costs of both:
    actually painted (its request's zoom, the logical zoom times the
    effective render scale, on the floored buffer), exactly as the kernel did.
    The render client reports that geometry when it paints, so a frame still
-   rendering doesn't move picks off the pixels on screen, and a click on a
-   zoom Preview is carried back through its transform first. Both end in
+   rendering doesn't move picks off the pixels on screen. A click on a zoom
+   Preview is carried back through its transform first, and a pan's blit,
+   which stays on the canvas until the pan's own frame paints, is undone too. Both end in
    `pixelToComplex`. `orbit-math`'s own copy of the
    constants and the pixel scale is gone, so the main thread has one
    implementation. So is its inverse, `complexToCss`, which nothing but its
