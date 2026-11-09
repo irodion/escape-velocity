@@ -1,12 +1,12 @@
-import { type BoxSize, cssToGrid, type Viewport } from './viewport.js'
+import type { BoxSize, Viewport } from './viewport.js'
 
 /**
  * Pure maths for the orbit visualizer (E1, #94): iterate a single point's
  * `z = z² + c` orbit in plain TS, and map a CSS pixel on the canvas to the
  * complex point drawn there.
  *
- * The projection is the viewport's own, through the same CSS → grid mapping the
- * zoom anchor uses (`viewport.ts`). The iteration and `BAILOUT_SQR` are a
+ * The projection is the viewport's own, snapped to the centre of the rendered
+ * pixel under the cursor (`cssToComplex`). The iteration and `BAILOUT_SQR` are a
  * deliberate mirror of the Rust source of truth (`lib.rs`'s `BAILOUT_SQR` and
  * `escape_time.rs`'s iteration): iterating one point is microseconds, so E1
  * stays entirely on the TS side with no wasm/protocol change (per the issue).
@@ -89,13 +89,35 @@ export function revealedCount(
 }
 
 /**
- * Map a CSS pixel on the overlay back to its complex-plane point: the sample
- * drawn under it (`cssToGrid`), so a pick or a traced orbit is the point the
- * pixel beneath the cursor was rendered from.
+ * Map a CSS pixel on the surface back to the complex point the pixel beneath
+ * the cursor was rendered from: the centre of the containing **buffer** cell
+ * (`cssToBufferPixel`'s pixel), not the cursor's exact sub-pixel point. A pick,
+ * a traced orbit and the inspector's readout therefore name the same sample the
+ * inspector probes, wherever in the cell the cursor sits.
+ *
+ * `buffer` is the canvas backing store the frame was rendered into
+ * (`canvas.width`/`canvas.height`). It defaults to the viewport's logical grid,
+ * which is the buffer at render scale 1. At other scales a buffer cell is not a
+ * logical one, so its centre, `px + ½` buffer pixels from the edge, is carried
+ * onto the logical grid (minus the grid's own half pixel, as `cssToGrid` does)
+ * before it is projected.
+ *
+ * The zoom anchor deliberately does not snap: it keeps the continuous
+ * `cssToGrid` point so a wheel notch scales about the cursor itself.
  */
-export function cssToComplex(x: number, y: number, view: ViewGeometry): { re: number; im: number } {
-  const grid = cssToGrid(view.viewport, view.rect, x, y)
-  return view.viewport.pixelToComplex(grid.x, grid.y)
+export function cssToComplex(
+  x: number,
+  y: number,
+  view: ViewGeometry,
+  buffer: BoxSize = view.viewport,
+): { re: number; im: number } {
+  const { viewport, rect } = view
+  const px = containingCell(x, rect.width, buffer.width)
+  const py = containingCell(y, rect.height, buffer.height)
+  return viewport.pixelToComplex(
+    ((px + 0.5) * viewport.width) / buffer.width - 0.5,
+    ((py + 0.5) * viewport.height) / buffer.height - 0.5,
+  )
 }
 
 /**
@@ -123,10 +145,11 @@ export function cssToBufferPixel(
   bufferH: number,
 ): { px: number; py: number } | null {
   if (rectW <= 0 || rectH <= 0) return null
-  const px = Math.floor((cssX / rectW) * bufferW)
-  const py = Math.floor((cssY / rectH) * bufferH)
-  return {
-    px: Math.min(Math.max(px, 0), bufferW - 1),
-    py: Math.min(Math.max(py, 0), bufferH - 1),
-  }
+  return { px: containingCell(cssX, rectW, bufferW), py: containingCell(cssY, rectH, bufferH) }
+}
+
+// The index of the cell, out of `cells` across a `span`-wide CSS box, that CSS
+// coordinate `css` falls in, clamped into `[0, cells)`.
+function containingCell(css: number, span: number, cells: number): number {
+  return Math.min(Math.max(Math.floor((css / span) * cells), 0), cells - 1)
 }

@@ -8,6 +8,7 @@ import {
   PALETTES,
   type PaletteName,
 } from './settings.js'
+import { MAX_ZOOM } from './viewport.js'
 
 /**
  * The shareable view tuple (O1, #91): everything that decides *what frame the
@@ -177,11 +178,10 @@ export function formatZoom(zoom: number): string {
 }
 
 /**
- * log10(MAX_ZOOM) — the f64 zoom budget in decades. ADR-0006 pins the project
- * to a ~10¹³ ceiling (`MAX_ZOOM = 1e13` in `crates/fractal-core/src/viewport.rs`,
- * the source of truth); this mirrors it for the depth meter.
+ * log10(MAX_ZOOM) — the f64 zoom budget in decades (ADR-0006), derived from the
+ * viewport's own ceiling so the depth meter follows it if it moves.
  */
-export const ZOOM_CEILING_DECADES = 13
+export const ZOOM_CEILING_DECADES = Math.log10(MAX_ZOOM)
 
 /**
  * Fraction of the budget past which the depth meter warns that precision is

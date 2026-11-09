@@ -76,14 +76,6 @@ describe('cssToComplex', () => {
   const viewport = new Viewport(-0.5, 0.1, 1, 800, 600)
   const view: ViewGeometry = { viewport, rect: { width: 800, height: 600 } }
 
-  it('maps the centre of the box to the viewport centre', () => {
-    // CSS 400 is a cell edge, half a pixel past the sample at the grid's
-    // centre, (800 - 1) / 2 = 399.5.
-    const c = cssToComplex(400, 300, view)
-    expect(c.re).toBeCloseTo(viewport.centerRe, 12)
-    expect(c.im).toBeCloseTo(viewport.centerIm, 12)
-  })
-
   it('picks the sample drawn under the cursor, the pixel the inspector probes', () => {
     // A cursor in the middle of cell (100, 50) is over buffer pixel (100, 50),
     // rendered from the sample at grid coordinate (100, 50), not (100.5, 50.5).
@@ -91,10 +83,28 @@ describe('cssToComplex', () => {
     expect(cssToComplex(100.5, 50.5, view)).toEqual(viewport.pixelToComplex(100, 50))
   })
 
+  it('snaps anywhere in a cell to that cell’s sample, not the cursor’s exact point', () => {
+    // Off-centre in cell (10, 20): still the sample at (10, 20), the one the
+    // inspector probes, not (10.4, 20.4).
+    const sample = viewport.pixelToComplex(10, 20)
+    for (const [x, y] of [
+      [10, 20],
+      [10.9, 20.9],
+      [10.1, 20.7],
+    ] as const) {
+      expect(cssToBufferPixel(x, y, 800, 600, 800, 600)).toEqual({ px: 10, py: 20 })
+      expect(cssToComplex(x, y, view)).toEqual(sample)
+    }
+  })
+
+  it('clamps a cursor on the right or bottom edge into the last pixel', () => {
+    expect(cssToComplex(800, 600, view)).toEqual(viewport.pixelToComplex(799, 599))
+  })
+
   it('reproduces the Rust pixel_to_complex_f anchor at the top-left pixel', () => {
     // Cross-check the literal formula (not the implementation): for center
     // (0,0), zoom 1, 800×600, pixel (0,0) is (−399.5·scale, +299.5·scale),
-    // drawn under the middle of the top-left cell.
+    // drawn under the top-left cell.
     const ref: ViewGeometry = { ...view, viewport: new Viewport(0, 0, 1, 800, 600) }
     const scale = pixelScale(1)
     const c = cssToComplex(0.5, 0.5, ref)
@@ -103,12 +113,33 @@ describe('cssToComplex', () => {
   })
 
   it('honours the CSS↔logical display ratio when the canvas is stretched', () => {
-    // A 1600×1200 CSS box over the 800×600 grid: the box's centre, 2× the
-    // logical one at this ratio, still lands on the viewport centre.
+    // A 1600×1200 CSS box over the 800×600 grid: CSS (801, 601) is in logical
+    // cell (400, 300).
     const stretched: ViewGeometry = { ...view, rect: { width: 1600, height: 1200 } }
-    const c = cssToComplex(800, 600, stretched)
-    expect(c.re).toBeCloseTo(viewport.centerRe, 12)
-    expect(c.im).toBeCloseTo(viewport.centerIm, 12)
+    expect(cssToComplex(801, 601, stretched)).toEqual(viewport.pixelToComplex(400, 300))
+  })
+
+  // At render scale s the frame on screen is a buffer of s× the logical grid,
+  // rendered from a viewport at s× the zoom (`main.ts`'s `rerender`). The
+  // pick must be that buffer pixel's sample, the one the inspector probes.
+  it.each([
+    [2, 10.3, 20.8],
+    [0.5, 10.9, 21.2],
+  ])('names the probed buffer pixel’s sample at render scale %s', (scale, x, y) => {
+    const buffer = { width: 800 * scale, height: 600 * scale }
+    const rendered = new Viewport(
+      viewport.centerRe,
+      viewport.centerIm,
+      scale,
+      buffer.width,
+      buffer.height,
+    )
+    const pixel = cssToBufferPixel(x, y, 800, 600, buffer.width, buffer.height)
+    if (pixel === null) throw new Error('degenerate box')
+    const sample = rendered.pixelToComplex(pixel.px, pixel.py)
+    const picked = cssToComplex(x, y, view, buffer)
+    expect(picked.re).toBeCloseTo(sample.re, 12)
+    expect(picked.im).toBeCloseTo(sample.im, 12)
   })
 })
 

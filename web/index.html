@@ -221,6 +221,8 @@
       #controls-toggle:active { transform: scale(0.94); }
       #controls-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
       #controls-toggle svg { width: 1.25rem; height: 1.25rem; display: block; }
+      /* Inert until the render worker boots (main.ts); dimmed so it reads as waiting. */
+      #controls-toggle[inert] { opacity: 0.4; }
 
       /* ─────────────────────────── the drawer ───────────────────────────
          Slides in from the left over the canvas. Closed by default (translated

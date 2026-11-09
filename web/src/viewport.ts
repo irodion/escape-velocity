@@ -56,9 +56,11 @@ export interface BoxSize {
 
 /**
  * The grid position of the sample drawn under CSS point `(cssX, cssY)` of the
- * box the viewport is displayed in (B5, #76). Every CSS → grid mapping goes
- * through here: the zoom anchor, and the click, hover and inspector readouts.
- * TypeScript only; the compute never sees CSS pixels.
+ * box the viewport is displayed in (B5, #76): the cursor's exact, continuous
+ * position, which the zoom anchor scales about. The click, hover and inspector
+ * readouts instead snap to the rendered pixel under the cursor
+ * (`cssToComplex` in `orbit-math.ts`). TypeScript only; the compute never sees
+ * CSS pixels.
  *
  * Two steps. Scale by the viewport's logical grid over the box, not the
  * render buffer, so it holds at any render scale. Then go back half a pixel:
@@ -112,7 +114,16 @@ export class Viewport {
    * imaginary axis grows up, hence the minus.
    */
   pixelToComplex(px: number, py: number): { re: number; im: number } {
-    const scale = this.pixelScale()
+    return this.projectAt(this.zoom, px, py)
+  }
+
+  /**
+   * `pixelToComplex` as it would read at `zoom` on this centre and grid,
+   * without building that viewport: `zoomAround`'s post-zoom point. One body
+   * for both keeps them on Rust's operation order together.
+   */
+  private projectAt(zoom: number, px: number, py: number): { re: number; im: number } {
+    const scale = pixelScale(zoom)
     const midX = (this.width - 1) / 2
     const midY = (this.height - 1) / 2
     return {
@@ -153,8 +164,10 @@ export class Viewport {
     }
     const pre = this.pixelToComplex(pixelX, pixelY)
     const zoom = clampZoom(this.zoom * factor)
-    const candidate = new Viewport(this.centerRe, this.centerIm, zoom, this.width, this.height)
-    const post = candidate.pixelToComplex(pixelX, pixelY)
+    // Rust builds a candidate viewport at the new zoom to read this point;
+    // projecting at that zoom directly is the same arithmetic without the
+    // throwaway allocation and its re-validation, once per wheel notch.
+    const post = this.projectAt(zoom, pixelX, pixelY)
     return new Viewport(
       this.centerRe + (pre.re - post.re),
       this.centerIm + (pre.im - post.im),

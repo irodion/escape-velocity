@@ -57,6 +57,7 @@ interface TestRenderClient {
 // Supplying `onFatal` also arms the boot watchdog, matching production.
 function makeClient(deps?: {
   onFatal?: (message: string) => void
+  onReady?: () => void
   progress?: ProgressReporter
   onProbeResult?: (probe: PixelProbe) => void
   isGestureActive?: () => boolean
@@ -562,6 +563,20 @@ describe('render-client', () => {
 
     expect(worker.posted).toHaveLength(1)
     expect((worker.posted[0] as { kind: string }).kind).toBe('render')
+  })
+
+  it('tells onReady once the worker is ready, before the buffered render posts', () => {
+    const postedAtReady: number[] = []
+    const { client, worker } = makeClient({
+      onReady: () => postedAtReady.push(worker.posted.length),
+    })
+    doRender(client, makeCtx())
+    expect(postedAtReady).toEqual([])
+
+    deliver(worker, readyMsg())
+
+    expect(postedAtReady).toEqual([0])
+    expect(worker.posted).toHaveLength(1)
   })
 
   it('does not paint a response that arrives before `ready`', () => {
