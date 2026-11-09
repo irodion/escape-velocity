@@ -7,7 +7,7 @@
   "scripts": {
     "wasm:build": "rustup run nightly-2025-11-15 wasm-pack build ../crates/fractal-wasm --target web --out-dir ../../web/wasm --release",
     "dev": "pnpm wasm:build && vite",
-    "build": "pnpm wasm:build && vite build",
+    "build": "pnpm wasm:build && vite build && node scripts/check-dist.mjs",
     "deploy": "pnpm build && pnpm dlx wrangler@4 pages deploy dist --project-name=escape-velocity --branch=main",
     "preview": "vite preview",
     "typecheck": "pnpm wasm:build && tsc --noEmit",
