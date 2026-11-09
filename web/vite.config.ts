@@ -101,11 +101,12 @@ const securityHardeningHeaders = {
 
 // wasm-bindgen-rayon's `workerHelpers` *dynamically* imports the wasm glue
 // (each spawned thread worker re-instantiates the module against the shared
-// memory), while the main thread and the render worker import that same glue
-// *statically*. Rollup can't hoist it into its own split chunk and emits
+// memory), while the render worker imports that same glue *statically*.
+// Rollup can't hoist it into its own split chunk and emits
 // INEFFECTIVE_DYNAMIC_IMPORT. This is expected and harmless: the glue still
-// lands in a shared chunk that every importer — main thread, render worker,
-// and the rayon thread workers — resolves to. Silence only this one warning
+// lands in a shared chunk that the render worker and the rayon thread workers
+// both resolve to. (The main thread must not import the glue at all, not even
+// for its enums: see `src/wasm-enums.ts`.) Silence only this one warning
 // for the glue (matched by code *and* module) so any genuinely new warning
 // still surfaces. One `build.rollupOptions.onwarn` handler covers both the app
 // and worker bundles: under Vite 8 (Rolldown) the worker-bundle warnings
@@ -123,8 +124,8 @@ export default defineConfig({
   },
   // The render worker is the context that actually calls `startWorkers`
   // (worker.ts → initThreadPool), so the patch must apply to the worker build
-  // and to dev (where the top-level plugins transform worker modules); the
-  // main build carries a copy of the snippet too, so apply it there as well.
+  // and to dev, where the top-level plugins transform worker modules. (The
+  // main build no longer contains the snippet; see `src/wasm-enums.ts`.)
   // PWA (Slice 8A). `generateSW` (Workbox) precaches the build for offline
   // use; the manifest makes the app installable. `registerType: 'prompt'`
   // means a freshly built SW *waits* rather than auto-reloading, so a deploy
