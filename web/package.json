@@ -14,7 +14,7 @@
     "typecheck:only": "tsc --noEmit",
     "test": "pnpm wasm:build && vitest run",
     "test:only": "vitest run",
-    "lint": "biome ci",
+    "lint": "biome ci --error-on-warnings",
     "fmt": "biome check --write"
   },
   "devDependencies": {

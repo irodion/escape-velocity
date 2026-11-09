@@ -472,6 +472,14 @@
         margin: 0 0 0.15rem;
         transition: color 0.15s var(--ease);
       }
+      /* A range row's label also holds its live readout, right-aligned (see the
+         range section below). Kept above the focus rule so selectors on
+         .field__label stay in ascending specificity. */
+      .field--range .field__label {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+      }
       .field:focus-within .field__label { color: var(--accent); }
       /* A non-colour focus cue for the borderless selects (WCAG 2.4.7/1.4.1):
          a box-shadow lays a second accent line under the row's existing
@@ -628,11 +636,6 @@
          live on drag (the recompute still fires only on commit; see ADR-0012
          and controls.ts). The native control is stripped to a hairline track
          + accent thumb to match the instrument skin. */
-      .field--range .field__label {
-        display: flex;
-        align-items: baseline;
-        justify-content: space-between;
-      }
       .field__readout {
         font-family: var(--font-mono);
         font-weight: 500;
