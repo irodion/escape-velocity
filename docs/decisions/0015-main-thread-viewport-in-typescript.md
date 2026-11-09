@@ -48,9 +48,10 @@ Having both paid the costs of both:
    the grid over the box, half a pixel back (B5, #76): the cursor's exact
    position, which the zoom anchor scales about. The Alt-click picker, the
    orbit and the inspector readout instead name the sample the pixel under
-   the cursor was rendered from: `cssToComplex` snaps to the centre of the
-   containing render-buffer pixel, the one the inspector probes, at any
-   render scale. Both end in `pixelToComplex`. `orbit-math`'s own copy of the
+   the cursor was rendered from: `cssToComplex` takes the render-buffer pixel
+   the inspector probes and projects it through the rendered frame's own
+   viewport (the zoom times the effective render scale, on the floored
+   buffer), exactly as the kernel did. Both end in `pixelToComplex`. `orbit-math`'s own copy of the
    constants and the pixel scale is gone, so the main thread has one
    implementation. So is its inverse, `complexToCss`, which nothing but its
    tests called. (The click, hover and inspector mappings used to skip the

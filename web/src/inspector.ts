@@ -1,5 +1,5 @@
 import { viewGeometryFromStore } from './orbit.js'
-import { cssToBufferPixel, cssToComplex } from './orbit-math.js'
+import { cssToBufferPixel, cssToComplex, logicalBuffer, type RenderBuffer } from './orbit-math.js'
 import type { PixelProbe } from './render-client.js'
 import type { FieldName, FractalMode } from './settings.js'
 import { formatAxis } from './view-state.js'
@@ -59,6 +59,9 @@ export class PixelInspector {
     private readonly probe: (px: number, py: number) => boolean,
     // Whether a gesture owns the canvas (the InputController's phase, #159).
     private readonly isGestureActive: () => boolean,
+    // The render buffer behind a viewport, so the readout names the sample the
+    // worker computed (`cssToComplex`). Defaults to render scale 1.
+    private readonly renderBuffer: RenderBuffer = logicalBuffer,
   ) {
     this.mode = initial.mode
     this.field = initial.field
@@ -170,7 +173,10 @@ export class PixelInspector {
     // the whole HUD stays frozen on its last coherent reading instead of showing
     // a fresh coordinate paired with a stale value.
     if (!this.probe(pixel.px, pixel.py)) return
-    this.lastCoord = cssToComplex(x, y, view, this.surface)
+    // The probe indexes the cached buffer, which is the canvas's backing
+    // store; the readout projects through the frame's geometry. Probes are
+    // refused while a render rewrites the buffer, so the two agree here.
+    this.lastCoord = cssToComplex(x, y, view, this.renderBuffer(view.viewport))
     this.renderCoord()
   }
 

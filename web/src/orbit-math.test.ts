@@ -7,6 +7,7 @@ import {
   traceOrbit,
   type ViewGeometry,
 } from './orbit-math.js'
+import { computeBufferDims } from './render-buffer.js'
 import { pixelScale, Viewport } from './viewport.js'
 
 describe('traceOrbit', () => {
@@ -119,27 +120,39 @@ describe('cssToComplex', () => {
     expect(cssToComplex(801, 601, stretched)).toEqual(viewport.pixelToComplex(400, 300))
   })
 
-  // At render scale s the frame on screen is a buffer of s× the logical grid,
-  // rendered from a viewport at s× the zoom (`main.ts`'s `rerender`). The
-  // pick must be that buffer pixel's sample, the one the inspector probes.
+  // At render scale s the frame on screen is a buffer of about s× the logical
+  // grid, rendered from a viewport at s× the zoom (`main.ts`'s `rerender`).
+  // The pick must be exactly the sample the kernel computed for the buffer
+  // pixel the inspector probes, including when the buffer size was floored.
   it.each([
-    [2, 10.3, 20.8],
-    [0.5, 10.9, 21.2],
-  ])('names the probed buffer pixel’s sample at render scale %s', (scale, x, y) => {
-    const buffer = { width: 800 * scale, height: 600 * scale }
+    ['scale 2', 800, 600, 2, Number.POSITIVE_INFINITY],
+    ['scale 0.5, odd size (floored)', 1279, 719, 0.5, Number.POSITIVE_INFINITY],
+    ['scale 1.5, odd size (floored)', 1001, 677, 1.5, Number.POSITIVE_INFINITY],
+    ['pixel budget bites', 1279, 719, 2, 2_500_000],
+  ])('names the probed buffer pixel’s sample exactly: %s', (_, w, h, scale, budget) => {
+    const logical = new Viewport(-0.7435, 0.1314, 200, w, h)
+    const rect = { width: w, height: h }
+    const buffer = computeBufferDims(w, h, scale, budget)
+    // What the worker renders: the request `rerender` builds.
     const rendered = new Viewport(
-      viewport.centerRe,
-      viewport.centerIm,
-      scale,
+      logical.centerRe,
+      logical.centerIm,
+      logical.zoom * buffer.scale,
       buffer.width,
       buffer.height,
     )
-    const pixel = cssToBufferPixel(x, y, 800, 600, buffer.width, buffer.height)
-    if (pixel === null) throw new Error('degenerate box')
-    const sample = rendered.pixelToComplex(pixel.px, pixel.py)
-    const picked = cssToComplex(x, y, view, buffer)
-    expect(picked.re).toBeCloseTo(sample.re, 12)
-    expect(picked.im).toBeCloseTo(sample.im, 12)
+    for (const [x, y] of [
+      [0.2, 0.2],
+      [w / 2 + 0.3, h / 2 - 0.4],
+      [w - 0.6, h - 0.1],
+      [w * 0.731, h * 0.219],
+    ] as const) {
+      const pixel = cssToBufferPixel(x, y, w, h, buffer.width, buffer.height)
+      if (pixel === null) throw new Error('degenerate box')
+      expect(cssToComplex(x, y, { viewport: logical, rect }, buffer)).toEqual(
+        rendered.pixelToComplex(pixel.px, pixel.py),
+      )
+    }
   })
 })
 

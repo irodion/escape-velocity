@@ -1,4 +1,11 @@
-import { cssToComplex, revealedCount, traceOrbit, type ViewGeometry } from './orbit-math.js'
+import {
+  cssToComplex,
+  logicalBuffer,
+  type RenderBuffer,
+  revealedCount,
+  traceOrbit,
+  type ViewGeometry,
+} from './orbit-math.js'
 import type { FractalMode } from './settings.js'
 import type { ViewportStore } from './viewport-store.js'
 
@@ -99,6 +106,9 @@ export class OrbitOverlay {
     // drag shifts the image and a zoom Preview scales it, so the
     // cursor→complex mapping is wrong until the store settles.
     private readonly isGestureActive: () => boolean,
+    // The render buffer behind a viewport, so a pick names the sample the
+    // worker computed (`cssToComplex`). Defaults to render scale 1.
+    private readonly renderBuffer: RenderBuffer = logicalBuffer,
   ) {
     this.ctx = overlay.getContext('2d')
     this.mode = initial.mode
@@ -127,7 +137,7 @@ export class OrbitOverlay {
   pin(cssX: number, cssY: number, view: ViewGeometry | null = this.geometry()): void {
     if (!this.enabled || this.isDrawerOpen()) return
     if (view === null) return
-    this.pinned = cssToComplex(cssX, cssY, view, this.surface)
+    this.pinned = cssToComplex(cssX, cssY, view, this.renderBuffer(view.viewport))
     this.start()
   }
 
@@ -181,7 +191,7 @@ export class OrbitOverlay {
     if (view === null) return
     const x = event.clientX - rect.left
     const y = event.clientY - rect.top
-    this.hover = cssToComplex(x, y, view, this.surface)
+    this.hover = cssToComplex(x, y, view, this.renderBuffer(view.viewport))
     this.start()
   }
 
