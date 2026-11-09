@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { type CanvasContentStore, createCanvasContentStore } from './canvas-content.js'
 import { createGesturePhaseStore, type GesturePhaseStore } from './gesture-phase.js'
 import { InputController, WHEEL_SETTLE_MS } from './input.js'
-import type { Viewport } from './viewport.js'
+import { Viewport as RealViewport, type Viewport } from './viewport.js'
 import { createViewportStore, type ViewportStore } from './viewport-store.js'
 
 // A structural double for Viewport, so a test can assert which viewport a pan or
@@ -119,13 +120,14 @@ function mount(
   onChange: (viewport: Viewport) => void,
   onInvalidate?: () => void,
   onClick?: ConstructorParameters<typeof InputController>[4],
+  canvasContent?: CanvasContentStore,
 ): { controller: InputController; store: ViewportStore; phase: GesturePhaseStore } {
   const store = createViewportStore(vp as unknown as Viewport)
   store.subscribe((next, source) => {
     if (source === 'gesture') onChange(next)
   })
   const phase = createGesturePhaseStore()
-  const controller = new InputController(canvas, store, phase, onInvalidate, onClick)
+  const controller = new InputController(canvas, store, phase, onInvalidate, onClick, canvasContent)
   return { controller, store, phase }
 }
 
@@ -286,36 +288,60 @@ describe('InputController', () => {
     expect(viewport.panByPixels).toHaveBeenCalledWith(100, 60)
   })
 
-  it('reports the blit a committed pan leaves on the canvas until its frame paints', () => {
-    // After the commit the canvas keeps showing the painted frame shifted by
-    // the drag until the pan's own render paints; a pick must undo that.
-    const panned = makeViewportDouble()
-    viewport.panByPixels.mockReturnValue(panned)
-    panned.panByPixels.mockReturnValue(makeViewportDouble())
-    // An 800×600 buffer at half CSS size: CSS deltas double in buffer pixels.
-    setRect(canvas, { left: 0, top: 0, width: 400, height: 300 })
-    const { controller } = mount(canvas, viewport, onChange)
-    expect(controller.canvasShift()).toEqual({ dx: 0, dy: 0 })
-    const drag = (from: [number, number], to: [number, number]): void => {
+  describe('records what its blits put in the canvas buffer', () => {
+    // The frame the render client last recorded: 800×600, unshifted.
+    const painted = new RealViewport(-0.5, 0.1, 200, 800, 600)
+    let content: CanvasContentStore
+    beforeEach(() => {
+      content = createCanvasContentStore()
+      content.set({ rendered: painted, shift: { dx: 0, dy: 0 } })
+      // An 800×600 buffer at half CSS size: CSS deltas double in buffer pixels.
+      setRect(canvas, { left: 0, top: 0, width: 400, height: 300 })
+    })
+    const drag = (from: [number, number], to: [number, number], up = true): void => {
       canvas.dispatchEvent(pe('pointerdown', { clientX: from[0], clientY: from[1] }))
       canvas.dispatchEvent(pe('pointermove', { clientX: to[0], clientY: to[1] }))
-      canvas.dispatchEvent(pe('pointerup', { clientX: to[0], clientY: to[1] }))
+      if (up) canvas.dispatchEvent(pe('pointerup', { clientX: to[0], clientY: to[1] }))
     }
 
-    drag([100, 50], [150, 80])
-    expect(controller.canvasShift()).toEqual({ dx: 100, dy: 60 })
+    it('a pan leaves the frame shifted, and a second pan before the paint adds to it', () => {
+      const panned = makeViewportDouble()
+      viewport.panByPixels.mockReturnValue(panned)
+      panned.panByPixels.mockReturnValue(makeViewportDouble())
+      mount(canvas, viewport, onChange, undefined, undefined, content)
 
-    // A second pan before the paint blits the already-shifted canvas again.
-    drag([200, 200], [190, 195])
-    expect(controller.canvasShift()).toEqual({ dx: 80, dy: 50 })
+      drag([100, 50], [150, 80])
+      expect(content.get()).toEqual({ rendered: painted, shift: { dx: 100, dy: 60 } })
+      // The second drag's snapshot already holds the first shift.
+      drag([200, 200], [190, 195])
+      expect(content.get()).toEqual({ rendered: painted, shift: { dx: 80, dy: 50 } })
+      // A tap draws nothing.
+      canvas.dispatchEvent(pe('pointerdown', { clientX: 10, clientY: 10 }))
+      canvas.dispatchEvent(pe('pointerup', { clientX: 10, clientY: 10 }))
+      expect(content.get()).toEqual({ rendered: painted, shift: { dx: 80, dy: 50 } })
+    })
 
-    // A tap moves nothing.
-    canvas.dispatchEvent(pe('pointerdown', { clientX: 10, clientY: 10 }))
-    canvas.dispatchEvent(pe('pointerup', { clientX: 10, clientY: 10 }))
-    expect(controller.canvasShift()).toEqual({ dx: 80, dy: 50 })
+    it('a pinch taking over a pan puts the snapshot back, unshifted', () => {
+      viewport.zoomAround.mockReturnValue(makeZoomResult(2))
+      mount(canvas, viewport, onChange, undefined, undefined, content)
+      canvas.dispatchEvent(pe('pointerdown', { pointerId: 1, clientX: 100, clientY: 100 }))
+      canvas.dispatchEvent(pe('pointermove', { pointerId: 1, clientX: 140, clientY: 120 }))
+      expect(content.get()).toEqual({ rendered: painted, shift: { dx: 80, dy: 40 } })
 
-    controller.onRenderPainted()
-    expect(controller.canvasShift()).toEqual({ dx: 0, dy: 0 })
+      canvas.dispatchEvent(pe('pointerdown', { pointerId: 2, clientX: 200, clientY: 100 }))
+      expect(content.get()).toEqual({ rendered: painted, shift: { dx: 0, dy: 0 } })
+    })
+
+    it('a blit after a frame painted mid-drag records the snapshot’s frame, not the new one', () => {
+      viewport.panByPixels.mockReturnValue(makeViewportDouble())
+      mount(canvas, viewport, onChange, undefined, undefined, content)
+      drag([100, 50], [110, 50], false)
+      // A refit's frame paints mid-drag; the next move redraws the old snapshot.
+      const refit = new RealViewport(-0.5, 0.1, 200, 1000, 750)
+      content.set({ rendered: refit, shift: { dx: 0, dy: 0 } })
+      canvas.dispatchEvent(pe('pointermove', { clientX: 130, clientY: 60 }))
+      expect(content.get()).toEqual({ rendered: painted, shift: { dx: 60, dy: 20 } })
+    })
   })
 
   it('completes the drag when pointerup fires with coordinates outside the canvas', () => {

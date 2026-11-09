@@ -7,16 +7,17 @@ import '@fontsource/ibm-plex-mono/latin-400.css'
 import '@fontsource/ibm-plex-mono/latin-500.css'
 import '@fontsource-variable/martian-mono/wght.css'
 import { registerSW } from 'virtual:pwa-register'
+import { createCanvasContentStore } from './canvas-content.js'
 import { Controls, nearestMaxIterStop, pickJuliaSettings } from './controls.js'
 import { mountDrawer } from './drawer.js'
 import { buildFilename, computeExportDims, exportRenderedFrame } from './export-png.js'
 import { showFatal } from './fatal.js'
 import { defaultModeForField, isModeValidForField } from './field-modes.js'
 import { createGesturePhaseStore } from './gesture-phase.js'
-import { InputController, NO_SHIFT } from './input.js'
+import { InputController } from './input.js'
 import { PixelInspector } from './inspector.js'
 import { OrbitOverlay } from './orbit.js'
-import { type CanvasFrame, cssToComplex, type ScreenFrame } from './orbit-math.js'
+import { cssToComplex, type ScreenFrame } from './orbit-math.js'
 import { mountProgress } from './progress.js'
 import { createPwaLifecycle } from './pwa-lifecycle.js'
 import { mountPwaUi } from './pwa-ui.js'
@@ -214,17 +215,13 @@ let inspector: PixelInspector | undefined
 // The same shape for the input controller: it needs the client's
 // `discardInFlight`, and the client's paint needs its `onRenderPainted`.
 let input: InputController | undefined
-// The viewport the frame on screen was rendered from: its request's centre,
-// zoom × effective render scale, and buffer size. The hover, pin, Alt-click and
-// inspector mappings project through it, not the store: after a render-scale
-// change, a resize or a permalink jump the old frame stays up until the new one
-// paints, and the cursor is over its pixels (shifted, after a pan; see
-// `currentCanvasFrame`). Null until the first paint.
-let paintedFrame: Viewport | null = null
-// The painted frame as the canvas holds it: shifted by any pan whose own frame
-// hasn't painted yet (the drag's blit stays on screen until then).
-const currentCanvasFrame = (): CanvasFrame | null =>
-  paintedFrame === null ? null : { rendered: paintedFrame, shift: input?.canvasShift() ?? NO_SHIFT }
+// What the fractal canvas's buffer holds: the rendered frame and any pan's
+// shift of it (`canvas-content.ts`). The render client records each paint and
+// the InputController each drag blit, as they draw. The hover, pin, Alt-click
+// and inspector mappings project through it, not the store: after a pan, a
+// render-scale change, a resize or a permalink jump, the old frame stays up
+// until the new one paints, and the cursor is over its pixels.
+const canvasContent = createCanvasContentStore()
 // Which gesture owns the canvas. The InputController (built last) is its only
 // writer; the modules built before it read it through `isGestureActive`.
 const gesture = createGesturePhaseStore()
@@ -244,20 +241,11 @@ const { render, recolorize, probe, discardInFlight } = createRenderClient({
   // inspector is constructed (no probe can be issued before then anyway).
   onProbeResult: (result) => inspector?.showResult(result),
   isGestureActive,
-  // Record the frame going on screen: the cursor mappings project through it
-  // (`paintedFrame`). `input` is always set by the time this runs: everything
-  // from here to the controller's construction runs synchronously, so no
-  // response can paint in between.
-  onRenderPainted: (frame) => {
-    paintedFrame = new Viewport(
-      frame.centerRe,
-      frame.centerIm,
-      frame.zoom,
-      frame.width,
-      frame.height,
-    )
-    input?.onRenderPainted()
-  },
+  // `input` is always set by the time this runs: everything from here to the
+  // controller's construction runs synchronously, so no response can paint in
+  // between.
+  onRenderPainted: () => input?.onRenderPainted(),
+  canvasContent,
 })
 
 // Version signal (O2, #92): announce which build is running. For a
@@ -515,7 +503,7 @@ store.subscribe((_viewport, source) => {
 const orbitOverlay = new OrbitOverlay(
   orbitCanvas,
   canvas,
-  currentCanvasFrame,
+  canvasContent.get,
   {
     mode: current.mode,
     cRe: current.cRe,
@@ -535,7 +523,7 @@ const orbitOverlay = new OrbitOverlay(
 inspector = new PixelInspector(
   inspectorHud,
   canvas,
-  currentCanvasFrame,
+  canvasContent.get,
   { mode: current.mode, field: current.field, enabled: current.inspect },
   (px, py) => probe(px, py, paletteEnum(current.palette), modeEnum(current.normalisation)),
   isGestureActive,
@@ -570,15 +558,17 @@ input = new InputController(
   //  - Alt-click in Mandelbrot mode picks the Julia constant at the clicked
   //    point and switches to Julia (O2, #92).
   //  - any other click seeds/pins the orbit at that point (E1, #94).
-  // Both map the click through the painted frame under it, carried back through
-  // the zoom Preview transform when one is on screen (`clickFrame.preview`),
-  // not the store, which lags a Preview and leads a frame still rendering. The
-  // controller never reports a click on a degenerate box.
+  // Both map the click through the frame in the canvas buffer, carried back
+  // through the zoom Preview transform when one is on screen
+  // (`clickFrame.preview`), not the store, which lags a Preview and leads a
+  // frame still rendering. The controller never reports a click on a
+  // degenerate box.
   (cssX, cssY, clickFrame, modifiers) => {
-    const canvasFrame = currentCanvasFrame()
+    const canvasFrame = canvasContent.get()
     if (canvasFrame === null) return // nothing on screen to pick from yet
     const frame: ScreenFrame = {
       ...canvasFrame,
+      buffer: { width: canvas.width, height: canvas.height },
       rect: clickFrame.rect,
       preview: clickFrame.preview,
     }
@@ -605,6 +595,7 @@ input = new InputController(
     if (drawerOpenAtPress) return
     orbitOverlay.pin(cssX, cssY, frame)
   },
+  canvasContent,
 )
 
 // Fit-to-window: re-fit the viewport whenever the canvas's measured box

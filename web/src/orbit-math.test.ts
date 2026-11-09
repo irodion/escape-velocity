@@ -79,6 +79,7 @@ describe('cssToComplex', () => {
   const NO_SHIFT = { dx: 0, dy: 0 }
   const view: ScreenFrame = {
     rendered: viewport,
+    buffer: { width: 800, height: 600 },
     shift: NO_SHIFT,
     rect: { width: 800, height: 600 },
   }
@@ -157,7 +158,7 @@ describe('cssToComplex', () => {
       // The containing buffer cell, from the CSS point by hand.
       const px = Math.min(Math.floor((x / w) * buffer.width), buffer.width - 1)
       const py = Math.min(Math.floor((y / h) * buffer.height), buffer.height - 1)
-      expect(cssToComplex(x, y, { rendered, rect, shift: NO_SHIFT })).toEqual(
+      expect(cssToComplex(x, y, { rendered, buffer, rect, shift: NO_SHIFT })).toEqual(
         rendered.pixelToComplex(px, py),
       )
     }
@@ -198,6 +199,7 @@ describe('cssToComplex', () => {
 describe('cssToPaintedPixel (E2, #95)', () => {
   const frame = (bufferW: number, bufferH: number): ScreenFrame => ({
     rendered: new Viewport(0, 0, 1, bufferW, bufferH),
+    buffer: { width: bufferW, height: bufferH },
     rect: { width: 800, height: 600 },
     shift: { dx: 0, dy: 0 },
   })
@@ -232,6 +234,21 @@ describe('cssToPaintedPixel (E2, #95)', () => {
     expect(cssToPaintedPixel(100, 50, shifted)).toEqual({ px: 169, py: 88 })
     // The black strip the drag exposed at the left/top clamps to the edge.
     expect(cssToPaintedPixel(5, 2, shifted)).toEqual({ px: 0, py: 0 })
+  })
+
+  it('maps through the canvas buffer, not the frame, when a drag redraws an older, smaller snapshot', () => {
+    // A frame that painted mid-drag resized the canvas to 1000×750; the drag's
+    // next blit draws its 800×600 snapshot into it 1:1, 20 px right. CSS
+    // (400, 300) over the 800×600 box is canvas pixel (500, 375): snapshot
+    // pixel (480, 375).
+    const resized = {
+      ...frame(800, 600),
+      buffer: { width: 1000, height: 750 },
+      shift: { dx: 20, dy: 0 },
+    }
+    expect(cssToPaintedPixel(400, 300, resized)).toEqual({ px: 480, py: 375 })
+    // Beyond the snapshot's right edge: the black the blit left, clamped.
+    expect(cssToPaintedPixel(790, 300, resized)).toEqual({ px: 799, py: 375 })
   })
 
   it('composes a pan’s blit with a zoom Preview over it', () => {

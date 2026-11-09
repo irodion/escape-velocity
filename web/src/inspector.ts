@@ -1,5 +1,6 @@
+import type { CanvasFrame } from './canvas-content.js'
 import { liveScreenFrame } from './orbit.js'
-import { type CanvasFrame, cssToPaintedPixel } from './orbit-math.js'
+import { cssToPaintedPixel } from './orbit-math.js'
 import type { PixelProbe } from './render-client.js'
 import type { FieldName, FractalMode } from './settings.js'
 import { formatAxis } from './view-state.js'

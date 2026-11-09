@@ -1,5 +1,5 @@
-import type { BufferShift } from './input.js'
-import type { BoxSize, Viewport } from './viewport.js'
+import type { CanvasFrame } from './canvas-content.js'
+import type { BoxSize } from './viewport.js'
 import type { PreviewTransform } from './zoom-preview.js'
 
 /**
@@ -24,23 +24,14 @@ import type { PreviewTransform } from './zoom-preview.js'
 export const BAILOUT_SQR = 65_536
 
 /**
- * The frame in the canvas buffer. `rendered` is the viewport the worker
- * rendered the painted buffer from: the buffer's own size, at the zoom times
- * the effective render scale (the render request's fields). `shift` is how far
- * a pan has since redrawn that buffer within the canvas (the drag's blit, kept
- * until the next frame paints).
- */
-export interface CanvasFrame {
-  readonly rendered: Viewport
-  readonly shift: BufferShift
-}
-
-/**
- * The frame on screen, as the cursor sees it: the canvas frame, the
- * untransformed CSS box the canvas is stretched over (`rect`), and the zoom
- * Preview's transform on it, if one is shown.
+ * The frame on screen, as the cursor sees it: the frame in the canvas buffer,
+ * the buffer's own size (`canvas.width`/`height`), the untransformed CSS box
+ * the canvas is stretched over (`rect`), and the zoom Preview's transform on
+ * it, if one is shown. The buffer is the frame's size except while a drag
+ * redraws an older snapshot over a frame that painted mid-drag.
  */
 export interface ScreenFrame extends CanvasFrame {
+  readonly buffer: BoxSize
   readonly rect: BoxSize
   readonly preview?: PreviewTransform | null
 }
@@ -151,12 +142,12 @@ export function cssToPaintedPixel(
   y: number,
   frame: ScreenFrame,
 ): { px: number; py: number } {
-  const { rendered, rect, preview, shift } = frame
+  const { rendered, buffer, rect, preview, shift } = frame
   const fx = preview ? (x - preview.tx) / preview.scale : x
   const fy = preview ? (y - preview.ty) / preview.scale : y
   return {
-    px: clampCell(Math.floor((fx / rect.width) * rendered.width - shift.dx), rendered.width),
-    py: clampCell(Math.floor((fy / rect.height) * rendered.height - shift.dy), rendered.height),
+    px: clampCell(Math.floor((fx / rect.width) * buffer.width - shift.dx), rendered.width),
+    py: clampCell(Math.floor((fy / rect.height) * buffer.height - shift.dy), rendered.height),
   }
 }
 

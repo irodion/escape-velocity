@@ -1,10 +1,5 @@
-import {
-  type CanvasFrame,
-  cssToComplex,
-  revealedCount,
-  type ScreenFrame,
-  traceOrbit,
-} from './orbit-math.js'
+import type { CanvasFrame } from './canvas-content.js'
+import { cssToComplex, revealedCount, type ScreenFrame, traceOrbit } from './orbit-math.js'
 import type { FractalMode } from './settings.js'
 
 // Inner padding of the plot box, as a fraction of its side, so the fitted orbit
@@ -37,20 +32,23 @@ interface ProbePoint {
 
 /**
  * The frame on screen over `surface`'s live CSS box, with no Preview on it: the
- * `ScreenFrame` a hover maps the cursor through. `canvasFrame` is the painted
- * frame in the canvas buffer (null before the first paint). Returns null for
- * that, or for a degenerate box (a `display:none` or pre-layout canvas), so
- * callers bail rather than feed NaN coordinates into `cssToComplex`. The orbit
- * overlay and the pixel inspector read the cursor's point through it.
+ * `ScreenFrame` a hover maps the cursor through. `canvasFrame` is the frame in
+ * the canvas buffer (`canvas-content.ts`; null before the first paint). Returns
+ * null for that, or for a degenerate box (a `display:none` or pre-layout
+ * canvas), so callers bail rather than feed NaN coordinates into
+ * `cssToComplex`. The orbit overlay and the pixel inspector read the cursor's
+ * point through it.
  */
 export function liveScreenFrame(
   canvasFrame: () => CanvasFrame | null,
-  surface: HTMLElement,
+  surface: HTMLCanvasElement,
   rect: DOMRect = surface.getBoundingClientRect(),
 ): ScreenFrame | null {
   if (rect.width <= 0 || rect.height <= 0) return null
   const frame = canvasFrame()
-  return frame === null ? null : { ...frame, rect }
+  return frame === null
+    ? null
+    : { ...frame, buffer: { width: surface.width, height: surface.height }, rect }
 }
 
 /**
