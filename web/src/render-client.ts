@@ -171,9 +171,10 @@ export interface RenderClientDeps {
    * Where every paint records what it put in the canvas buffer: the viewport
    * the painted frame was rendered from, unshifted (`canvas-content.ts`). A
    * recolorize records too, since it repaints the cached frame where it was
-   * rendered. Omitted in tests that don't read it.
+   * rendered. Required: the cursor mappings read only this, so a client that
+   * didn't record its paints would leave every pick silently dead.
    */
-  readonly canvasContent?: CanvasContentStore
+  readonly canvasContent: CanvasContentStore
 }
 
 /** The geometry a render was computed at: its request's view fields. */
@@ -231,10 +232,11 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
   // abandoned partway, or after one that failed.
   let cachedFrameEpoch: number | null = null
   let shownFrameEpoch: number | null = null
-  // The geometry of the render on the worker, captured at dispatch, and of the
-  // frame its cache holds once that render lands: what a paint puts on screen.
+  // The geometry of the render on the worker, captured at dispatch, and the
+  // viewport the cached frame was rendered from, built once when that render
+  // lands: what every paint of it, recolorizes included, records as on screen.
   let inFlightFrame: FrameGeometry | null = null
-  let cachedFrame: FrameGeometry | null = null
+  let cachedFrame: Viewport | null = null
   let inFlight = false
   // The kind of the request currently on the worker, captured at dispatch.
   // `onmessage` reads it to tell which epoch a response must match and what
@@ -353,7 +355,15 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     // throws leaves the two apart, and a recolorize re-tints that frame.
     if (inFlightKind === 'render') {
       cachedFrameEpoch = msg.epoch
-      cachedFrame = inFlightFrame
+      cachedFrame =
+        inFlightFrame &&
+        new Viewport(
+          inFlightFrame.centerRe,
+          inFlightFrame.centerIm,
+          inFlightFrame.zoom,
+          inFlightFrame.width,
+          inFlightFrame.height,
+        )
       // A recolorize queued behind it paints this frame instead, in the new
       // colours, so it doesn't show in the old ones first.
       if (msg.epoch === latestFrameEpoch && pending?.kind !== 'recolorize' && targetCtx !== null) {
@@ -562,16 +572,7 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     // The buffer now holds the cached frame, where it was rendered: a fresh
     // render's, or the same frame re-tinted. Either way any pan blit is gone.
     if (cachedFrame !== null) {
-      deps.canvasContent?.set({
-        rendered: new Viewport(
-          cachedFrame.centerRe,
-          cachedFrame.centerIm,
-          cachedFrame.zoom,
-          cachedFrame.width,
-          cachedFrame.height,
-        ),
-        shift: NO_SHIFT,
-      })
+      deps.canvasContent.set({ rendered: cachedFrame, shift: NO_SHIFT })
     }
   }
 

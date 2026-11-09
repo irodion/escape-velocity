@@ -190,12 +190,10 @@ export class InputController {
   // frame paints continues the same matrix; it re-bases to identity once the
   // paint has cleared the canvas transform (see `handleWheel`).
   private zoomPreview: ZoomPreview | null = null
-  // Whether the Preview is currently applied as the canvas's CSS transform.
+  // The Preview currently applied as the canvas's CSS transform, or null.
   // Outlives `zoomPreview`'s gesture: a Settle keeps it until the fresh frame
-  // paints (`onRenderPainted`).
-  private previewShown = false
-  // The transform applied while `previewShown`, so a click can be carried back
-  // through it onto the painted frame (see `click`).
+  // paints (`onRenderPainted`). A click is carried back through it onto the
+  // painted frame (see `click`).
   private shownPreview: ZoomPreview | null = null
   private settleTimer: ReturnType<typeof setTimeout> | undefined
   // The canvas's *untransformed* layout box, captured at the start of a
@@ -311,23 +309,21 @@ export class InputController {
   // the wheel is ignored mid-press. A pinch counts as a Preview from its second finger,
   // before its first move scales anything.
   private publishPhase(): void {
-    const previewing = this.previewShown || this.pinch !== null
+    const previewing = this.shownPreview !== null || this.pinch !== null
     this.phase.set(this.dragState !== null ? 'dragging' : previewing ? 'preview' : 'idle')
   }
 
   // Apply `preview` as the canvas's CSS transform.
   private showPreview(preview: ZoomPreview): void {
     this.canvas.style.transform = zoomPreviewTransform(preview)
-    this.previewShown = true
     this.shownPreview = preview
     this.publishPhase()
   }
 
   // Remove the Preview transform, if one is applied.
   private hidePreview(): void {
-    if (!this.previewShown) return
+    if (this.shownPreview === null) return
     this.canvas.style.transform = ''
-    this.previewShown = false
     this.shownPreview = null
     this.publishPhase()
   }
@@ -602,7 +598,7 @@ export class InputController {
       {
         viewport: this.currentViewport,
         rect,
-        preview: preview && { scale: preview.scale, tx: preview.tx, ty: preview.ty },
+        preview,
       },
       { altKey: event.altKey },
     )
@@ -634,7 +630,7 @@ export class InputController {
     // Whether a Preview transform is already applied (a scrub is visually
     // active). This gates only whether the Preview re-bases below — it no
     // longer gates the in-flight discard.
-    const previewActive = this.previewShown
+    const previewActive = this.shownPreview !== null
     // Discard any in-flight render on *every* notch, the first included. A
     // render already in flight when the scrub begins — a pan commit, a resize
     // refit, or a slider change, all slowest exactly at deep zoom / high
