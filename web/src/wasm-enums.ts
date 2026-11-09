@@ -8,47 +8,56 @@
  * `PALETTE_ACCENT` sits beside the enum tables because it is the other
  * per-palette lookup the UI keys off; the DOM write that consumes it
  * (`applyAccent`) stays in `main.ts`.
+ *
+ * The discriminants are written as numbers, with the generated glue imported
+ * for its *types* only, so the main bundle never imports the WASM glue at
+ * runtime (ADR-0015). That is load-bearing for the build, not just tidiness:
+ * a main-bundle import of the glue, tree-shaken down to these enums, makes
+ * Vite delete the WASM thread pool's helper worker chunk from `dist/` (it sees
+ * the glue's reference to it as dead), and the built renderer then never
+ * starts. `wasm-enums.test.ts` checks every number against the real glue, so
+ * the tables can't drift from the Rust enums.
  */
-import { Field, FractalKind, NormalizationMode, Palette } from '../wasm/fractal_wasm.js'
+import type { Field, FractalKind, NormalizationMode, Palette } from '../wasm/fractal_wasm.js'
 import type { FieldName, FractalMode, NormalisationName, PaletteName } from './settings.js'
 
 const PALETTE_ENUM: Record<PaletteName, Palette> = {
-  grayscale: Palette.Grayscale,
-  viridis: Palette.Viridis,
-  magma: Palette.Magma,
-  inferno: Palette.Inferno,
-  plasma: Palette.Plasma,
-  turbo: Palette.Turbo,
-  cubehelix: Palette.Cubehelix,
-  twilight: Palette.Twilight,
-  'earth-and-sky': Palette.EarthAndSky,
-  rainbow: Palette.Rainbow,
-  'kahol-lavan': Palette.KaholLavan,
-  ocean: Palette.Ocean,
-  solar: Palette.Solar,
-  spectral: Palette.Spectral,
-  cosmic: Palette.Cosmic,
-  phosphor: Palette.Phosphor,
-  amber: Palette.Amber,
+  grayscale: 0,
+  viridis: 1,
+  magma: 2,
+  inferno: 3,
+  plasma: 5,
+  turbo: 6,
+  cubehelix: 7,
+  twilight: 4,
+  'earth-and-sky': 8,
+  rainbow: 9,
+  'kahol-lavan': 11,
+  ocean: 10,
+  solar: 12,
+  spectral: 13,
+  cosmic: 14,
+  phosphor: 15,
+  amber: 16,
 }
 
 const NORMALISATION_ENUM: Record<NormalisationName, NormalizationMode> = {
-  cycled: NormalizationMode.Cycled,
-  histogram: NormalizationMode.Histogram,
-  linear: NormalizationMode.Linear,
-  sqrt: NormalizationMode.SquareRoot,
-  logarithmic: NormalizationMode.Logarithmic,
-  clamped: NormalizationMode.Clamped,
+  cycled: 0,
+  histogram: 1,
+  linear: 2,
+  sqrt: 3,
+  logarithmic: 4,
+  clamped: 5,
 }
 
 const KIND_ENUM: Record<FractalMode, FractalKind> = {
-  mandelbrot: FractalKind.Mandelbrot,
-  julia: FractalKind.Julia,
+  mandelbrot: 0,
+  julia: 1,
 }
 
 const FIELD_ENUM: Record<FieldName, Field> = {
-  'escape-time': Field.EscapeTime,
-  'distance-estimate': Field.DistanceEstimate,
+  'escape-time': 0,
+  'distance-estimate': 1,
 }
 
 export const paletteEnum = (name: PaletteName): Palette => PALETTE_ENUM[name]
