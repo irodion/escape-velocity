@@ -161,25 +161,37 @@ export function cssToComplex(x: number, y: number, frame: ScreenFrame): { re: nu
  * fraction at >1× and clamp along the edges at <1×. A fractional coordinate
  * stays inside its current cell, so this `floor`s to the *containing* pixel
  * rather than the nearest sample centre (a cursor exactly on the right/bottom
- * edge counts as the last pixel). Returns null when the point lies beyond the
- * painted frame, where nothing was rendered.
+ * edge counts as the last pixel). Returns null when the point lies outside the
+ * part of the painted frame still in the buffer (`visible`), where nothing
+ * rendered is on screen.
  */
 export function cssToPaintedPixel(
   x: number,
   y: number,
   frame: ScreenFrame,
 ): { px: number; py: number } | null {
-  const { rendered, buffer, rect, preview, shift } = frame
+  const { rendered, buffer, rect, preview, shift, visible } = frame
   const fx = preview ? (x - preview.tx) / preview.scale : x
   const fy = preview ? (y - preview.ty) / preview.scale : y
-  const px = containingCell((fx / rect.width) * buffer.width - shift.dx, rendered.width)
-  const py = containingCell((fy / rect.height) * buffer.height - shift.dy, rendered.height)
+  const px = containingCell(
+    (fx / rect.width) * buffer.width - shift.dx,
+    visible.x0,
+    visible.x1,
+    rendered.width,
+  )
+  const py = containingCell(
+    (fy / rect.height) * buffer.height - shift.dy,
+    visible.y0,
+    visible.y1,
+    rendered.height,
+  )
   return px === null || py === null ? null : { px, py }
 }
 
-// The cell of `cells` that buffer coordinate `at` falls in, or null beyond
-// them. The far edge itself belongs to the last cell.
-function containingCell(at: number, cells: number): number | null {
-  if (!(at >= 0 && at <= cells)) return null
+// The cell of `cells` that frame coordinate `at` falls in, or null outside the
+// visible span `[lo, hi]` (the part of the frame still in the buffer). The far
+// edge itself belongs to the last cell.
+function containingCell(at: number, lo: number, hi: number, cells: number): number | null {
+  if (!(at >= lo && at <= hi)) return null
   return Math.min(Math.floor(at), cells - 1)
 }
