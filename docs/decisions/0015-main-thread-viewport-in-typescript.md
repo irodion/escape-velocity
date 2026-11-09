@@ -44,19 +44,24 @@ Having both paid the costs of both:
    validation the binding did (finite inputs, zoom and factor > 0,
    whole-pixel dimensions) moves with it, and a permalink's zoom is clamped
    to the range a gesture can reach when it is read.
-2. **One CSS → grid mapping.** `cssToGrid` scales a CSS point by the grid over
-   the box and names the sample drawn there, half a pixel back (B5, #76). The
-   zoom anchor, the Alt-click picker, the orbit and the inspector readout all
-   go through it, then through `pixelToComplex`. `orbit-math`'s own copy of
-   the constants and the pixel scale is gone, so the main thread has one
+2. **One projection, two CSS mappings.** `cssToGrid` scales a CSS point by
+   the grid over the box, half a pixel back (B5, #76): the cursor's exact
+   position, which the zoom anchor scales about. The Alt-click picker, the
+   orbit and the inspector readout instead name the sample the pixel under
+   the cursor was rendered from: `cssToComplex` snaps to the centre of the
+   containing render-buffer pixel, the one the inspector probes, at any
+   render scale. Both end in `pixelToComplex`. `orbit-math`'s own copy of the
+   constants and the pixel scale is gone, so the main thread has one
    implementation. So is its inverse, `complexToCss`, which nothing but its
    tests called. (The click, hover and inspector mappings used to skip the
-   half pixel, so they named a point half a pixel off the sample under the
-   cursor; they no longer do.)
+   half pixel and the snap, so they named a point up to a pixel off the
+   sample under the cursor; they no longer do.)
 3. **`main.ts` no longer loads WASM.** Only the render worker and the export's
    one-shot worker do. A browser that can't run the module finds out through
    the worker's boot handshake (`connectWorker`, #160), which already
-   reported it. The main thread still takes the four enum tables from the
+   reported it. Until that handshake succeeds, the drawer and the canvas are
+   `inert`: the page no longer stops before wiring them, and they would
+   otherwise be live over a renderer that may never paint. The main thread still takes the four enum tables from the
    generated glue (`wasm-enums.ts`); the build inlines just those objects, so
    neither the glue nor the rayon helper loads with the page. (The dev
    server, unbundled, still evaluates the glue module.)

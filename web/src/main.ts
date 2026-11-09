@@ -172,11 +172,24 @@ if (!(depthTrack instanceof HTMLElement) || !(depthNum instanceof HTMLElement)) 
 // fractal closes an open drawer (a pan-drag or wheel-zoom leaves it open).
 mountDrawer(controlsToggle, controlsForm, canvas)
 
+// Hold the UI inert until the worker reports `ready` (ADR-0015). WASM runs only
+// in the worker, so the page can no longer stop before wiring the UI when the
+// browser can't run it: the drawer, the canvas and its gestures would be live
+// over a renderer that may never paint, queueing renders nobody serves, until
+// the boot watchdog brings up the fatal panel. `inert` takes them out of
+// pointer, keyboard and assistive-tech interaction; on success `onReady` lifts
+// it, and on failure the fatal panel covers them anyway.
+const stage = canvas.parentElement ?? canvas
+const bootInert: readonly HTMLElement[] = [controlsToggle, controlsForm, stage]
+for (const element of bootInert) element.inert = true
+stage.setAttribute('aria-busy', 'true')
+
 // Construct the render client, injecting its collaborators at birth (A3, #86).
 // The `new Worker(new URL(...))` expression must stay syntactically intact here
 // for Vite's static worker-bundling analysis — so the *factory* is passed, not
 // a ready-made worker; Vite ships the worker and its WASM as their own chunk.
 //
+//  - `onReady` lifts the boot `inert` above.
 //  - `onFatal` routes unrecoverable renderer failures to a legible full-screen
 //    surface instead of a silent black canvas (B4 / U2). WASM runs only in the
 //    worker (ADR-0015), so this is where a browser that can't run it is told.
@@ -207,6 +220,10 @@ const { render, recolorize, probe, discardInFlight } = createRenderClient({
     new Worker(new URL('./worker/worker.ts', import.meta.url), { type: 'module' }),
   onFatal: (message) => {
     showFatal('Renderer unavailable', message)
+  },
+  onReady: () => {
+    for (const element of bootInert) element.inert = false
+    stage.removeAttribute('aria-busy')
   },
   progress: mountProgress(document.body),
   // Deliver each traced pixel (E2, #95) to the inspector HUD. Dropped before the
@@ -281,10 +298,12 @@ const DEFAULT_VIEW: ViewState = {
   cIm: INITIAL_C_IM,
   orbit: INITIAL_ORBIT,
 }
+// `repaired` reports whether any of those repairs changed a value the hash
+// carried, so boot can write the repaired view back over the bad hash.
 const resolveView = (
   hash: string,
   renderScale: number,
-): { view: ViewState; settings: Settings } => {
+): { view: ViewState; settings: Settings; repaired: boolean } => {
   const parsed: ViewState = { ...DEFAULT_VIEW, ...(parse(hash) ?? {}) }
   const view: ViewState = { ...parsed, zoom: clampZoom(parsed.zoom) }
   const settings: Settings = {
@@ -303,7 +322,11 @@ const resolveView = (
     // recipient into inspect mode.
     inspect: INITIAL_INSPECT,
   }
-  return { view, settings }
+  const repaired =
+    view.zoom !== parsed.zoom ||
+    settings.maxIter !== parsed.maxIter ||
+    settings.normalisation !== parsed.normalisation
+  return { view, settings, repaired }
 }
 
 const booted = resolveView(window.location.hash, INITIAL_RENDER_SCALE)
@@ -436,8 +459,15 @@ const syncView = (persist = true): void => {
 
 // Show the boot coordinates immediately, but do NOT write the URL yet: a
 // first-time visitor's clean URL stays clean until they move the view, and a
-// visitor who arrived via a shared hash keeps that exact hash untouched.
-renderCoords(currentViewState())
+// visitor who arrived via a shared hash keeps that exact hash untouched. The
+// exception is a hash boot had to repair (a zoom out of range, say `z=1e-310`
+// shown as 0.25): left alone, the address bar would share a view other than
+// the one on screen, so it is rewritten to the repaired one.
+if (booted.repaired) {
+  syncView()
+} else {
+  renderCoords(currentViewState())
+}
 
 // Every viewport write — a committed pan/zoom, a refit, a mode-reset — paints
 // the new frame and re-syncs the readout + URL. A pan/zoom invalidates the
@@ -524,7 +554,7 @@ input = new InputController(
     // c-pick (the live `.open` class can't be used — the dismiss already
     // cleared it on the canvas `pointerup`; see `drawerOpenAtPress`).
     if (modifiers.altKey && current.mode === 'mandelbrot' && !drawerOpenAtPress) {
-      const { re, im } = cssToComplex(cssX, cssY, frame)
+      const { re, im } = cssToComplex(cssX, cssY, frame, canvas)
       const next = pickJuliaSettings(current, re, im)
       // Mirror the picked settings into the form (no emit), then run the
       // dispatcher exactly as the hashchange handler does: branch 1 (mode

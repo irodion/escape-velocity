@@ -1,6 +1,5 @@
 import { cssToComplex, revealedCount, traceOrbit, type ViewGeometry } from './orbit-math.js'
 import type { FractalMode } from './settings.js'
-import type { Viewport } from './viewport.js'
 import type { ViewportStore } from './viewport-store.js'
 
 // Inner padding of the plot box, as a fraction of its side, so the fitted orbit
@@ -32,24 +31,19 @@ interface ProbePoint {
 }
 
 /**
- * Pair a viewport with the CSS box it is drawn over: the `ViewGeometry` the
- * projection helpers need. Returns null for a degenerate box (a
- * `display:none` or pre-layout canvas), so callers can bail rather than feed
- * NaN coordinates into `cssToComplex`. Shared by the orbit overlay and the Julia
- * c-picker (O2, #92) so the two derive the cursor→complex mapping identically.
+ * The authoritative viewport paired with the CSS box `surface` is drawn in: the
+ * `ViewGeometry` the projection helpers need. Returns null for a degenerate box
+ * (a `display:none` or pre-layout canvas), so callers bail rather than feed NaN
+ * coordinates into `cssToComplex`. The orbit overlay and the pixel inspector
+ * read the cursor's point through it.
  */
-export function viewGeometry(vp: Viewport, rect: DOMRect): ViewGeometry | null {
-  if (rect.width <= 0 || rect.height <= 0) return null
-  return { viewport: vp, rect }
-}
-
-/** {@link viewGeometry} for the authoritative viewport over `surface`'s live box. */
 export function viewGeometryFromStore(
   store: ViewportStore,
   surface: HTMLElement,
   rect: DOMRect = surface.getBoundingClientRect(),
 ): ViewGeometry | null {
-  return viewGeometry(store.get(), rect)
+  if (rect.width <= 0 || rect.height <= 0) return null
+  return { viewport: store.get(), rect }
 }
 
 /**
@@ -133,7 +127,7 @@ export class OrbitOverlay {
   pin(cssX: number, cssY: number, view: ViewGeometry | null = this.geometry()): void {
     if (!this.enabled || this.isDrawerOpen()) return
     if (view === null) return
-    this.pinned = cssToComplex(cssX, cssY, view)
+    this.pinned = cssToComplex(cssX, cssY, view, this.surface)
     this.start()
   }
 
@@ -187,7 +181,7 @@ export class OrbitOverlay {
     if (view === null) return
     const x = event.clientX - rect.left
     const y = event.clientY - rect.top
-    this.hover = cssToComplex(x, y, view)
+    this.hover = cssToComplex(x, y, view, this.surface)
     this.start()
   }
 

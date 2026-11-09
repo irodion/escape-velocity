@@ -1,9 +1,11 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
 // The real generated glue and module, not a double: this suite exists to pin
-// the TypeScript port to the Rust it mirrors (#169, ADR-0015).
-import init, { Viewport as WasmViewport } from '../wasm/fractal_wasm.js'
+// the TypeScript port to the Rust it mirrors (#169, ADR-0015). Type-only here;
+// the glue itself is imported in `beforeAll`, after the build check below.
+import type { Viewport as RustViewport } from '../wasm/fractal_wasm.js'
 import { Viewport } from './viewport.js'
 
 // The worker builds a WASM `Viewport` from the main thread's fields for every
@@ -20,7 +22,7 @@ type Fields = [number, number, number, number, number]
 
 const ts = (v: Viewport): Fields => [v.centerRe, v.centerIm, v.zoom, v.width, v.height]
 
-function rs(v: WasmViewport): Fields {
+function rs(v: RustViewport): Fields {
   const fields: Fields = [v.center_re(), v.center_im(), v.zoom(), v.width(), v.height()]
   v.free()
   return fields
@@ -38,10 +40,27 @@ function generator(seed: number): (lo: number, hi: number) => number {
   }
 }
 
+// The generated `Viewport` class, bound once the module is instantiated.
+let WasmViewport: typeof RustViewport
+
 beforeAll(async () => {
-  // Vitest runs from `web/`, as `pwa-config.test.ts` relies on too.
-  const bytes = readFileSync(resolve(process.cwd(), 'wasm/fractal_wasm_bg.wasm'))
-  await init({ module_or_path: bytes })
+  // Resolved against this file, not the working directory, so the suite runs
+  // the same from `web/`, the repo root or an editor's runner.
+  // (Not `new URL(…, import.meta.url)`: Vite rewrites that into an asset URL.)
+  const wasmDir = resolve(import.meta.dirname, '../wasm')
+  const modulePath = resolve(wasmDir, 'fractal_wasm_bg.wasm')
+  if (!existsSync(modulePath)) {
+    throw new Error(
+      `the WASM module is not built (${modulePath}): run \`pnpm wasm:build\` in web/, ` +
+        'or `pnpm test`, which builds it first',
+    )
+  }
+  // A computed specifier, so Vite doesn't resolve it while transforming this
+  // file and fail it before the check above can explain what is missing.
+  const gluePath = pathToFileURL(resolve(wasmDir, 'fractal_wasm.js')).href
+  const glue: typeof import('../wasm/fractal_wasm.js') = await import(/* @vite-ignore */ gluePath)
+  await glue.default({ module_or_path: readFileSync(modulePath) })
+  WasmViewport = glue.Viewport
 })
 
 describe('the TypeScript Viewport against the Rust one', () => {

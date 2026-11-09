@@ -135,6 +135,12 @@ export interface RenderClientDeps {
    */
   readonly onFatal?: (message: string) => void
   /**
+   * Called once, when the worker has booted (its WASM instantiated and its
+   * thread pool up) and is about to serve the first request. `main.ts` keeps
+   * the UI inert until then (ADR-0015). Defaults to a no-op.
+   */
+  readonly onReady?: () => void
+  /**
    * Determinate-progress sink for the in-flight render (P2). Defaults to a
    * no-op; recolorizes never drive it. See `ProgressReporter`.
    */
@@ -370,6 +376,7 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     {
       onReady: () => {
         ready = true
+        deps.onReady?.()
         flush()
       },
       onMessage: handleReply,

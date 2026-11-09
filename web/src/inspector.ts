@@ -170,7 +170,7 @@ export class PixelInspector {
     // the whole HUD stays frozen on its last coherent reading instead of showing
     // a fresh coordinate paired with a stale value.
     if (!this.probe(pixel.px, pixel.py)) return
-    this.lastCoord = cssToComplex(x, y, view)
+    this.lastCoord = cssToComplex(x, y, view, this.surface)
     this.renderCoord()
   }
 
