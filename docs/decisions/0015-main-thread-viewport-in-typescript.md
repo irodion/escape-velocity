@@ -74,10 +74,14 @@ Having both paid the costs of both:
    reported it. Until that handshake succeeds, the drawer's toggle and the
    canvas are `inert`: the page no longer stops before wiring them, and they
    would otherwise be live over a renderer that may never paint. The main
-   thread still takes the four enum tables from the generated glue
-   (`wasm-enums.ts`); the build inlines just those objects, so neither the
-   glue nor the rayon helper loads with the page. (The dev server,
-   unbundled, still evaluates the glue module.)
+   thread doesn't import the generated glue at all: `wasm-enums.ts` writes
+   its four enum tables as numbers, takes only the glue's *types*, and a
+   unit test checks every number against the real glue. That is required,
+   not just tidy. While the main bundle imported the glue for those enums
+   and tree-shook the rest, Vite (8.3) treated the glue's reference to the
+   rayon pool's helper worker as dead and deleted that chunk from `dist/`,
+   though the render worker needs it, so the built renderer never started.
+   The dev server, which doesn't bundle, never showed it.
 4. **Rust stays the source of truth for the compute.** The worker builds a
    WASM `Viewport` from the request's five fields for every render; the
    per-pixel mapping and the kernel run in Rust.
