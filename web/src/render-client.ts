@@ -1,3 +1,5 @@
+import { type CanvasContentStore, NO_SHIFT } from './canvas-content.js'
+import { Viewport } from './viewport.js'
 import { connectWorker, type WorkerReply } from './worker/connection.js'
 import type {
   CancelRequest,
@@ -160,20 +162,22 @@ export interface RenderClientDeps {
   readonly isGestureActive?: () => boolean
   /**
    * Called synchronously right before a *render* response is painted — not a
-   * recolorize — with the geometry that frame was rendered at (its request's
-   * centre, zoom and buffer size). `main.ts` records it as the frame on screen,
-   * which the cursor mappings project through, and calls the InputController's
-   * `onRenderPainted`, which ends a live zoom Preview, so the Preview→true-frame
-   * swap is atomic (ADR-0012). Defaults to a no-op.
+   * recolorize. `main.ts` wires the InputController's `onRenderPainted`, which
+   * ends a live zoom Preview, so the Preview→true-frame swap is atomic
+   * (ADR-0012). Defaults to a no-op.
    */
-  readonly onRenderPainted?: (frame: FrameGeometry) => void
+  readonly onRenderPainted?: () => void
+  /**
+   * Where every paint records what it put in the canvas buffer: the viewport
+   * the painted frame was rendered from, unshifted (`canvas-content.ts`). A
+   * recolorize records too, since it repaints the cached frame where it was
+   * rendered. Omitted in tests that don't read it.
+   */
+  readonly canvasContent?: CanvasContentStore
 }
 
 /** The geometry a render was computed at: its request's view fields. */
-export type FrameGeometry = Pick<
-  RenderRequest,
-  'centerRe' | 'centerIm' | 'zoom' | 'width' | 'height'
->
+type FrameGeometry = Pick<RenderRequest, 'centerRe' | 'centerIm' | 'zoom' | 'width' | 'height'>
 
 /**
  * The fire-and-forget surface `main.ts` dispatches against. All pipeline state
@@ -550,11 +554,25 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     // at the wrong scale until the Settle render lands. So it leaves the
     // Preview for the frame that ends the scrub. Outside a scrub there is no
     // Preview and the input layer ignores the call.
-    if (newFrame && cachedFrame !== null) {
-      onRenderPainted(cachedFrame)
+    if (newFrame) {
+      onRenderPainted()
     }
     const image = new ImageData(response.rgba, response.width, response.height)
     ctx.putImageData(image, 0, 0)
+    // The buffer now holds the cached frame, where it was rendered: a fresh
+    // render's, or the same frame re-tinted. Either way any pan blit is gone.
+    if (cachedFrame !== null) {
+      deps.canvasContent?.set({
+        rendered: new Viewport(
+          cachedFrame.centerRe,
+          cachedFrame.centerIm,
+          cachedFrame.zoom,
+          cachedFrame.width,
+          cachedFrame.height,
+        ),
+        shift: NO_SHIFT,
+      })
+    }
   }
 
   /**

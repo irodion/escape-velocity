@@ -1,3 +1,8 @@
+import {
+  type CanvasContentStore,
+  type CanvasFrame,
+  createCanvasContentStore,
+} from './canvas-content.js'
 import type { GesturePhaseStore } from './gesture-phase.js'
 import { cssToGrid, type Viewport } from './viewport.js'
 import type { ViewportStore } from './viewport-store.js'
@@ -192,11 +197,6 @@ export class InputController {
   // The transform applied while `previewShown`, so a click can be carried back
   // through it onto the painted frame (see `click`).
   private shownPreview: ZoomPreview | null = null
-  // How far pans have redrawn the painted frame within the canvas buffer, in
-  // buffer pixels, since it painted: each drag blits its snapshot (which holds
-  // any earlier shift) at its offset, and the commit leaves it there until the
-  // fresh frame paints (`onRenderPainted`). Read through `canvasShift`.
-  private shift: BufferShift = NO_SHIFT
   private settleTimer: ReturnType<typeof setTimeout> | undefined
   // The canvas's *untransformed* layout box, captured at the start of a
   // scrub/pinch. `getBoundingClientRect` reflects the live CSS transform, so
@@ -262,7 +262,7 @@ export class InputController {
       startClientX: event.clientX,
       startClientY: event.clientY,
       snapshot: null,
-      baseShift: NO_SHIFT,
+      snapshotContent: null,
     }
     this.canvas.classList.add('dragging')
     this.publishPhase()
@@ -280,7 +280,9 @@ export class InputController {
       return null
     }
     drag.snapshot = snapshot
-    drag.baseShift = this.shift
+    // What the snapshot holds: the canvas's frame as it stood, already
+    // shifted by any earlier pan whose frame hasn't painted.
+    drag.snapshotContent = this.canvasContent.get()
     // A pan starting mid-zoom tears the Preview down *without* rendering: the
     // accumulated zoom already rides in `currentViewport`, which the pan starts
     // from, so firing the zoom's Settle here would only dispatch an
@@ -336,13 +338,14 @@ export class InputController {
     // `currentViewport` still depicts the un-panned frame — restore the canvas
     // buffer to match by re-blitting the snapshot at the origin, then drop the
     // drag. (A press that hasn't left the click slop drew nothing to undo.)
-    const snapshot = this.dragState?.snapshot
-    if (snapshot) {
+    const drag = this.dragState
+    if (drag?.snapshot) {
       const ctx = this.canvas.getContext('2d')
       if (ctx !== null) {
         ctx.fillStyle = 'black'
         ctx.fillRect(0, 0, this.canvas.width, this.canvas.height)
-        ctx.drawImage(snapshot, 0, 0)
+        ctx.drawImage(drag.snapshot, 0, 0)
+        this.canvasContent.set(drag.snapshotContent)
       }
     }
     if (this.dragState !== null) this.dropDrag()
@@ -415,7 +418,16 @@ export class InputController {
     ctx.fillStyle = 'black'
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height)
     ctx.drawImage(snapshot, dxInternal, dyInternal)
-    this.shift = { dx: drag.baseShift.dx + dxInternal, dy: drag.baseShift.dy + dyInternal }
+    // The canvas now holds the snapshot's frame, moved by this offset on top of
+    // whatever shift the snapshot already had. It stays there after the commit
+    // until the pan's own frame paints over it.
+    const base = drag.snapshotContent
+    this.canvasContent.set(
+      base && {
+        rendered: base.rendered,
+        shift: { dx: base.shift.dx + dxInternal, dy: base.shift.dy + dyInternal },
+      },
+    )
   }
 
   // Fold one pinch move into the zoom Preview: the change in inter-pointer
@@ -742,17 +754,6 @@ export class InputController {
    */
   onRenderPainted(): void {
     this.hidePreview()
-    this.shift = NO_SHIFT
-  }
-
-  /**
-   * How far pans have shifted the painted frame within the canvas buffer since
-   * it painted, in buffer pixels: the drag's blit, which stays on screen until
-   * the pan's own frame paints. A pick undoes it to find the painted pixel
-   * under the cursor (`cssToComplex`).
-   */
-  canvasShift(): BufferShift {
-    return this.shift
   }
 
   constructor(
@@ -779,6 +780,11 @@ export class InputController {
       frame: ClickFrame,
       modifiers: { altKey: boolean },
     ) => void = () => {},
+    // Where a drag records what its blits put in the canvas buffer (the
+    // snapshot's frame, shifted), as the render client records its paints
+    // (`canvas-content.ts`). main.ts shares one with the cursor mappings; a
+    // private one by default, for tests that don't read it.
+    private readonly canvasContent: CanvasContentStore = createCanvasContentStore(),
   ) {
     this.currentViewport = store.get()
     // Any viewport write the controller did *not* author (a refit, a
@@ -816,19 +822,10 @@ interface DragState {
   // re-blit it with `drawImage` (GPU path) rather than `putImageData` (#82).
   // Null until a move leaves the click slop and the pan starts (`startDrag`).
   snapshot: HTMLCanvasElement | null
-  // The canvas shift the snapshot was taken at (`startDrag`): the drag's blit
-  // adds to it.
-  baseShift: BufferShift
+  // What the canvas held when the snapshot was taken (`startDrag`): the frame
+  // each blit of it, or putting it back, records (`canvas-content.ts`).
+  snapshotContent: CanvasFrame | null
 }
-
-/** A shift of the canvas buffer's contents, in buffer pixels. */
-export interface BufferShift {
-  readonly dx: number
-  readonly dy: number
-}
-
-/** No shift: the painted buffer where it was painted. */
-export const NO_SHIFT: BufferShift = { dx: 0, dy: 0 }
 
 /**
  * The frame a click landed on: `viewport` as drawn over `rect`, the CSS box

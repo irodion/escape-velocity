@@ -52,16 +52,19 @@ Having both paid the costs of both:
    the inspector probes and projects it through the viewport of the frame
    actually painted (its request's zoom, the logical zoom times the
    effective render scale, on the floored buffer), exactly as the kernel did.
-   The render client reports that geometry when it paints, so a frame still
-   rendering doesn't move picks off the pixels on screen. A click on a zoom
-   Preview is carried back through its transform first, and a pan's blit,
-   which stays on the canvas until the pan's own frame paints, is undone too. Both end in
-   `pixelToComplex`. `orbit-math`'s own copy of the
-   constants and the pixel scale is gone, so the main thread has one
-   implementation. So is its inverse, `complexToCss`, which nothing but its
-   tests called. (The click, hover and inspector mappings used to skip the
-   half pixel and the snap, so they named a point up to a pixel off the
-   sample under the cursor; they no longer do.)
+   What the canvas buffer holds is one record (`canvas-content.ts`), written
+   by whichever module draws the pixels, as it draws them: the render client
+   on every paint (the frame, unshifted), the InputController on every drag
+   blit (the snapshot's frame, shifted) or when a pinch puts the snapshot
+   back. So a frame still rendering, a pan whose frame hasn't painted, or a
+   recolor of the cached frame can't move picks off the pixels on screen. A
+   click on a zoom Preview is carried back through its transform first. Both
+   end in `pixelToComplex`. `orbit-math`'s own copy of the constants and the
+   pixel scale is gone, so the main thread has one implementation. So is its
+   inverse, `complexToCss`, which nothing but its tests called. (The click,
+   hover and inspector mappings used to skip the half pixel and the snap, so
+   they named a point up to a pixel off the sample under the cursor; they no
+   longer do.)
 3. **`main.ts` no longer loads WASM.** Only the render worker and the export's
    one-shot worker do. A browser that can't run the module finds out through
    the worker's boot handshake (`connectWorker`, #160), which already

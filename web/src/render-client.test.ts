@@ -1,11 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import {
-  createRenderClient,
-  type FrameGeometry,
-  type PixelProbe,
-  type ProgressReporter,
-} from './render-client.js'
+import { type CanvasContentStore, createCanvasContentStore } from './canvas-content.js'
+import { createRenderClient, type PixelProbe, type ProgressReporter } from './render-client.js'
 import { FakeWorker } from './testing/fake-worker.js'
 import type {
   Aborted,
@@ -66,7 +62,8 @@ function makeClient(deps?: {
   progress?: ProgressReporter
   onProbeResult?: (probe: PixelProbe) => void
   isGestureActive?: () => boolean
-  onRenderPainted?: (frame: FrameGeometry) => void
+  onRenderPainted?: () => void
+  canvasContent?: CanvasContentStore
 }): {
   client: TestRenderClient
   worker: FakeWorker
@@ -231,9 +228,9 @@ describe('render-client', () => {
     expect(onRenderPainted.mock.invocationCallOrder[0]).toBeLessThan(paintOrder)
   })
 
-  it('hands onRenderPainted the geometry of the frame it paints, not a superseded one', () => {
-    const onRenderPainted = vi.fn()
-    const { client, worker } = makeClient({ onRenderPainted })
+  it('records the frame it paints in the canvas content, not a superseded one', () => {
+    const canvasContent = createCanvasContentStore()
+    const { client, worker } = makeClient({ canvasContent })
     const ctx = makeCtx()
     deliver(worker, readyMsg())
     doRender(client, ctx) // epoch 1, dispatched
@@ -249,10 +246,32 @@ describe('render-client', () => {
       FIELD_ESCAPE_TIME,
     ) // epoch 2, queued behind it
     deliver(worker, response(1)) // superseded: not painted
-    expect(onRenderPainted).not.toHaveBeenCalled()
+    expect(canvasContent.get()).toBeNull()
     deliver(worker, response(2))
-    expect(onRenderPainted).toHaveBeenCalledTimes(1)
-    expect(onRenderPainted).toHaveBeenCalledWith(expect.objectContaining(VIEWPORT_B))
+    // The viewport the painted frame was rendered from, where it was painted.
+    expect(canvasContent.get()).toEqual({
+      rendered: expect.objectContaining(VIEWPORT_B),
+      shift: { dx: 0, dy: 0 },
+    })
+  })
+
+  it('a recolorize repaint records the frame unshifted, clearing a pan’s blit', () => {
+    // A pan's blit leaves the frame shifted in the buffer; a recolorize of the
+    // cached frame repaints it where it was rendered.
+    const canvasContent = createCanvasContentStore()
+    const { client, worker } = makeClient({ canvasContent })
+    const ctx = makeCtx()
+    deliver(worker, readyMsg())
+    doRender(client, ctx)
+    deliver(worker, response(1))
+    const painted = canvasContent.get()
+    if (painted === null) throw new Error('nothing recorded')
+    canvasContent.set({ ...painted, shift: { dx: 40, dy: -12 } }) // the drag's blit
+
+    client.recolorize(ctx, PALETTE_MAGMA, MODE_HISTOGRAM)
+    deliver(worker, response(2))
+    expect(ctx.putImageData).toHaveBeenCalledTimes(2)
+    expect(canvasContent.get()).toEqual({ rendered: painted.rendered, shift: { dx: 0, dy: 0 } })
   })
 
   it('does not end the Preview on a recolorize paint (B2: palette change mid-scrub)', () => {
