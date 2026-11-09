@@ -171,6 +171,7 @@ pnpm install
 pnpm lint          # biome ci
 pnpm typecheck     # tsc --noEmit
 pnpm build         # vite build
+pnpm e2e           # build, then Playwright in Chromium (once: pnpm exec playwright install chromium)
 pnpm fmt           # biome auto-fix (local convenience, not in CI)
 ```
 

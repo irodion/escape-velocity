@@ -12,6 +12,10 @@ node_modules/
 dist/
 .vite/
 
+# Playwright (web/e2e) output
+test-results/
+playwright-report/
+
 # Environment
 .env
 .env.local
