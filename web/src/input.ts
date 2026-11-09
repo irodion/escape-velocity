@@ -31,6 +31,20 @@ export const WHEEL_SETTLE_MS = 150
 // the drawer and pans.
 export const CLICK_SLOP_PX = 4
 
+// How long a touch or pen press must stay inside the click slop to count as a
+// long-press: the touch equivalent of Alt-click, which picks the Julia
+// constant (#132). Long enough to be deliberate, short enough not to feel
+// stuck; around the platforms' own long-press delays.
+export const LONG_PRESS_MS = 500
+
+/** The modifiers a click arrives with (see `InputController`'s `onClick`). */
+export interface ClickModifiers {
+  // Alt held on release: the desktop c-pick.
+  readonly altKey: boolean
+  // A touch or pen press held still for `LONG_PRESS_MS`: the touch c-pick.
+  readonly longPress: boolean
+}
+
 /**
  * Wires pointer events on a canvas into pan/zoom calls on a viewport.
  *
@@ -197,6 +211,12 @@ export class InputController {
   // painted frame (see `click`).
   private shownPreview: ZoomPreview | null = null
   private settleTimer: ReturnType<typeof setTimeout> | undefined
+  // The pending long-press for the current press, armed at a touch or pen
+  // pointerdown and cleared by anything that makes the press something else.
+  private longPressTimer: ReturnType<typeof setTimeout> | undefined
+  // Whether the press now down began with a touch or pen pointer: while it is,
+  // the browser's own long-press context menu is suppressed (`handleContextMenu`).
+  private touchPress = false
   // The canvas's *untransformed* layout box, captured at the start of a
   // scrub/pinch. `getBoundingClientRect` reflects the live CSS transform, so
   // once the Preview has scaled the canvas, re-reading it would feed
@@ -236,6 +256,7 @@ export class InputController {
     const ctx = this.canvas.getContext('2d')
     if (ctx === null) return
 
+    if (this.activePointers.size === 0) this.touchPress = isTouchOrPen(event)
     this.activePointers.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY })
     // Route the rest of this pointer's events to the canvas even if it leaves
     // the box. Optional-chained: jsdom has no pointer capture (see class doc).
@@ -258,6 +279,7 @@ export class InputController {
     // render and a live zoom Preview untouched (B3, #74). The pan starts when a
     // move leaves `CLICK_SLOP_PX` (see `startDrag`).
     this.dragState = {
+      pointerId: event.pointerId,
       startClientX: event.clientX,
       startClientY: event.clientY,
       snapshot: null,
@@ -265,6 +287,38 @@ export class InputController {
     }
     this.canvas.classList.add('dragging')
     this.publishPhase()
+    // Touch and pen get a long-press (#132): a mouse has Alt-click, and a mouse
+    // user may well hold still before dragging.
+    if (this.touchPress) {
+      this.longPressTimer = setTimeout(this.fireLongPress, LONG_PRESS_MS)
+    }
+  }
+
+  // A touch or pen press held inside the click slop for `LONG_PRESS_MS`: deliver
+  // it as a click at the press's current position with `longPress` set, then end
+  // the press, so the lift that follows is not a second click and a later move
+  // doesn't start a pan.
+  private readonly fireLongPress = (): void => {
+    this.longPressTimer = undefined
+    const drag = this.dragState
+    if (drag === null || drag.snapshot !== null) return
+    const at = this.activePointers.get(drag.pointerId)
+    if (at === undefined) return
+    this.dropDrag()
+    this.click(at.clientX, at.clientY, { altKey: false, longPress: true })
+  }
+
+  // Android Chrome opens a context menu on a held finger, at about the moment
+  // the long-press fires. Cancel it while a touch or pen press is down; a mouse
+  // right-click (which never starts a press) keeps its menu.
+  private readonly handleContextMenu = (event: Event): void => {
+    if (this.touchPress && this.activePointers.size > 0) event.preventDefault()
+  }
+
+  private cancelLongPress(): void {
+    if (this.longPressTimer === undefined) return
+    clearTimeout(this.longPressTimer)
+    this.longPressTimer = undefined
   }
 
   // The press has left the click slop: start the pan. Returns the drag
@@ -279,6 +333,8 @@ export class InputController {
       return null
     }
     drag.snapshot = snapshot
+    // A press that moved out of the slop is a pan, not a long-press.
+    this.cancelLongPress()
     // What the snapshot holds: the canvas's frame as it stood, already
     // shifted by any earlier pan whose frame hasn't painted.
     drag.snapshotContent = this.canvasContent.get()
@@ -298,6 +354,7 @@ export class InputController {
 
   // End the one-pointer drag's bookkeeping (not its commit; see `endDrag`).
   private dropDrag(): void {
+    this.cancelLongPress()
     this.dragState = null
     this.canvas.classList.remove('dragging')
     this.publishPhase()
@@ -512,7 +569,7 @@ export class InputController {
       // didn't click (the drawer's light-dismiss agrees).
       if (event.type === 'pointercancel') return
       if (withinClickSlop(dxCss, dyCss)) {
-        this.click(event)
+        this.click(event.clientX, event.clientY, { altKey: event.altKey, longPress: false })
         return
       }
       // Released far from the press with no move in between (a fast flick):
@@ -557,12 +614,12 @@ export class InputController {
     this.store.set(next, 'gesture')
   }
 
-  // A press released inside the click slop: hand its CSS-pixel position to the
-  // click consumer (the orbit visualizer, E1 #94; the Julia c-picker, O2 #92).
-  // Reuses this canonical click-vs-pan classification rather than a separate
-  // `click` listener re-deriving its own threshold. The modifier flags ride
-  // along so the consumer can route a plain click vs. a modifier-click
-  // (Alt-click picks the Julia constant) without this layer knowing either
+  // A press released inside the click slop, or a long-press: hand its CSS-pixel
+  // position to the click consumer (the orbit visualizer, E1 #94; the Julia
+  // c-picker, O2 #92). Reuses this canonical click-vs-pan classification rather
+  // than a separate `click` listener re-deriving its own threshold. The
+  // modifiers ride along so the consumer can route a plain click vs. a c-pick
+  // (Alt-click, or a touch long-press, #132) without this layer knowing either
   // intent — it stays presentation-free.
   //
   // The click commits nothing and leaves a live zoom Preview alone, so it maps
@@ -571,7 +628,7 @@ export class InputController {
   // transform alongside. Neither the store nor the live box will do as they
   // are. The store lags a scrub until the Settle, and again if a notch lands
   // before the Settle's frame paints. The live box is scaled by the transform.
-  private click(event: PointerEvent): void {
+  private click(clientX: number, clientY: number, modifiers: ClickModifiers): void {
     const live = this.canvas.getBoundingClientRect()
     const preview = this.shownPreview
     // Under a Preview, the untransformed box is the live one with the
@@ -590,14 +647,14 @@ export class InputController {
           )
     if (rect.width <= 0 || rect.height <= 0) return
     this.onClick(
-      event.clientX - rect.left,
-      event.clientY - rect.top,
+      clientX - rect.left,
+      clientY - rect.top,
       {
         viewport: this.currentViewport,
         rect,
         preview,
       },
-      { altKey: event.altKey },
+      modifiers,
     )
   }
 
@@ -761,17 +818,18 @@ export class InputController {
     // (rather than importing the render client) to keep this controller
     // presentation-free. Defaults to a no-op for tests that don't wire it.
     private readonly onInvalidate: () => void = () => {},
-    // Called on a click/tap (a press released within `CLICK_SLOP_PX`)
-    // with the click's CSS-pixel position relative to `frame.rect`, the frame
-    // that position lands on (see `click`), and the modifier-key state. Drives
-    // the orbit visualizer's pin (E1, #94) on a plain click and the Julia
-    // c-picker (O2, #92) on an Alt-click; a no-op by default, so the controller
-    // stays presentation-free and existing tests need no wiring.
+    // Called on a click/tap (a press released within `CLICK_SLOP_PX`, or a touch
+    // or pen press held there for `LONG_PRESS_MS`) with the click's CSS-pixel
+    // position relative to `frame.rect`, the frame that position lands on (see
+    // `click`), and its modifiers. Drives the orbit visualizer's pin (E1, #94)
+    // on a plain click and the Julia c-picker (O2, #92) on an Alt-click or a
+    // long-press (#132); a no-op by default, so the controller stays
+    // presentation-free and existing tests need no wiring.
     private readonly onClick: (
       cssX: number,
       cssY: number,
       frame: ClickFrame,
-      modifiers: { altKey: boolean },
+      modifiers: ClickModifiers,
     ) => void = () => {},
     // Where a drag records what its blits put in the canvas buffer (the
     // snapshot's frame, shifted), as the render client records its paints
@@ -801,6 +859,7 @@ export class InputController {
     canvas.addEventListener('pointermove', this.handlePointerMove)
     canvas.addEventListener('pointerup', this.handlePointerUp)
     canvas.addEventListener('pointercancel', this.handlePointerUp)
+    canvas.addEventListener('contextmenu', this.handleContextMenu)
     // `passive: false` is required for `preventDefault()` to take
     // effect on wheel — modern browsers default wheel listeners to
     // passive, which silently no-ops `preventDefault`.
@@ -809,6 +868,8 @@ export class InputController {
 }
 
 interface DragState {
+  // The pointer the press began with (a long-press fires at its position).
+  readonly pointerId: number
   readonly startClientX: number
   readonly startClientY: number
   // The drag snapshot, held as an offscreen canvas so each move can
@@ -831,6 +892,11 @@ export interface ClickFrame {
   readonly viewport: Viewport
   readonly rect: DOMRect
   readonly preview: PreviewTransform | null
+}
+
+// Whether a pointer is a finger or a stylus: the pointers a long-press is for.
+function isTouchOrPen(event: PointerEvent): boolean {
+  return event.pointerType === 'touch' || event.pointerType === 'pen'
 }
 
 // Whether a press displaced by (dxCss, dyCss) is still a click (see

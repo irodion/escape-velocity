@@ -573,8 +573,8 @@ input = new InputController(
   discardInFlight,
   // A click (no drag) routes by modifier, reusing the controller's canonical
   // click-vs-pan classification (`CLICK_SLOP_PX`):
-  //  - Alt-click in Mandelbrot mode picks the Julia constant at the clicked
-  //    point and switches to Julia (O2, #92).
+  //  - Alt-click, or a touch long-press (#132), in Mandelbrot mode picks the
+  //    Julia constant at the clicked point and switches to Julia (O2, #92).
   //  - any other click seeds/pins the orbit at that point (E1, #94).
   // Both map the click through the frame in the canvas buffer, carried back
   // through the zoom Preview transform when one is on screen
@@ -587,7 +587,11 @@ input = new InputController(
     // A click that *began* while the drawer was open is a light-dismiss, not a
     // c-pick (the live `.open` class can't be used — the dismiss already
     // cleared it on the canvas `pointerup`; see `drawerOpenAtPress`).
-    if (modifiers.altKey && current.mode === 'mandelbrot' && !drawerOpenAtPress) {
+    const pickC = modifiers.altKey || modifiers.longPress
+    if (pickC && current.mode === 'mandelbrot' && !drawerOpenAtPress) {
+      // The long-press fires while the finger is still down, so a short buzz
+      // says it took (where the device supports it; iOS Safari doesn't).
+      if (modifiers.longPress) navigator.vibrate?.(15)
       const { re, im } = cssToComplex(cssX, cssY, frame)
       const next = pickJuliaSettings(current, re, im)
       // Mirror the picked settings into the form (no emit), then run the
