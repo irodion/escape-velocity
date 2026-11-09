@@ -292,6 +292,16 @@ describe('cssToPaintedPixel (E2, #95)', () => {
     expect(cssToPaintedPixel(750.5, 300, panAndBack)).toBeNull()
   })
 
+  it('excludes the strip’s first coordinate, but keeps the frame’s own far edge', () => {
+    // The visible region is half-open: x 700 is the strip's first column.
+    const panAndBack = { ...frame(800, 600), visible: { x0: 0, y0: 0, x1: 700, y1: 600 } }
+    expect(cssToPaintedPixel(699.9, 300, panAndBack)).toEqual({ px: 699, py: 300 })
+    expect(cssToPaintedPixel(700, 300, panAndBack)).toBeNull()
+    // The bottom bound is the frame's edge (600): a cursor exactly on it is
+    // the last row, not outside.
+    expect(cssToPaintedPixel(100, 600, panAndBack)).toEqual({ px: 100, py: 599 })
+  })
+
   it('composes a pan’s blit with a zoom Preview over it', () => {
     // Preview 2× about the origin over a canvas shifted 10 buffer pixels right:
     // CSS (100, 100) is untransformed (50, 50), canvas pixel (50, 50), painted
