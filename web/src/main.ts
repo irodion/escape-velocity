@@ -178,9 +178,12 @@ mountDrawer(controlsToggle, controlsForm, canvas)
 // over a renderer that may never paint, queueing renders nobody serves, until
 // the boot watchdog brings up the fatal panel. `inert` takes them out of
 // pointer, keyboard and assistive-tech interaction; on success `onReady` lifts
-// it, and on failure the fatal panel covers them anyway.
+// it, and on failure the fatal panel covers them anyway. The drawer form is
+// not in the list: it starts closed, and a closed drawer is already inert,
+// which the drawer owns (drawer.ts). With the toggle inert it can't be opened,
+// and lifting the form's flag here would expose the closed drawer's controls.
 const stage = canvas.parentElement ?? canvas
-const bootInert: readonly HTMLElement[] = [controlsToggle, controlsForm, stage]
+const bootInert: readonly HTMLElement[] = [controlsToggle, stage]
 for (const element of bootInert) element.inert = true
 stage.setAttribute('aria-busy', 'true')
 
