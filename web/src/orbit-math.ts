@@ -1,4 +1,5 @@
-import type { BoxSize, Viewport } from './viewport.js'
+import type { BufferDims } from './render-buffer.js'
+import { type BoxSize, Viewport } from './viewport.js'
 
 /**
  * Pure maths for the orbit visualizer (E1, #94): iterate a single point's
@@ -89,18 +90,31 @@ export function revealedCount(
 }
 
 /**
+ * The render buffer a viewport is drawn into: its size and the effective
+ * render scale (`computeBufferDims`). `main.ts` derives it the way `rerender`
+ * does, so a pick sees the buffer the worker computed.
+ */
+export type RenderBuffer = (viewport: Viewport) => BufferDims
+
+/** The buffer at render scale 1: the viewport's own logical grid. */
+export const logicalBuffer: RenderBuffer = (viewport) => ({
+  width: viewport.width,
+  height: viewport.height,
+  scale: 1,
+})
+
+/**
  * Map a CSS pixel on the surface back to the complex point the pixel beneath
- * the cursor was rendered from: the centre of the containing **buffer** cell
+ * the cursor was rendered from: the sample of the containing **buffer** pixel
  * (`cssToBufferPixel`'s pixel), not the cursor's exact sub-pixel point. A pick,
  * a traced orbit and the inspector's readout therefore name the same sample the
- * inspector probes, wherever in the cell the cursor sits.
+ * inspector probes, wherever in the pixel the cursor sits.
  *
- * `buffer` is the canvas backing store the frame was rendered into
- * (`canvas.width`/`canvas.height`). It defaults to the viewport's logical grid,
- * which is the buffer at render scale 1. At other scales a buffer cell is not a
- * logical one, so its centre, `px + ½` buffer pixels from the edge, is carried
- * onto the logical grid (minus the grid's own half pixel, as `cssToGrid` does)
- * before it is projected.
+ * `buffer` is the frame the worker rendered: its size, and the effective scale
+ * its zoom was multiplied by (`main.ts`'s `rerender`). The sample is projected
+ * through that frame's own viewport, as the kernel projects it
+ * (`pixel_to_complex` on the request's viewport), so it is exact even when the
+ * buffer size was floored, at a fractional scale or under the pixel budget.
  *
  * The zoom anchor deliberately does not snap: it keeps the continuous
  * `cssToGrid` point so a wheel notch scales about the cursor itself.
@@ -109,14 +123,19 @@ export function cssToComplex(
   x: number,
   y: number,
   view: ViewGeometry,
-  buffer: BoxSize = view.viewport,
+  buffer: BufferDims = logicalBuffer(view.viewport),
 ): { re: number; im: number } {
   const { viewport, rect } = view
-  const px = containingCell(x, rect.width, buffer.width)
-  const py = containingCell(y, rect.height, buffer.height)
-  return viewport.pixelToComplex(
-    ((px + 0.5) * viewport.width) / buffer.width - 0.5,
-    ((py + 0.5) * viewport.height) / buffer.height - 0.5,
+  const rendered = new Viewport(
+    viewport.centerRe,
+    viewport.centerIm,
+    viewport.zoom * buffer.scale,
+    buffer.width,
+    buffer.height,
+  )
+  return rendered.pixelToComplex(
+    containingCell(x, rect.width, buffer.width),
+    containingCell(y, rect.height, buffer.height),
   )
 }
 

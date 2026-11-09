@@ -20,7 +20,7 @@ import { cssToComplex } from './orbit-math.js'
 import { mountProgress } from './progress.js'
 import { createPwaLifecycle } from './pwa-lifecycle.js'
 import { mountPwaUi } from './pwa-ui.js'
-import { computeBufferDims } from './render-buffer.js'
+import { type BufferDims, computeBufferDims } from './render-buffer.js'
 import { createRenderClient } from './render-client.js'
 import type {
   FieldName,
@@ -347,6 +347,13 @@ const applyAccent = (palette: PaletteName): void => {
   document.documentElement.style.setProperty('--accent', PALETTE_ACCENT[palette])
 }
 
+// The buffer a viewport renders into at the live render scale and pixel
+// budget: its size and the effective scale its zoom is multiplied by. The one
+// derivation `rerender` and the cursor mappings share, so a pick, an orbit or
+// an inspector readout names exactly the sample the worker computed.
+const renderBuffer = (viewport: Viewport): BufferDims =>
+  computeBufferDims(viewport.width, viewport.height, current.renderScale, MAX_RENDER_PIXELS)
+
 const rerender = (): void => {
   // Render scale + the pixel budget are applied here, at the render
   // seam. `computeBufferDims` turns the logical (display) size into the
@@ -360,12 +367,7 @@ const rerender = (): void => {
   // and the canvas backing store is sized to match when the frame paints
   // (see `paint` in render-client).
   const viewport = store.get()
-  const { width, height, scale } = computeBufferDims(
-    viewport.width,
-    viewport.height,
-    current.renderScale,
-    MAX_RENDER_PIXELS,
-  )
+  const { width, height, scale } = renderBuffer(viewport)
   render(
     {
       centerRe: viewport.centerRe,
@@ -504,6 +506,7 @@ const orbitOverlay = new OrbitOverlay(
   },
   () => controlsForm.classList.contains('open'),
   isGestureActive,
+  renderBuffer,
 )
 
 // Pixel inspector (E2, #95). Presentation-only like the orbit overlay: it maps
@@ -518,6 +521,7 @@ inspector = new PixelInspector(
   { mode: current.mode, field: current.field, enabled: current.inspect },
   (px, py) => probe(px, py, paletteEnum(current.palette), modeEnum(current.normalisation)),
   isGestureActive,
+  renderBuffer,
 )
 
 // Whether the controls drawer was open at the *start* of the current press.
@@ -557,7 +561,7 @@ input = new InputController(
     // c-pick (the live `.open` class can't be used — the dismiss already
     // cleared it on the canvas `pointerup`; see `drawerOpenAtPress`).
     if (modifiers.altKey && current.mode === 'mandelbrot' && !drawerOpenAtPress) {
-      const { re, im } = cssToComplex(cssX, cssY, frame, canvas)
+      const { re, im } = cssToComplex(cssX, cssY, frame, renderBuffer(frame.viewport))
       const next = pickJuliaSettings(current, re, im)
       // Mirror the picked settings into the form (no emit), then run the
       // dispatcher exactly as the hashchange handler does: branch 1 (mode
