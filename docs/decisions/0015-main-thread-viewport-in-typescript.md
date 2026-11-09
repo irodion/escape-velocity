@@ -59,12 +59,13 @@ Having both paid the costs of both:
 3. **`main.ts` no longer loads WASM.** Only the render worker and the export's
    one-shot worker do. A browser that can't run the module finds out through
    the worker's boot handshake (`connectWorker`, #160), which already
-   reported it. Until that handshake succeeds, the drawer and the canvas are
-   `inert`: the page no longer stops before wiring them, and they would
-   otherwise be live over a renderer that may never paint. The main thread still takes the four enum tables from the
-   generated glue (`wasm-enums.ts`); the build inlines just those objects, so
-   neither the glue nor the rayon helper loads with the page. (The dev
-   server, unbundled, still evaluates the glue module.)
+   reported it. Until that handshake succeeds, the drawer's toggle and the
+   canvas are `inert`: the page no longer stops before wiring them, and they
+   would otherwise be live over a renderer that may never paint. The main
+   thread still takes the four enum tables from the generated glue
+   (`wasm-enums.ts`); the build inlines just those objects, so neither the
+   glue nor the rayon helper loads with the page. (The dev server,
+   unbundled, still evaluates the glue module.)
 4. **Rust stays the source of truth for the compute.** The worker builds a
    WASM `Viewport` from the request's five fields for every render; the
    per-pixel mapping and the kernel run in Rust.
