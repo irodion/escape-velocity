@@ -1,4 +1,4 @@
-import { type CanvasContentStore, NO_SHIFT } from './canvas-content.js'
+import { type CanvasContentStore, paintedFrame } from './canvas-content.js'
 import { Viewport } from './viewport.js'
 import { connectWorker, type WorkerReply } from './worker/connection.js'
 import type {
@@ -572,7 +572,7 @@ export function createRenderClient(deps: RenderClientDeps): RenderClient {
     // The buffer now holds the cached frame, where it was rendered: a fresh
     // render's, or the same frame re-tinted. Either way any pan blit is gone.
     if (cachedFrame !== null) {
-      deps.canvasContent.set({ rendered: cachedFrame, shift: NO_SHIFT })
+      deps.canvasContent.set(paintedFrame(cachedFrame))
     }
   }
 

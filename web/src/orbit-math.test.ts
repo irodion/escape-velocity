@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { paintedFrame } from './canvas-content.js'
 import {
   BAILOUT_SQR,
   cssToComplex,
@@ -81,6 +82,7 @@ describe('cssToComplex', () => {
     rendered: viewport,
     buffer: { width: 800, height: 600 },
     shift: NO_SHIFT,
+    visible: { x0: 0, y0: 0, x1: 800, y1: 600 },
     rect: { width: 800, height: 600 },
     view: viewport,
     preview: null,
@@ -162,10 +164,9 @@ describe('cssToComplex', () => {
       const py = Math.min(Math.floor((y / h) * buffer.height), buffer.height - 1)
       expect(
         cssToComplex(x, y, {
-          rendered,
+          ...paintedFrame(rendered),
           buffer,
           rect,
-          shift: NO_SHIFT,
           view: logical,
           preview: null,
         }),
@@ -230,6 +231,7 @@ describe('cssToPaintedPixel (E2, #95)', () => {
     buffer: { width: bufferW, height: bufferH },
     rect: { width: 800, height: 600 },
     shift: { dx: 0, dy: 0 },
+    visible: { x0: 0, y0: 0, x1: bufferW, y1: bufferH },
     view: new Viewport(0, 0, 1, bufferW, bufferH),
     preview: null,
   })
@@ -280,6 +282,14 @@ describe('cssToPaintedPixel (E2, #95)', () => {
     expect(cssToPaintedPixel(400, 300, resized)).toEqual({ px: 480, py: 375 })
     // Beyond the snapshot's right edge: the black the blit left, no pixel.
     expect(cssToPaintedPixel(790, 300, resized)).toBeNull()
+  })
+
+  it('treats the strip an earlier pan lost as outside, even with no net shift', () => {
+    // Panned 100 px right and back before a paint: unshifted, but the frame's
+    // last 100 columns are the first pan's black, not its pixels.
+    const panAndBack = { ...frame(800, 600), visible: { x0: 0, y0: 0, x1: 700, y1: 600 } }
+    expect(cssToPaintedPixel(650.5, 300, panAndBack)).toEqual({ px: 650, py: 300 })
+    expect(cssToPaintedPixel(750.5, 300, panAndBack)).toBeNull()
   })
 
   it('composes a pan’s blit with a zoom Preview over it', () => {

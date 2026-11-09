@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { paintedFrame } from './canvas-content.js'
 import { OrbitOverlay } from './orbit.js'
 import { screenFrame } from './orbit-math.js'
 import { Viewport } from './viewport.js'
@@ -65,13 +66,7 @@ function setup(initialEnabled = true) {
   const gesture = { active: false }
   // The frame on screen: an 800×600 buffer painted from `viewport()`, unshifted.
   const frameAt = (box: DOMRect) =>
-    screenFrame(
-      { rendered: viewport(), shift: { dx: 0, dy: 0 } },
-      { width: 800, height: 600 },
-      box,
-      viewport(),
-      null,
-    )
+    screenFrame(paintedFrame(viewport()), { width: 800, height: 600 }, box, viewport(), null)
   const frame = frameAt(rect(800, 600))
   if (frame === null) throw new Error('no frame')
   const overlayInstance = new OrbitOverlay(

@@ -27,14 +27,65 @@ export interface BufferShift {
 export const NO_SHIFT: BufferShift = { dx: 0, dy: 0 }
 
 /**
+ * A rectangle of the rendered frame's own pixels, `[x0, x1) × [y0, y1)` in
+ * its buffer coordinates.
+ */
+export interface FrameRegion {
+  readonly x0: number
+  readonly y0: number
+  readonly x1: number
+  readonly y1: number
+}
+
+/**
  * A rendered frame as the canvas buffer holds it. `rendered` is the viewport
  * the worker rendered it from: the buffer's own size, at the zoom times the
  * effective render scale (the render request's fields). `shift` is how far a
- * pan's blit has moved it within the buffer.
+ * pan's blit has moved it within the buffer. `visible` is the part of it still
+ * in the buffer: all of it once painted, then whatever survives each blit
+ * (a pan clips one edge and fills the other with black, and a second pan
+ * before a paint carries that black strip along, so the shift alone can't
+ * say what's left).
  */
 export interface CanvasFrame {
   readonly rendered: Viewport
   readonly shift: BufferShift
+  readonly visible: FrameRegion
+}
+
+/** A frame just painted: all of it, where it was rendered. */
+export function paintedFrame(rendered: Viewport): CanvasFrame {
+  return {
+    rendered,
+    shift: NO_SHIFT,
+    visible: { x0: 0, y0: 0, x1: rendered.width, y1: rendered.height },
+  }
+}
+
+/**
+ * `frame` blitted at a further `(dx, dy)` into a `canvas`-sized buffer: the
+ * shifts add up, and only the part of its visible region that lands inside
+ * the buffer survives. Rectangles intersect to a rectangle, so this composes
+ * over any number of pans.
+ */
+export function blitFrame(
+  frame: CanvasFrame,
+  dx: number,
+  dy: number,
+  canvas: { readonly width: number; readonly height: number },
+): CanvasFrame {
+  const shift = { dx: frame.shift.dx + dx, dy: frame.shift.dy + dy }
+  const { visible } = frame
+  return {
+    rendered: frame.rendered,
+    shift,
+    visible: {
+      x0: Math.max(visible.x0, -shift.dx),
+      y0: Math.max(visible.y0, -shift.dy),
+      x1: Math.min(visible.x1, canvas.width - shift.dx),
+      y1: Math.min(visible.y1, canvas.height - shift.dy),
+    },
+  }
 }
 
 export interface CanvasContentStore {

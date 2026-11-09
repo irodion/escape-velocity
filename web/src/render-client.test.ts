@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { type CanvasContentStore, createCanvasContentStore } from './canvas-content.js'
+import {
+  blitFrame,
+  type CanvasContentStore,
+  createCanvasContentStore,
+  paintedFrame,
+} from './canvas-content.js'
 import { createRenderClient, type PixelProbe, type ProgressReporter } from './render-client.js'
 import { FakeWorker } from './testing/fake-worker.js'
 import type {
@@ -250,14 +255,16 @@ describe('render-client', () => {
     deliver(worker, response(1)) // superseded: not painted
     expect(canvasContent.get()).toBeNull()
     deliver(worker, response(2))
-    // The viewport the painted frame was rendered from, where it was painted.
+    // The viewport the painted frame was rendered from, all of it, where it
+    // was painted.
     expect(canvasContent.get()).toEqual({
       rendered: expect.objectContaining(VIEWPORT_B),
       shift: { dx: 0, dy: 0 },
+      visible: { x0: 0, y0: 0, x1: VIEWPORT_B.width, y1: VIEWPORT_B.height },
     })
   })
 
-  it('a recolorize repaint records the frame unshifted, clearing a pan’s blit', () => {
+  it('a recolorize repaint records the whole frame unshifted, clearing a pan’s blit', () => {
     // A pan's blit leaves the frame shifted in the buffer; a recolorize of the
     // cached frame repaints it where it was rendered.
     const canvasContent = createCanvasContentStore()
@@ -268,12 +275,12 @@ describe('render-client', () => {
     deliver(worker, response(1))
     const painted = canvasContent.get()
     if (painted === null) throw new Error('nothing recorded')
-    canvasContent.set({ ...painted, shift: { dx: 40, dy: -12 } }) // the drag's blit
+    canvasContent.set(blitFrame(painted, 1, 0, { width: 2, height: 2 })) // the drag's blit
 
     client.recolorize(ctx, PALETTE_MAGMA, MODE_HISTOGRAM)
     deliver(worker, response(2))
     expect(ctx.putImageData).toHaveBeenCalledTimes(2)
-    expect(canvasContent.get()).toEqual({ rendered: painted.rendered, shift: { dx: 0, dy: 0 } })
+    expect(canvasContent.get()).toEqual(paintedFrame(painted.rendered))
   })
 
   it('does not end the Preview on a recolorize paint (B2: palette change mid-scrub)', () => {

@@ -1,4 +1,5 @@
 import {
+  blitFrame,
   type CanvasContentStore,
   type CanvasFrame,
   createCanvasContentStore,
@@ -415,15 +416,11 @@ export class InputController {
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height)
     ctx.drawImage(snapshot, dxInternal, dyInternal)
     // The canvas now holds the snapshot's frame, moved by this offset on top of
-    // whatever shift the snapshot already had. It stays there after the commit
-    // until the pan's own frame paints over it.
+    // whatever shift the snapshot already had, and clipped to what still fits
+    // (with any black strip the snapshot carried). It stays there after the
+    // commit until the pan's own frame paints over it.
     const base = drag.snapshotContent
-    this.canvasContent.set(
-      base && {
-        rendered: base.rendered,
-        shift: { dx: base.shift.dx + dxInternal, dy: base.shift.dy + dyInternal },
-      },
-    )
+    this.canvasContent.set(base && blitFrame(base, dxInternal, dyInternal, this.canvas))
   }
 
   // Fold one pinch move into the zoom Preview: the change in inter-pointer

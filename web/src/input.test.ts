@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { type CanvasContentStore, createCanvasContentStore } from './canvas-content.js'
+import {
+  type CanvasContentStore,
+  createCanvasContentStore,
+  paintedFrame,
+} from './canvas-content.js'
 import { createGesturePhaseStore, type GesturePhaseStore } from './gesture-phase.js'
 import { InputController, WHEEL_SETTLE_MS } from './input.js'
 import { Viewport as RealViewport, type Viewport } from './viewport.js'
@@ -294,7 +298,7 @@ describe('InputController', () => {
     let content: CanvasContentStore
     beforeEach(() => {
       content = createCanvasContentStore()
-      content.set({ rendered: painted, shift: { dx: 0, dy: 0 } })
+      content.set(paintedFrame(painted))
       // An 800×600 buffer at half CSS size: CSS deltas double in buffer pixels.
       setRect(canvas, { left: 0, top: 0, width: 400, height: 300 })
     })
@@ -311,14 +315,41 @@ describe('InputController', () => {
       mount(canvas, viewport, onChange, undefined, undefined, content)
 
       drag([100, 50], [150, 80])
-      expect(content.get()).toEqual({ rendered: painted, shift: { dx: 100, dy: 60 } })
-      // The second drag's snapshot already holds the first shift.
+      // Shifted (100, 60): the frame's right 100 and bottom 60 pixels fell off.
+      const first = {
+        rendered: painted,
+        shift: { dx: 100, dy: 60 },
+        visible: { x0: 0, y0: 0, x1: 700, y1: 540 },
+      }
+      expect(content.get()).toEqual(first)
+      // The second drag's snapshot already holds the first shift, and its
+      // clipping: pulling back 20 px doesn't bring the lost pixels back.
       drag([200, 200], [190, 195])
-      expect(content.get()).toEqual({ rendered: painted, shift: { dx: 80, dy: 50 } })
+      const second = {
+        rendered: painted,
+        shift: { dx: 80, dy: 50 },
+        visible: { x0: 0, y0: 0, x1: 700, y1: 540 },
+      }
+      expect(content.get()).toEqual(second)
       // A tap draws nothing.
       canvas.dispatchEvent(pe('pointerdown', { clientX: 10, clientY: 10 }))
       canvas.dispatchEvent(pe('pointerup', { clientX: 10, clientY: 10 }))
-      expect(content.get()).toEqual({ rendered: painted, shift: { dx: 80, dy: 50 } })
+      expect(content.get()).toEqual(second)
+    })
+
+    it('a pan and back before the paint has no shift but keeps the strip the first one lost', () => {
+      const panned = makeViewportDouble()
+      viewport.panByPixels.mockReturnValue(panned)
+      panned.panByPixels.mockReturnValue(makeViewportDouble())
+      mount(canvas, viewport, onChange, undefined, undefined, content)
+      drag([100, 50], [150, 50]) // 100 buffer px right
+      drag([300, 50], [250, 50]) // and 100 back
+      // Unshifted, yet the frame's last 100 columns are the first pan's black.
+      expect(content.get()).toEqual({
+        rendered: painted,
+        shift: { dx: 0, dy: 0 },
+        visible: { x0: 0, y0: 0, x1: 700, y1: 600 },
+      })
     })
 
     it('a pinch taking over a pan puts the snapshot back, unshifted', () => {
@@ -326,10 +357,14 @@ describe('InputController', () => {
       mount(canvas, viewport, onChange, undefined, undefined, content)
       canvas.dispatchEvent(pe('pointerdown', { pointerId: 1, clientX: 100, clientY: 100 }))
       canvas.dispatchEvent(pe('pointermove', { pointerId: 1, clientX: 140, clientY: 120 }))
-      expect(content.get()).toEqual({ rendered: painted, shift: { dx: 80, dy: 40 } })
+      expect(content.get()).toEqual({
+        rendered: painted,
+        shift: { dx: 80, dy: 40 },
+        visible: { x0: 0, y0: 0, x1: 720, y1: 560 },
+      })
 
       canvas.dispatchEvent(pe('pointerdown', { pointerId: 2, clientX: 200, clientY: 100 }))
-      expect(content.get()).toEqual({ rendered: painted, shift: { dx: 0, dy: 0 } })
+      expect(content.get()).toEqual(paintedFrame(painted))
     })
 
     it('a blit after a frame painted mid-drag records the snapshot’s frame, not the new one', () => {
@@ -338,9 +373,13 @@ describe('InputController', () => {
       drag([100, 50], [110, 50], false)
       // A refit's frame paints mid-drag; the next move redraws the old snapshot.
       const refit = new RealViewport(-0.5, 0.1, 200, 1000, 750)
-      content.set({ rendered: refit, shift: { dx: 0, dy: 0 } })
+      content.set(paintedFrame(refit))
       canvas.dispatchEvent(pe('pointermove', { clientX: 130, clientY: 60 }))
-      expect(content.get()).toEqual({ rendered: painted, shift: { dx: 60, dy: 20 } })
+      expect(content.get()).toEqual({
+        rendered: painted,
+        shift: { dx: 60, dy: 20 },
+        visible: { x0: 0, y0: 0, x1: 740, y1: 580 },
+      })
     })
   })
 
