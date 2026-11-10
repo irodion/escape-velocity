@@ -13,6 +13,8 @@
 //! explicitly (NaN compares unequal to itself, so `==` would silently
 //! treat every NaN as an escape).
 
+use std::ops::Range;
+
 use rayon::prelude::*;
 
 use crate::complex::Complex64;
@@ -169,9 +171,63 @@ pub fn compute_rows_into(
         ((y1 - y0) as usize) * (viewport.width as usize),
         "compute_rows_into: out length must equal (y1 - y0) * width",
     );
+    compute_region_into(
+        viewport,
+        max_iter,
+        kind,
+        field,
+        y0,
+        y1,
+        0,
+        viewport.width,
+        out,
+    );
+}
+
+/// Fill the chosen Field for columns `[x0, x1)` of rows `[y0, y1)` **into
+/// `out`**, a full-width band laid out as in [`compute_rows_into`] (`(y1 - y0)
+/// * width` elements). Pixels outside the column range are left untouched.
+///
+/// The panned-frame path (#170) uses it: after a pan, most of the frame is the
+/// previous frame shifted, and only the newly exposed strips are computed. Each
+/// pixel is keyed to its absolute `(px, py)`, so a region's values are
+/// bit-identical to the same pixels of a full compute.
+///
+/// `x0 <= x1 <= viewport.width` and `y0 <= y1 <= viewport.height` are the
+/// caller's contract.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the frame's compute parameters (viewport, max_iter, kind, field) plus the region's two ranges and its output; grouping them would only move the same eight values into a struct built at one call site."
+)]
+pub fn compute_region_into(
+    viewport: &Viewport,
+    max_iter: u32,
+    kind: FractalKind,
+    field: Field,
+    y0: u32,
+    y1: u32,
+    x0: u32,
+    x1: u32,
+    out: &mut [f32],
+) {
+    debug_assert_eq!(
+        out.len(),
+        ((y1 - y0) as usize) * (viewport.width as usize),
+        "compute_region_into: out length must equal (y1 - y0) * width",
+    );
+    debug_assert!(
+        x0 <= x1 && x1 <= viewport.width,
+        "compute_region_into: require x0 <= x1 <= width",
+    );
+    if x0 == x1 {
+        return;
+    }
+    let columns = x0 as usize..x1 as usize;
     match field {
-        Field::EscapeTime => fill_escape_time(viewport, max_iter, kind, y0, out),
-        Field::DistanceEstimate => fill_distance_estimate(viewport, max_iter, kind, y0, out),
+        Field::EscapeTime => fill_escape_time(viewport, max_iter, kind, y0, columns, out),
+        Field::DistanceEstimate => {
+            fill_distance_estimate(viewport, max_iter, kind, y0, columns, out);
+        }
     }
 }
 
@@ -205,6 +261,7 @@ fn fill_escape_time(
     max_iter: u32,
     kind: FractalKind,
     y0: u32,
+    columns: Range<usize>,
     out: &mut [f32],
 ) {
     let width = viewport.width as usize;
@@ -214,7 +271,8 @@ fn fill_escape_time(
     match kind {
         FractalKind::Mandelbrot => out.par_chunks_mut(width).enumerate().for_each(|(i, row)| {
             let py = y0 + i as u32;
-            for (px, slot) in row.iter_mut().enumerate() {
+            for (px, slot) in row[columns.clone()].iter_mut().enumerate() {
+                let px = columns.start + px;
                 let c = viewport.pixel_to_complex(px as u32, py);
                 // O(1) interior cull: the cardioid/bulb pixels are the bulk of
                 // the set's area and resolve to the same NaN sentinel the full
@@ -228,7 +286,8 @@ fn fill_escape_time(
         }),
         FractalKind::Julia { c } => out.par_chunks_mut(width).enumerate().for_each(|(i, row)| {
             let py = y0 + i as u32;
-            for (px, slot) in row.iter_mut().enumerate() {
+            for (px, slot) in row[columns.clone()].iter_mut().enumerate() {
+                let px = columns.start + px;
                 *slot = escape_time(viewport.pixel_to_complex(px as u32, py), c, max_iter);
             }
         }),
@@ -262,6 +321,7 @@ fn fill_distance_estimate(
     max_iter: u32,
     kind: FractalKind,
     y0: u32,
+    columns: Range<usize>,
     out: &mut [f32],
 ) {
     let width = viewport.width as usize;
@@ -272,7 +332,8 @@ fn fill_distance_estimate(
     match kind {
         FractalKind::Mandelbrot => out.par_chunks_mut(width).enumerate().for_each(|(i, row)| {
             let py = y0 + i as u32;
-            for (px, slot) in row.iter_mut().enumerate() {
+            for (px, slot) in row[columns.clone()].iter_mut().enumerate() {
+                let px = columns.start + px;
                 let c = viewport.pixel_to_complex(px as u32, py);
                 // Same interior cull as the Escape Time path: an inside point's
                 // distance is the NaN sentinel, which the `f64::from(NaN) /
@@ -289,7 +350,8 @@ fn fill_distance_estimate(
         }),
         FractalKind::Julia { c } => out.par_chunks_mut(width).enumerate().for_each(|(i, row)| {
             let py = y0 + i as u32;
-            for (px, slot) in row.iter_mut().enumerate() {
+            for (px, slot) in row[columns.clone()].iter_mut().enumerate() {
+                let px = columns.start + px;
                 let z0 = viewport.pixel_to_complex(px as u32, py);
                 let d = escape_distance(z0, c, ONE, ORIGIN, max_iter);
                 *slot = (f64::from(d) / scale) as f32;

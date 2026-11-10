@@ -20,6 +20,8 @@
 //!   point, tracking the orbit derivative; `f32::NAN` inside the set.
 //!   The Distance Estimate Field's kernel (ADR-0013).
 //! - [`compute`] — viewport → per-pixel smooth-iteration buffer.
+//! - [`whole_pixel_shift`] / [`shift_in_place`] — reuse a frame's buffer after
+//!   a whole-pixel pan, computing only the exposed [`Region`]s (#170).
 //! - [`colorize`] — smooth-iteration buffer → RGBA8 pixels via a
 //!   [`Palette`] and a [`NormalizationMode`].
 
@@ -28,6 +30,7 @@ mod escape_distance;
 mod escape_time;
 mod field;
 mod fractal_kind;
+mod frame_shift;
 mod palette;
 mod pipeline;
 mod viewport;
@@ -50,9 +53,10 @@ pub use escape_distance::escape_distance;
 pub use escape_time::escape_time;
 pub use field::Field;
 pub use fractal_kind::FractalKind;
+pub use frame_shift::{Region, SHIFT_TOLERANCE_PX, shift_in_place, whole_pixel_shift};
 pub use palette::{NormalizationMode, Palette};
 pub use pipeline::{
-    FrameColoring, ProbeSample, colorize, colorize_into, compute, compute_rows, compute_rows_into,
-    probe_value,
+    FrameColoring, ProbeSample, colorize, colorize_into, compute, compute_region_into,
+    compute_rows, compute_rows_into, probe_value,
 };
 pub use viewport::{MAX_ZOOM, MIN_ZOOM, Viewport};

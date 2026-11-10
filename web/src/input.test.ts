@@ -127,6 +127,7 @@ function mount(
   onClick?: ConstructorParameters<typeof InputController>[4],
   canvasContent?: CanvasContentStore,
   canLongPress?: () => boolean,
+  bufferScale?: (viewport: Viewport) => number,
 ): { controller: InputController; store: ViewportStore; phase: GesturePhaseStore } {
   const store = createViewportStore(vp as unknown as Viewport)
   store.subscribe((next, source) => {
@@ -141,6 +142,7 @@ function mount(
     onClick,
     canvasContent,
     canLongPress,
+    bufferScale,
   )
   return { controller, store, phase }
 }
@@ -228,6 +230,30 @@ describe('InputController', () => {
     // dx = 50, dy = 40 CSS; logical mapping (800/800, 600/600) leaves
     // them unchanged. Buffer mapping would have produced (100, 80).
     expect(viewport.panByPixels).toHaveBeenCalledWith(50, 40)
+  })
+
+  it('commits the pan in whole buffer pixels, so the worker can shift its frame (#170)', () => {
+    viewport.panByPixels.mockReturnValue({} as unknown as Viewport)
+    // Half-resolution buffer: one buffer pixel is two logical pixels.
+    mount(canvas, viewport, onChange, undefined, undefined, undefined, undefined, () => 0.5)
+
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 151, clientY: 91 }))
+    // 51 and 41 logical px are 25.5 and 20.5 buffer px, which round to 26
+    // and 21: 52 and 42 logical px.
+    expect(viewport.panByPixels).toHaveBeenCalledWith(52, 42)
+  })
+
+  it('rounds a pan to whole pixels when the CSS box is a different size (#170)', () => {
+    setRect(canvas, { width: 1000, height: 750 })
+    viewport.panByPixels.mockReturnValue({} as unknown as Viewport)
+    mount(canvas, viewport, onChange)
+
+    canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
+    canvas.dispatchEvent(pe('pointerup', { clientX: 151, clientY: 91 }))
+    // 51 × 800/1000 = 40.8 and 41 × 600/750 = 32.8 logical px, at render
+    // scale 1: 41 and 33.
+    expect(viewport.panByPixels).toHaveBeenCalledWith(41, 33)
   })
 
   it('commits the pan from the live (refitted) viewport when a resize fires mid-drag', () => {

@@ -616,9 +616,17 @@ export class InputController {
     // buffer) so a pan moves the same complex-plane distance regardless
     // of render scale — and by the *live* dimensions, matching the
     // post-resize `rect`.
+    //
+    // The pan is rounded to whole *buffer* pixels (#170): then the worker can
+    // shift the frame it holds and compute only the strips the pan exposed.
+    // The rounding moves the image at most half a buffer pixel from where the
+    // drag left it.
     const base = this.currentViewport
-    const dxInternal = (dxCss * base.width) / rect.width
-    const dyInternal = (dyCss * base.height) / rect.height
+    const scale = this.bufferScale(base)
+    const toWholeBufferPixels = (logical: number): number =>
+      scale > 0 ? Math.round(logical * scale) / scale : logical
+    const dxInternal = toWholeBufferPixels((dxCss * base.width) / rect.width)
+    const dyInternal = toWholeBufferPixels((dyCss * base.height) / rect.height)
     const next = base.panByPixels(dxInternal, dyInternal)
     this.currentViewport = next
     this.store.set(next, 'gesture')
@@ -850,6 +858,11 @@ export class InputController {
     // c, in Mandelbrot mode with the drawer closed). When it wouldn't, a held
     // finger stays an ordinary press. Defaults to yes, for tests.
     private readonly canLongPress: () => boolean = () => true,
+    // How many buffer pixels the renderer computes per logical pixel of
+    // `viewport` (main.ts: render scale, shrunk by the pixel budget). A pan
+    // commits in whole buffer pixels so the worker can shift its cached frame
+    // instead of recomputing it (#170). Defaults to 1, for tests.
+    private readonly bufferScale: (viewport: Viewport) => number = () => 1,
   ) {
     this.currentViewport = store.get()
     // Any viewport write the controller did *not* author (a refit, a
