@@ -6,15 +6,20 @@ import { defineConfig, devices } from '@playwright/test'
 // the cross-origin isolation headers take effect (plain http on any other host
 // would leave the page un-isolated). `pnpm e2e` builds first; `pnpm e2e:only`
 // tests the existing `dist/`, as CI does after its build step.
-const PORT = 4173
+// Not 4173, `vite preview`'s default: a preview left running from another
+// checkout must not be the server these tests hit.
+const PORT = 4179
 const BASE_URL = `http://127.0.0.1:${PORT}`
-const CI = process.env.CI !== undefined
+const CI = process.env.CI === 'true' || process.env.CI === '1'
 
 export default defineConfig({
   testDir: 'e2e',
   // One worker: each page runs the renderer's own thread pool, and the boxes
   // this runs on (CI, devbox) have two cores.
   workers: 1,
+  // Booting alone may take up to 30 s on a small runner (BOOT_TIMEOUT_MS in
+  // e2e/app.ts), and the reload test boots twice.
+  timeout: 60_000,
   forbidOnly: CI,
   retries: CI ? 1 : 0,
   reporter: CI ? [['github'], ['list']] : 'list',
@@ -26,7 +31,7 @@ export default defineConfig({
   webServer: {
     command: `pnpm exec vite preview --host 127.0.0.1 --port ${PORT} --strictPort`,
     url: BASE_URL,
-    reuseExistingServer: !CI,
+    reuseExistingServer: false,
     timeout: 60_000,
   },
 })
