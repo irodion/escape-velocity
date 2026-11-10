@@ -238,10 +238,14 @@ describe('InputController', () => {
     mount(canvas, viewport, onChange, undefined, undefined, undefined, undefined, () => 0.5)
 
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
+    canvas.dispatchEvent(pe('pointermove', { clientX: 151, clientY: 91 }))
     canvas.dispatchEvent(pe('pointerup', { clientX: 151, clientY: 91 }))
     // 51 and 41 logical px are 25.5 and 20.5 buffer px, which round to 26
     // and 21: 52 and 42 logical px.
     expect(viewport.panByPixels).toHaveBeenCalledWith(52, 42)
+    // The preview blits that same buffer shift, whatever size the canvas
+    // buffer actually is (here 800×600, not the 400×300 the scale implies).
+    expect(ctxStub.drawImage).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), 26, 21)
   })
 
   it('rounds a pan to whole pixels when the CSS box is a different size (#170)', () => {
