@@ -470,11 +470,10 @@ export class InputController {
     // Measured after `startDrag`, which may have just cleared a Preview.
     const rect = this.canvas.getBoundingClientRect()
     if (rect.width <= 0 || rect.height <= 0) return
-    // Whole buffer pixels, as the commit rounds the pan (#170): the preview
+    // The same whole buffer pixels the commit pans by (#170): the preview
     // lands where the pan's frame will, with no snap at release, and a
     // whole-pixel blit stays sharp.
-    const dxInternal = Math.round((dxCss * this.canvas.width) / rect.width)
-    const dyInternal = Math.round((dyCss * this.canvas.height) / rect.height)
+    const { dx: dxInternal, dy: dyInternal } = this.wholeBufferPan(dxCss, dyCss, rect).buffer
 
     // Fill black for the edges exposed by the drag — this matches the
     // Mandelbrot "outside the set" colour, so the strips look like
@@ -626,15 +625,36 @@ export class InputController {
     // release. Only drag commits round: a pinch or wheel zoom and a refit
     // change the zoom or size, so no frame could be reused anyway, and a
     // keyboard pan (#89) should round here too when it lands.
-    const base = this.currentViewport
-    const scale = this.bufferScale(base)
-    const toWholeBufferPixels = (logical: number): number =>
-      scale > 0 ? Math.round(logical * scale) / scale : logical
-    const dxInternal = toWholeBufferPixels((dxCss * base.width) / rect.width)
-    const dyInternal = toWholeBufferPixels((dyCss * base.height) / rect.height)
-    const next = base.panByPixels(dxInternal, dyInternal)
+    const { logical } = this.wholeBufferPan(dxCss, dyCss, rect)
+    const next = this.currentViewport.panByPixels(logical.dx, logical.dy)
     this.currentViewport = next
     this.store.set(next, 'gesture')
+  }
+
+  // A drag of `(dxCss, dyCss)` across `rect` as a pan of the live viewport in
+  // whole buffer pixels (#170): `buffer` is the shift in buffer pixels, which
+  // the preview blits, and `logical` the same shift in the viewport's logical
+  // pixels, which the commit pans by. Both derive from one rounding, so the
+  // preview and the pan's frame agree even where the buffer's floored size
+  // isn't exactly `logical × scale`.
+  private wholeBufferPan(
+    dxCss: number,
+    dyCss: number,
+    rect: DOMRect,
+  ): { buffer: { dx: number; dy: number }; logical: { dx: number; dy: number } } {
+    const base = this.currentViewport
+    const dxLogical = (dxCss * base.width) / rect.width
+    const dyLogical = (dyCss * base.height) / rect.height
+    const scale = this.bufferScale(base)
+    if (!(scale > 0)) {
+      // No usable scale: an unrounded pan, previewed at the nearest pixel.
+      return {
+        buffer: { dx: Math.round(dxLogical), dy: Math.round(dyLogical) },
+        logical: { dx: dxLogical, dy: dyLogical },
+      }
+    }
+    const buffer = { dx: Math.round(dxLogical * scale), dy: Math.round(dyLogical * scale) }
+    return { buffer, logical: { dx: buffer.dx / scale, dy: buffer.dy / scale } }
   }
 
   // A press released inside the click slop, or a long-press: hand its CSS-pixel
