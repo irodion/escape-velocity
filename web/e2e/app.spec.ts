@@ -1,5 +1,13 @@
 import { expect, test } from '@playwright/test'
-import { boot, canvasGeometry, hashParam, pickedC, renderedSampleAt } from './app.js'
+import { LONG_PRESS_MS } from '../src/input.js'
+import {
+  boot,
+  canvasGeometry,
+  hashParam,
+  pickedC,
+  renderedSampleAt,
+  waitForFirstFrame,
+} from './app.js'
 
 // A point well inside the boot frame, away from its edges and the drawer.
 const AT = { x: 517.3, y: 263.8 }
@@ -27,13 +35,14 @@ test.describe('boot', () => {
           .length,
     )
     expect(mainThreadWasm).toBe(0)
-    // A painted frame: the boot view is coloured, not the canvas's blank black.
-    const centre = await page.evaluate(() => {
+    // A painted frame: the kernel writes opaque pixels (whatever their
+    // colour), over the canvas's blank transparent [0, 0, 0, 0].
+    const sample = await page.evaluate(() => {
       const canvas = document.querySelector<HTMLCanvasElement>('#fractal')
       const pixel = canvas?.getContext('2d')?.getImageData(200, 200, 1, 1).data
       return pixel === undefined ? [] : Array.from(pixel)
     })
-    expect(centre.slice(0, 3).some((channel) => channel > 0)).toBe(true)
+    expect(sample[3]).toBe(255)
     expect(errors).toEqual([])
   })
 
@@ -47,7 +56,8 @@ test.describe('boot', () => {
     await expect
       .poll(() => page.evaluate(() => navigator.serviceWorker.controller !== null))
       .toBe(true)
-    await boot(page)
+    // The reloaded document itself: navigating again would only change its hash.
+    await waitForFirstFrame(page)
     expect(await page.evaluate(() => crossOriginIsolated)).toBe(true)
     await expect(page.locator('.fatal')).toHaveCount(0)
   })
@@ -85,10 +95,9 @@ test.describe('picking the Julia constant', () => {
     // between the drag and the click: the click must land on the old frame,
     // still shifted by the drag. (Real input takes a round trip per event.)
     await page.evaluate(
-      ({ pan, at }) => {
+      ({ pan, at, origin }) => {
         const canvas = document.querySelector<HTMLCanvasElement>('#fractal')
         if (canvas === null) throw new Error('canvas#fractal not found')
-        const r = canvas.getBoundingClientRect()
         const fire = (type: string, x: number, y: number, altKey = false): void => {
           canvas.dispatchEvent(
             new PointerEvent(type, {
@@ -98,8 +107,8 @@ test.describe('picking the Julia constant', () => {
               pointerType: 'mouse',
               button: 0,
               buttons: type === 'pointerup' ? 0 : 1,
-              clientX: r.left + x,
-              clientY: r.top + y,
+              clientX: origin.left + x,
+              clientY: origin.top + y,
               altKey,
             }),
           )
@@ -111,7 +120,7 @@ test.describe('picking the Julia constant', () => {
         fire('pointerdown', at.x, at.y, true)
         fire('pointerup', at.x, at.y, true)
       },
-      { pan, at: AT },
+      { pan, at: AT, origin: { left: g.left, top: g.top } },
     )
 
     expect(await pickedC(page)).toEqual(expected)
@@ -134,16 +143,17 @@ test.describe('picking the Julia constant', () => {
         })
       }
 
-      // A short tap in Mandelbrot mode picks nothing.
+      // A short tap in Mandelbrot mode picks nothing, even once the
+      // long-press delay (and the URL write's debounce) has passed.
       await touch('touchStart')
-      await page.waitForTimeout(100)
+      await page.waitForTimeout(LONG_PRESS_MS / 5)
       await touch('touchEnd')
-      await page.waitForTimeout(700)
+      await page.waitForTimeout(LONG_PRESS_MS + 200)
       expect(await hashParam(page, 'kind')).toBe('mandelbrot')
 
-      // Held past the long-press delay (500 ms): picks c at the finger.
+      // Held well past the long-press delay: picks c at the finger.
       await touch('touchStart')
-      await page.waitForTimeout(650)
+      await page.waitForTimeout(LONG_PRESS_MS + 300)
       await touch('touchEnd')
       expect(await pickedC(page)).toEqual(expected)
     })

@@ -10,13 +10,20 @@ export const START_HASH = `#re=${START.re}&im=${START.im}&z=${START.zoom}&it=256
 // worker: seconds on a small CI runner, past `expect`'s default 5 s.
 const BOOT_TIMEOUT_MS = 30_000
 
-/**
- * Load the app at `hash` and wait for its first frame: the worker has booted
- * (the canvas is no longer inert) and the frame has painted (the canvas buffer
- * has taken the window's size; it starts at the HTML's 800×600).
- */
+/** Load the app at `hash` and wait for its first frame. */
 export async function boot(page: Page, hash = START_HASH): Promise<void> {
   await page.goto(`/${hash}`)
+  await waitForFirstFrame(page)
+}
+
+/**
+ * Wait for the loaded page's first frame: the worker has booted (the canvas is
+ * no longer inert) and the frame has painted (the canvas buffer has taken the
+ * window's size; it starts at the HTML's 800×600). That second signal assumes
+ * render scale 1 and a window that isn't 800 px wide, which the one Desktop
+ * Chrome project (1280×720) guarantees; another project would need its own.
+ */
+export async function waitForFirstFrame(page: Page): Promise<void> {
   await expect(page.locator('.stage')).not.toHaveAttribute('inert', { timeout: BOOT_TIMEOUT_MS })
   await page.waitForFunction(
     () => {
