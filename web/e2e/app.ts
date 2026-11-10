@@ -90,6 +90,9 @@ export async function hashParam(page: Page, name: string): Promise<string | null
   return new URLSearchParams(new URL(page.url()).hash.slice(1)).get(name)
 }
 
+// How long a final frame holds still: past the resize refit's 150 ms debounce.
+const QUIET_MS = 400
+
 /**
  * The canvas buffer as a PNG once its frame is final: no render is on the
  * worker (the stage isn't `aria-busy`) and the pixels have held still for
@@ -101,8 +104,9 @@ export async function hashParam(page: Page, name: string): Promise<string | null
 export async function settledCanvasPng(page: Page): Promise<Buffer> {
   const canvas = page.locator('#fractal')
   await canvas.evaluate(
-    (element: HTMLCanvasElement, quietMs: number) =>
-      new Promise<void>((resolve) => {
+    (element: HTMLCanvasElement, { quietMs, timeoutMs }) =>
+      new Promise<void>((resolve, reject) => {
+        const deadline = performance.now() + timeoutMs
         const stage = element.parentElement ?? element
         const context = element.getContext('2d')
         if (context === null) throw new Error('the canvas has no 2d context')
@@ -117,7 +121,13 @@ export async function settledCanvasPng(page: Page): Promise<Buffer> {
         let stillSince = performance.now()
         const poll = (): void => {
           const now = hash()
-          if (now !== last || stage.hasAttribute('aria-busy')) {
+          const busy = stage.hasAttribute('aria-busy')
+          if (performance.now() > deadline) {
+            const why = busy ? 'still aria-busy' : 'pixels still changing'
+            reject(new Error(`the canvas never settled: ${why}`))
+            return
+          }
+          if (now !== last || busy) {
             last = now
             stillSince = performance.now()
           } else if (performance.now() - stillSince >= quietMs) {
@@ -128,11 +138,9 @@ export async function settledCanvasPng(page: Page): Promise<Buffer> {
         }
         poll()
       }),
-    QUIET_MS,
+    // A slow runner's render can take as long as booting.
+    { quietMs: QUIET_MS, timeoutMs: BOOT_TIMEOUT_MS },
   )
   const url = await canvas.evaluate((element: HTMLCanvasElement) => element.toDataURL('image/png'))
   return Buffer.from(url.slice(url.indexOf(',') + 1), 'base64')
 }
-
-// How long a final frame holds still: past the resize refit's 150 ms debounce.
-const QUIET_MS = 400
