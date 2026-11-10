@@ -83,6 +83,11 @@ struct Frame {
     /// The pixels carried over from the previous frame by a pan (#170), which
     /// no band computes; [`Region::EMPTY`] for a frame computed in full.
     carried: Region,
+    /// The viewport of the last frame computed in full, which a chain of pans
+    /// started from: a pan is reused only while it stays on this frame's pixel
+    /// grid, so the per-pan tolerance can't add up across pans (see
+    /// `fractal_core::on_pixel_grid`).
+    grid: CoreViewport,
     /// Rows `[0, rows_done)` are filled.
     rows_done: u32,
 }
@@ -113,9 +118,10 @@ type PixelShift = (i64, i64);
 ///
 /// `y0 == 0` starts a new frame. If `current` is a complete frame and `key` is
 /// it panned by whole pixels (same zoom, size, `max_iter`, family and Field;
-/// see `fractal_core::whole_pixel_shift`), the new frame carries the pixels the
-/// pan keeps in view, and the buffer must be shifted by the returned
-/// `(dx, dy)`; otherwise it abandons whatever the buffer held. Any other band
+/// see `fractal_core::whole_pixel_shift`), still on the pixel grid of the frame
+/// its pans started from, the new frame carries the pixels the pan keeps in
+/// view, and the buffer must be shifted by the returned `(dx, dy)`; otherwise
+/// it abandons whatever the buffer held and becomes the new grid. Any other band
 /// must continue the frame in progress exactly where the last band stopped,
 /// with the same key: so the bands tile the buffer in order, a band can never
 /// index past it, and a frame counts as complete only once every row has
@@ -131,23 +137,33 @@ fn next_frame(
         return Err("compute_band: require y0 <= y1 <= viewport.height");
     }
     if y0 == 0 {
-        let shift = current
+        let pan = current
             .filter(|frame| {
                 frame.is_complete()
                     && frame.key.max_iter == key.max_iter
                     && frame.key.kind == key.kind
                     && frame.key.field == key.field
+                    && fractal_core::on_pixel_grid(&frame.grid, &key.viewport)
             })
-            .and_then(|frame| fractal_core::whole_pixel_shift(&frame.key.viewport, &key.viewport));
-        let carried = shift.map_or(Region::EMPTY, |(dx, dy)| {
-            Region::carried(width, height, dx, dy)
-        });
-        let frame = Frame {
-            key,
-            carried,
-            rows_done: y1,
+            .and_then(|frame| {
+                fractal_core::whole_pixel_shift(&frame.key.viewport, &key.viewport)
+                    .map(|shift| (frame.grid, shift))
+            });
+        let frame = match pan {
+            Some((grid, (dx, dy))) => Frame {
+                key,
+                carried: Region::carried(width, height, dx, dy),
+                grid,
+                rows_done: y1,
+            },
+            None => Frame {
+                key,
+                carried: Region::EMPTY,
+                grid: key.viewport,
+                rows_done: y1,
+            },
         };
-        return Ok((frame, shift));
+        return Ok((frame, pan.map(|(_, shift)| shift)));
     }
     match current {
         Some(frame) if frame.key == key && frame.rows_done == y0 => Ok((
@@ -511,8 +527,11 @@ fn core_fractal_kind(
 /// bands, their order and the abort points are the same as for a fresh frame;
 /// a frame abandoned partway is refused by every read as before, and the next
 /// frame is computed in full. Carried pixels keep the value sampled at the old
-/// frame's coordinates, within `fractal_core::SHIFT_TOLERANCE_PX` of a pixel of
-/// a fresh compute's (see `fractal_core`'s `frame_shift` module).
+/// frame's coordinates. A chain of pans stays anchored to the grid of the frame
+/// it started from, so a carried pixel is within twice
+/// `fractal_core::SHIFT_TOLERANCE_PX` (2% of a pixel) of a fresh compute's
+/// sample, however many pans it survives (see `fractal_core`'s `frame_shift`
+/// module).
 ///
 /// `c_re` / `c_im` (for finiteness, via `core_fractal_kind`) and the band
 /// range are validated at this WASM↔JS boundary. A rejected band changes
@@ -568,7 +587,11 @@ pub fn compute_band(
                 iters.clear();
                 iters.resize(w * (height as usize), 0.0);
             }
-            LAST_NORM.set(None);
+            // A new frame's values differ, so its colouring will too. A
+            // re-render of the very same view (a zero shift) keeps them all.
+            if shift != Some((0, 0)) {
+                LAST_NORM.set(None);
+            }
         }
         // Each band writes straight into its absolute slice `[y0*w, y1*w)` — no
         // intermediate buffer, no copy. `next_frame` has checked that the
@@ -757,6 +780,7 @@ mod tests {
         Frame {
             key: key(),
             carried: Region::EMPTY,
+            grid: key().viewport,
             rows_done,
         }
     }
@@ -821,6 +845,7 @@ mod tests {
                 Frame {
                     key: other,
                     carried: Region::EMPTY,
+                    grid: other.viewport,
                     rows_done: 8,
                 },
                 None
@@ -883,8 +908,45 @@ mod tests {
         assert_eq!(shift, Some((1, -1)));
         assert_eq!(frame.carried, Region::carried(W, H, 1, -1));
         // The continuing bands keep the carried region.
+        // It stays anchored to the grid the first frame was computed on.
+        assert_eq!(frame.grid, key().viewport);
         let (next, shift) = next_frame(Some(frame), panned(1.0, -1.0), 1, H).expect("continues");
-        assert_eq!((next.carried, shift), (frame.carried, None));
+        assert_eq!(
+            (next.carried, next.grid, shift),
+            (frame.carried, frame.grid, None)
+        );
+    }
+
+    #[test]
+    fn pans_that_drift_off_the_first_frame_s_grid_are_computed_in_full() {
+        // Each step is within the per-pan tolerance of whole pixels; two are not.
+        let step = 1.0 + 0.6 * fractal_core::SHIFT_TOLERANCE_PX;
+        let once = FrameKey {
+            viewport: key().viewport.pan_by_pixels(step, 0.0),
+            ..key()
+        };
+        let twice = FrameKey {
+            viewport: once.viewport.pan_by_pixels(step, 0.0),
+            ..key()
+        };
+        let (first, shift) = next_frame(Some(frame(H)), once, 0, H).expect("starts");
+        assert_eq!(shift, Some((1, 0)));
+        let (second, shift) = next_frame(Some(first), twice, 0, H).expect("starts");
+        assert_eq!(
+            (second.carried, second.grid, shift),
+            (Region::EMPTY, twice.viewport, None)
+        );
+    }
+
+    #[test]
+    fn re_rendering_the_same_view_keeps_its_colouring() {
+        band(0, H);
+        colorize(Palette::Viridis, NormalizationMode::Histogram).expect("frame is complete");
+        band(0, H);
+        assert!(LAST_NORM.with(|c| c.borrow().is_some()));
+        // Any real pan drops it.
+        panned_band(1.0, 0.0, 0, H);
+        assert!(LAST_NORM.with(|c| c.borrow().is_none()));
     }
 
     #[test]
@@ -992,12 +1054,12 @@ mod tests {
         colorize(Palette::Viridis, NormalizationMode::Histogram).expect("frame is complete");
 
         // A newer view supersedes the next frame after its first band.
-        band(0, 1);
+        panned_band(0.5, 0.0, 0, 1);
         assert!(complete_frame().is_none());
         assert!(probe(0, 0).is_none());
         assert!(LAST_NORM.with(|c| c.borrow().is_none()));
 
-        band(1, H);
+        panned_band(0.5, 0.0, 1, H);
         assert!(probe(0, 0).is_some());
     }
 
