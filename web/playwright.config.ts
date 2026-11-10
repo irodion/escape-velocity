@@ -14,9 +14,9 @@ const CI = process.env.CI === 'true' || process.env.CI === '1'
 
 export default defineConfig({
   testDir: 'e2e',
-  // The reference images are the canvas's own pixels (settledCanvasPng in
-  // e2e/app.ts), the same on every OS, so their names carry no platform.
-  snapshotPathTemplate: '{testDir}/__snapshots__/{testFileName}/{arg}{ext}',
+  // `toMatchSnapshot` references are the canvas's own pixels (settledCanvasPng
+  // in e2e/app.ts), the same on every OS, so their names carry no platform.
+  snapshotPathTemplate: '{testDir}/__snapshots__/{testFileName}/{arg}{-projectName}{ext}',
   // One worker: each page runs the renderer's own thread pool, and the boxes
   // this runs on (CI, devbox) have two cores.
   workers: 1,
@@ -26,6 +26,14 @@ export default defineConfig({
   forbidOnly: CI,
   retries: CI ? 1 : 0,
   reporter: CI ? [['github'], ['list']] : 'list',
+  // Page screenshots do depend on the OS (fonts, antialiasing): keep
+  // Playwright's platform-specific names for any `toHaveScreenshot`.
+  expect: {
+    toHaveScreenshot: {
+      pathTemplate:
+        '{snapshotDir}/{testFileDir}/{testFileName}-snapshots/{arg}{-projectName}{-snapshotSuffix}{ext}',
+    },
+  },
   use: {
     baseURL: BASE_URL,
     trace: 'retain-on-failure',
