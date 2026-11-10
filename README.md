@@ -172,6 +172,7 @@ pnpm lint          # biome ci
 pnpm typecheck     # tsc --noEmit
 pnpm build         # vite build
 pnpm e2e           # build, then Playwright in Chromium (once: pnpm exec playwright install chromium)
+pnpm e2e:update    # regenerate the reference images after an intended visual change; review them
 pnpm fmt           # biome auto-fix (local convenience, not in CI)
 ```
 

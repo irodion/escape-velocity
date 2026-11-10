@@ -176,7 +176,7 @@ jobs:
         working-directory: web
         run: pnpm e2e:only
 
-      - name: Upload traces of failed tests
+      - name: Upload traces and image diffs of failed tests
         if: failure()
         uses: actions/upload-artifact@v7
         with:
