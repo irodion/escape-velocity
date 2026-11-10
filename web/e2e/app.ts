@@ -94,16 +94,13 @@ export async function hashParam(page: Page, name: string): Promise<string | null
 const QUIET_MS = 400
 
 /**
- * The canvas buffer as a PNG once its frame is final: no render is on the
- * worker (the stage isn't `aria-busy`) and the pixels have held still for
- * longer than the resize refit's 150 ms debounce, which can start one more
- * render after the first frame. These are the kernel's own pixels, without the
- * drawer, HUD or fonts a page screenshot would pick up, so they are the same
- * image on any OS.
+ * Wait until the canvas's frame is final: no render is on the worker (the
+ * stage isn't `aria-busy`) and the pixels have held still for longer than the
+ * resize refit's 150 ms debounce, which can start one more render after the
+ * first frame.
  */
-export async function settledCanvasPng(page: Page): Promise<Buffer> {
-  const canvas = page.locator('#fractal')
-  await canvas.evaluate(
+export async function waitForSettledFrame(page: Page): Promise<void> {
+  await page.locator('#fractal').evaluate(
     (element: HTMLCanvasElement, { quietMs, timeoutMs }) =>
       new Promise<void>((resolve, reject) => {
         const deadline = performance.now() + timeoutMs
@@ -141,6 +138,33 @@ export async function settledCanvasPng(page: Page): Promise<Buffer> {
     // A slow runner's render can take as long as booting.
     { quietMs: QUIET_MS, timeoutMs: BOOT_TIMEOUT_MS },
   )
-  const url = await canvas.evaluate((element: HTMLCanvasElement) => element.toDataURL('image/png'))
+}
+
+/**
+ * The canvas buffer as a PNG once its frame is final (`waitForSettledFrame`).
+ * These are the kernel's own pixels, without the drawer, HUD or fonts a page
+ * screenshot would pick up, so they are the same image on any OS.
+ */
+export async function settledCanvasPng(page: Page): Promise<Buffer> {
+  await waitForSettledFrame(page)
+  const url = await page
+    .locator('#fractal')
+    .evaluate((element: HTMLCanvasElement) => element.toDataURL('image/png'))
   return Buffer.from(url.slice(url.indexOf(',') + 1), 'base64')
+}
+
+/** The canvas buffer's raw RGBA bytes once its frame is final. */
+export async function settledRgba(page: Page): Promise<Buffer> {
+  await waitForSettledFrame(page)
+  const base64 = await page.locator('#fractal').evaluate((element: HTMLCanvasElement) => {
+    const context = element.getContext('2d')
+    if (context === null) throw new Error('the canvas has no 2d context')
+    const { data } = context.getImageData(0, 0, element.width, element.height)
+    let binary = ''
+    for (let i = 0; i < data.length; i += 0x8000) {
+      binary += String.fromCharCode(...data.subarray(i, i + 0x8000))
+    }
+    return btoa(binary)
+  })
+  return Buffer.from(base64, 'base64')
 }

@@ -10,11 +10,19 @@
 //!
 //! A shifted pixel keeps the value sampled at the old frame's coordinate. A
 //! fresh compute would sample `center' + offset · scale`, which rounds
-//! differently: the two coordinates agree to within [`SHIFT_TOLERANCE_PX`] of a
+//! differently: the coordinates agree to within [`SHIFT_TOLERANCE_PX`] of a
 //! pixel, plus the centre's own rounding (≤ ½ ULP). That is invisible, but not
 //! bit-identical; a boundary pixel can land on a different iteration count. The
 //! bit-identical guarantees (parallel vs serial, banded vs full) are about one
 //! frame's compute and are unaffected.
+//!
+//! A pixel can stay in view through many pans, so the per-pan tolerance alone
+//! would let the error add up. The caller therefore also anchors a chain of
+//! pans to the **grid** of the last frame computed in full, and reuses a frame
+//! only while the new view is [`on_pixel_grid`] of that anchor too. Every pixel
+//! was then sampled within the tolerance of an anchor grid point, and the new
+//! view's own samples are within it as well: a carried pixel stays within twice
+//! the tolerance (2% of a pixel) of a fresh sample, however many pans happen.
 
 use crate::viewport::Viewport;
 
@@ -34,6 +42,27 @@ pub const SHIFT_TOLERANCE_PX: f64 = 0.01;
 /// [`SHIFT_TOLERANCE_PX`] of whole pixels, or it moves the frame entirely out
 /// of view (nothing would carry over).
 pub fn whole_pixel_shift(from: &Viewport, to: &Viewport) -> Option<(i64, i64)> {
+    let (rx, ry) = whole_pixel_offset(from, to)?;
+    if rx.abs() >= f64::from(from.width) || ry.abs() >= f64::from(from.height) {
+        return None;
+    }
+    // In range: |rx| < width ≤ u32::MAX, so the casts are exact.
+    Some((rx as i64, ry as i64))
+}
+
+/// Whether `to` lies on `grid`'s pixel grid: same zoom and size, and its
+/// centre a whole number of pixels from `grid`'s (within
+/// [`SHIFT_TOLERANCE_PX`]), however far. A chain of pans checks this against
+/// the frame it started from, so the per-pan tolerance can't add up (see the
+/// module doc).
+pub fn on_pixel_grid(grid: &Viewport, to: &Viewport) -> bool {
+    whole_pixel_offset(grid, to).is_some()
+}
+
+/// `to`'s centre offset from `from`'s in pixels, rounded, when the two share
+/// zoom and size and the offset is within [`SHIFT_TOLERANCE_PX`] of whole
+/// pixels.
+fn whole_pixel_offset(from: &Viewport, to: &Viewport) -> Option<(f64, f64)> {
     // Bitwise-equal zoom: the pixel scale must be exactly the one the cached
     // values were computed (and, for Distance Estimate, divided) with.
     if from.zoom.to_bits() != to.zoom.to_bits()
@@ -51,11 +80,7 @@ pub fn whole_pixel_shift(from: &Viewport, to: &Viewport) -> Option<(i64, i64)> {
     if !((dx - rx).abs() <= SHIFT_TOLERANCE_PX && (dy - ry).abs() <= SHIFT_TOLERANCE_PX) {
         return None;
     }
-    if rx.abs() >= f64::from(from.width) || ry.abs() >= f64::from(from.height) {
-        return None;
-    }
-    // In range: |rx| < width ≤ u32::MAX, so the casts are exact.
-    Some((rx as i64, ry as i64))
+    Some((rx, ry))
 }
 
 /// A rectangle of a frame's pixels, columns `[x0, x1)` × rows `[y0, y1)`.
@@ -227,6 +252,34 @@ mod tests {
     }
 
     #[test]
+    fn the_pixel_grid_check_has_no_range_but_no_slack_beyond_the_tolerance() {
+        let grid = viewport(-0.7435, 0.1314);
+        // Whole pixels, however far: even out of view.
+        for (dx, dy) in [(0.0, 0.0), (64.0, 0.0), (-1000.0, 480.0)] {
+            assert!(
+                on_pixel_grid(&grid, &grid.pan_by_pixels(dx, dy)),
+                "({dx}, {dy})"
+            );
+        }
+        // Pans that each pass the per-pan check drift off the grid together.
+        let step = 1.0 + 0.6 * SHIFT_TOLERANCE_PX;
+        let once = grid.pan_by_pixels(step, 0.0);
+        let twice = once.pan_by_pixels(step, 0.0);
+        assert_eq!(whole_pixel_shift(&grid, &once), Some((1, 0)));
+        assert_eq!(whole_pixel_shift(&once, &twice), Some((1, 0)));
+        assert!(on_pixel_grid(&grid, &once));
+        assert!(!on_pixel_grid(&grid, &twice));
+        // Another zoom or size, or a non-finite centre.
+        let zoomed = Viewport {
+            zoom: 201.0,
+            ..grid
+        };
+        assert!(!on_pixel_grid(&grid, &zoomed));
+        assert!(!on_pixel_grid(&grid, &grid.with_resolution(65, 48)));
+        assert!(!on_pixel_grid(&grid, &viewport(f64::NAN, 0.1314)));
+    }
+
+    #[test]
     fn a_shift_carries_each_pixel_to_where_the_pan_shows_it() {
         let (w, h) = (7u32, 5u32);
         let original: Vec<f32> = (0..w * h).map(|i| i as f32).collect();
@@ -314,11 +367,17 @@ mod tests {
         }
     }
 
-    /// A panned frame built the #170 way: the old frame shifted, then each
-    /// band's exposed rectangles computed.
-    fn panned(from: &Viewport, to: &Viewport, kind: FractalKind, field: Field) -> Vec<f32> {
+    /// A panned frame built the #170 way from `old`, `from`'s frame: shifted,
+    /// then each band's exposed rectangles computed.
+    fn panned(
+        old: &[f32],
+        from: &Viewport,
+        to: &Viewport,
+        kind: FractalKind,
+        field: Field,
+    ) -> Vec<f32> {
         let (dx, dy) = whole_pixel_shift(from, to).expect("a whole-pixel pan");
-        let mut buf = compute(from, 256, kind, field);
+        let mut buf = old.to_vec();
         let region = shift_in_place(&mut buf, to.width, to.height, dx, dy);
         let w = to.width as usize;
         for (y0, y1) in [(0, 17), (17, 30), (30, to.height)] {
@@ -371,33 +430,34 @@ mod tests {
         ];
         for kind in kinds {
             for field in [Field::EscapeTime, Field::DistanceEstimate] {
-                for (dx, dy) in [(9, 0), (-20, 13), (0, -30)] {
-                    let to = from.pan_by_pixels(f64::from(dx), f64::from(dy));
-                    let got = panned(&from, &to, kind, field);
+                for (dx, dy) in [(9_i64, 0_i64), (-20, 13), (0, -30)] {
+                    let to = from.pan_by_pixels(dx as f64, dy as f64);
+                    let old = compute(&from, 256, kind, field);
+                    let got = panned(&old, &from, &to, kind, field);
                     let fresh = compute(&to, 256, kind, field);
-                    let region = Region::carried(to.width, to.height, dx.into(), dy.into());
-                    let mut carried_diffs = 0;
+                    let region = Region::carried(to.width, to.height, dx, dy);
                     for (i, (a, b)) in got.iter().zip(&fresh).enumerate() {
                         let (x, y) = ((i as u32) % to.width, (i as u32) / to.width);
                         let carried = (region.x0..region.x1).contains(&x)
                             && (region.y0..region.y1).contains(&y);
+                        let at = format!("{kind:?} {field:?} ({dx}, {dy}) pixel ({x}, {y})");
                         if !carried {
                             // Computed fresh for `to`: bit-identical.
-                            assert_eq!(
-                                a.to_bits(),
-                                b.to_bits(),
-                                "{kind:?} {field:?} ({dx}, {dy}) exposed ({x}, {y})"
-                            );
-                        } else if a.to_bits() != b.to_bits() {
-                            carried_diffs += 1;
+                            assert_eq!(a.to_bits(), b.to_bits(), "{at}: exposed");
+                            continue;
                         }
+                        // The shift itself is exact: the old frame's pixel.
+                        let (sx, sy) = (i64::from(x) - dx, i64::from(y) - dy);
+                        let source = old[(sy * i64::from(to.width) + sx) as usize];
+                        assert_eq!(a.to_bits(), source.to_bits(), "{at}: not the old pixel");
+                        // Sampled ~1 ULP of the coordinate away from a fresh
+                        // sample (see the module doc): the same value to a
+                        // few parts in 10⁶, and the same side of the set.
+                        assert!(
+                            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-5 * b.abs(),
+                            "{at}: carried {a}, fresh {b}"
+                        );
                     }
-                    // Carried pixels were sampled ~1 ULP of the coordinate
-                    // away (see the module doc): nearly all match exactly.
-                    assert!(
-                        carried_diffs * 100 <= got.len(),
-                        "{kind:?} {field:?} ({dx}, {dy}): {carried_diffs} carried pixels differ"
-                    );
                 }
             }
         }

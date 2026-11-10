@@ -470,8 +470,11 @@ export class InputController {
     // Measured after `startDrag`, which may have just cleared a Preview.
     const rect = this.canvas.getBoundingClientRect()
     if (rect.width <= 0 || rect.height <= 0) return
-    const dxInternal = (dxCss * this.canvas.width) / rect.width
-    const dyInternal = (dyCss * this.canvas.height) / rect.height
+    // Whole buffer pixels, as the commit rounds the pan (#170): the preview
+    // lands where the pan's frame will, with no snap at release, and a
+    // whole-pixel blit stays sharp.
+    const dxInternal = Math.round((dxCss * this.canvas.width) / rect.width)
+    const dyInternal = Math.round((dyCss * this.canvas.height) / rect.height)
 
     // Fill black for the edges exposed by the drag — this matches the
     // Mandelbrot "outside the set" colour, so the strips look like
@@ -619,8 +622,10 @@ export class InputController {
     //
     // The pan is rounded to whole *buffer* pixels (#170): then the worker can
     // shift the frame it holds and compute only the strips the pan exposed.
-    // The rounding moves the image at most half a buffer pixel from where the
-    // drag left it.
+    // The preview blit rounds the same way, so the image doesn't move at
+    // release. Only drag commits round: a pinch or wheel zoom and a refit
+    // change the zoom or size, so no frame could be reused anyway, and a
+    // keyboard pan (#89) should round here too when it lands.
     const base = this.currentViewport
     const scale = this.bufferScale(base)
     const toWholeBufferPixels = (logical: number): number =>

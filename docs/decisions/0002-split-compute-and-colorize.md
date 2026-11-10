@@ -88,7 +88,10 @@ frame the buffer holds, panned by whole pixels with nothing else changed
 (zoom, size, `max_iter`, family and Field all equal), the binding shifts the
 buffer in place and its bands compute only the pixels the pan exposed. The
 main thread commits a pan in whole *buffer* pixels so this applies. The
-shifted pixels keep the value sampled at the old frame's coordinates, within
-1% of a pixel of a fresh sample (`fractal_core::SHIFT_TOLERANCE_PX`); past that,
-at the deepest zooms, the frame is computed in full as before. A 20% pan at a
+shifted pixels keep the value sampled at the old frame's coordinates. Each pan
+must be within 1% of a pixel of whole pixels (`fractal_core::SHIFT_TOLERANCE_PX`),
+and a chain of pans must stay on the pixel grid of the frame it started from
+(`fractal_core::on_pixel_grid`), so a carried pixel is within 2% of a pixel of
+a fresh sample however many pans it survives. Past that, at the deepest zooms,
+the frame is computed in full as before. A 20% pan at a
 deep view (`z = 2·10⁸`, `max_iter = 4096`) went from ~3.6 s to ~1 s.

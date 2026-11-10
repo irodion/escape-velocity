@@ -250,9 +250,12 @@ describe('InputController', () => {
     mount(canvas, viewport, onChange)
 
     canvas.dispatchEvent(pe('pointerdown', { clientX: 100, clientY: 50 }))
+    canvas.dispatchEvent(pe('pointermove', { clientX: 151, clientY: 91 }))
     canvas.dispatchEvent(pe('pointerup', { clientX: 151, clientY: 91 }))
     // 51 × 800/1000 = 40.8 and 41 × 600/750 = 32.8 logical px, at render
-    // scale 1: 41 and 33.
+    // scale 1: 41 and 33. The preview blit rounds the same way, so the image
+    // doesn't move at release.
+    expect(ctxStub.drawImage).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), 41, 33)
     expect(viewport.panByPixels).toHaveBeenCalledWith(41, 33)
   })
 
