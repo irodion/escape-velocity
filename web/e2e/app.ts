@@ -19,9 +19,9 @@ export async function boot(page: Page, hash = START_HASH): Promise<void> {
 /**
  * Wait for the loaded page's first frame: the worker has booted (the canvas is
  * no longer inert) and the frame has painted (the canvas buffer has taken the
- * window's size; it starts at the HTML's 800×600). That second signal assumes
- * render scale 1 and a window that isn't 800 px wide, which the one Desktop
- * Chrome project (1280×720) guarantees; another project would need its own.
+ * window's size; it starts at the HTML's 800×600). That second signal needs
+ * render scale 1 and a window that isn't 800 px wide: true of the Desktop
+ * Chrome project (1280×720) and the reference-image tests (480×320).
  */
 export async function waitForFirstFrame(page: Page): Promise<void> {
   await expect(page.locator('.stage')).not.toHaveAttribute('inert', { timeout: BOOT_TIMEOUT_MS })
@@ -91,27 +91,48 @@ export async function hashParam(page: Page, name: string): Promise<string | null
 }
 
 /**
- * The canvas buffer as a PNG, once the frame on it has stopped changing: the
- * kernel's own pixels, without the drawer, HUD or fonts a page screenshot
- * would pick up, so it is the same image on any OS.
+ * The canvas buffer as a PNG once its frame is final: no render is on the
+ * worker (the stage isn't `aria-busy`) and the pixels have held still for
+ * longer than the resize refit's 150 ms debounce, which can start one more
+ * render after the first frame. These are the kernel's own pixels, without the
+ * drawer, HUD or fonts a page screenshot would pick up, so they are the same
+ * image on any OS.
  */
 export async function settledCanvasPng(page: Page): Promise<Buffer> {
-  const read = (): Promise<string> =>
-    page.evaluate(() => {
-      const canvas = document.querySelector<HTMLCanvasElement>('#fractal')
-      if (canvas === null) throw new Error('canvas#fractal not found')
-      return canvas.toDataURL('image/png')
-    })
-  // A render paints once, but a resize or recolor may still follow the first
-  // frame: wait until two reads a beat apart agree.
-  let previous = await read()
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    await page.waitForTimeout(250)
-    const current = await read()
-    if (current === previous) {
-      return Buffer.from(current.slice(current.indexOf(',') + 1), 'base64')
-    }
-    previous = current
-  }
-  throw new Error('the canvas never settled')
+  const canvas = page.locator('#fractal')
+  await canvas.evaluate(
+    (element: HTMLCanvasElement, quietMs: number) =>
+      new Promise<void>((resolve) => {
+        const stage = element.parentElement ?? element
+        const context = element.getContext('2d')
+        if (context === null) throw new Error('the canvas has no 2d context')
+        // A cheap hash of the pixels: comparing frames, not encoding them.
+        const hash = (): number => {
+          const { data } = context.getImageData(0, 0, element.width, element.height)
+          let h = 0
+          for (let i = 0; i < data.length; i += 1) h = (Math.imul(h, 31) + data[i]) | 0
+          return h
+        }
+        let last = hash()
+        let stillSince = performance.now()
+        const poll = (): void => {
+          const now = hash()
+          if (now !== last || stage.hasAttribute('aria-busy')) {
+            last = now
+            stillSince = performance.now()
+          } else if (performance.now() - stillSince >= quietMs) {
+            resolve()
+            return
+          }
+          setTimeout(poll, 50)
+        }
+        poll()
+      }),
+    QUIET_MS,
+  )
+  const url = await canvas.evaluate((element: HTMLCanvasElement) => element.toDataURL('image/png'))
+  return Buffer.from(url.slice(url.indexOf(',') + 1), 'base64')
 }
+
+// How long a final frame holds still: past the resize refit's 150 ms debounce.
+const QUIET_MS = 400

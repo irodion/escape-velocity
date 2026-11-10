@@ -187,7 +187,18 @@ mountDrawer(controlsToggle, controlsForm, canvas)
 const stage = canvas.parentElement ?? canvas
 const bootInert: readonly HTMLElement[] = [controlsToggle, stage]
 for (const element of bootInert) element.inert = true
-stage.setAttribute('aria-busy', 'true')
+// The stage is `aria-busy` while the renderer boots and while a render is on
+// the worker, so assistive tech knows the image is about to change. The E2E
+// reference-image tests wait on it too (e2e/app.ts). A recolorize doesn't
+// count: it is the fast path and never reports progress.
+let booting = true
+let rendering = false
+const syncBusy = (): void => {
+  if (booting || rendering) stage.setAttribute('aria-busy', 'true')
+  else stage.removeAttribute('aria-busy')
+}
+syncBusy()
+const progressPill = mountProgress(document.body)
 
 // Construct the render client, injecting its collaborators at birth (A3, #86).
 // The `new Worker(new URL(...))` expression must stay syntactically intact here
@@ -205,7 +216,8 @@ stage.setAttribute('aria-busy', 'true')
 //  - `progress` is the determinate indicator for slow deep renders (P2, #78).
 //    The client drives `begin`/`report`/`end` as a banded render streams its
 //    heartbeats; the mounted reporter owns the reveal debounce so fast frames
-//    never flash.
+//    never flash. Wrapped so a render in flight also keeps the stage
+//    `aria-busy` (above).
 //  - `isGestureActive` / `onRenderPainted` connect it to the InputController's
 //    gesture phase (#159): probes hold off mid-gesture, and a render's paint
 //    ends a live zoom Preview in the same tick (ADR-0012).
@@ -235,9 +247,22 @@ const { render, recolorize, probe, discardInFlight } = createRenderClient({
   },
   onReady: () => {
     for (const element of bootInert) element.inert = false
-    stage.removeAttribute('aria-busy')
+    booting = false
+    syncBusy()
   },
-  progress: mountProgress(document.body),
+  progress: {
+    begin: () => {
+      rendering = true
+      syncBusy()
+      progressPill.begin()
+    },
+    report: progressPill.report,
+    end: () => {
+      rendering = false
+      syncBusy()
+      progressPill.end()
+    },
+  },
   // Deliver each traced pixel (E2, #95) to the inspector HUD. Dropped before the
   // inspector is constructed (no probe can be issued before then anyway).
   onProbeResult: (result) => inspector?.showResult(result),
