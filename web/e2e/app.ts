@@ -89,3 +89,29 @@ export async function pickedC(page: Page): Promise<{ re: number; im: number }> {
 export async function hashParam(page: Page, name: string): Promise<string | null> {
   return new URLSearchParams(new URL(page.url()).hash.slice(1)).get(name)
 }
+
+/**
+ * The canvas buffer as a PNG, once the frame on it has stopped changing: the
+ * kernel's own pixels, without the drawer, HUD or fonts a page screenshot
+ * would pick up, so it is the same image on any OS.
+ */
+export async function settledCanvasPng(page: Page): Promise<Buffer> {
+  const read = (): Promise<string> =>
+    page.evaluate(() => {
+      const canvas = document.querySelector<HTMLCanvasElement>('#fractal')
+      if (canvas === null) throw new Error('canvas#fractal not found')
+      return canvas.toDataURL('image/png')
+    })
+  // A render paints once, but a resize or recolor may still follow the first
+  // frame: wait until two reads a beat apart agree.
+  let previous = await read()
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await page.waitForTimeout(250)
+    const current = await read()
+    if (current === previous) {
+      return Buffer.from(current.slice(current.indexOf(',') + 1), 'base64')
+    }
+    previous = current
+  }
+  throw new Error('the canvas never settled')
+}
