@@ -382,6 +382,12 @@ const applyAccent = (palette: PaletteName): void => {
   document.documentElement.style.setProperty('--accent', PALETTE_ACCENT[palette])
 }
 
+// The buffer the worker computes for a logical viewport: render scale, shrunk
+// by the pixel budget. One definition, so the render request and a pan's
+// rounding to whole buffer pixels (#170) agree.
+const bufferDims = (viewport: { width: number; height: number }) =>
+  computeBufferDims(viewport.width, viewport.height, current.renderScale, MAX_RENDER_PIXELS)
+
 const rerender = (): void => {
   // Render scale + the pixel budget are applied here, at the render
   // seam. `computeBufferDims` turns the logical (display) size into the
@@ -395,12 +401,7 @@ const rerender = (): void => {
   // and the canvas backing store is sized to match when the frame paints
   // (see `paint` in render-client).
   const viewport = store.get()
-  const { width, height, scale } = computeBufferDims(
-    viewport.width,
-    viewport.height,
-    current.renderScale,
-    MAX_RENDER_PIXELS,
-  )
+  const { width, height, scale } = bufferDims(viewport)
   render(
     {
       centerRe: viewport.centerRe,
@@ -642,6 +643,10 @@ input = new InputController(
   // A touch long-press only picks c, in Mandelbrot mode with the drawer closed.
   // Anywhere else a held finger stays an ordinary press, so it can still pan.
   () => current.mode === 'mandelbrot' && !controlsForm.classList.contains('open'),
+  // The scale `rerender` computes this viewport at, so a pan commits in whole
+  // buffer pixels and the worker shifts its frame rather than recomputing it
+  // (#170).
+  (viewport) => bufferDims(viewport).scale,
 )
 
 // Fit-to-window: re-fit the viewport whenever the canvas's measured box

@@ -27,7 +27,7 @@ use std::cell::{Cell, RefCell};
 
 use fractal_core::{
     Complex64, Field as CoreField, FractalKind as CoreFractalKind, FrameColoring,
-    NormalizationMode as CoreMode, Palette as CorePalette, Viewport as CoreViewport,
+    NormalizationMode as CoreMode, Palette as CorePalette, Region, Viewport as CoreViewport,
 };
 use wasm_bindgen::prelude::*;
 
@@ -62,67 +62,101 @@ thread_local! {
     static LAST_NORM: RefCell<Option<NormCache>> = const { RefCell::new(None) };
 }
 
+/// What a frame in [`ITER_BUFFER`] was computed from: everything a pixel's
+/// value depends on. Two bands belong to one frame only if their keys agree,
+/// and a new frame can reuse the last one's pixels (#170) only if its key
+/// differs by nothing but a whole-pixel pan.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FrameKey {
+    viewport: CoreViewport,
+    max_iter: u32,
+    kind: CoreFractalKind,
+    field: CoreField,
+}
+
 /// The frame [`ITER_BUFFER`] holds, recorded when its first band starts so
 /// the reads need nothing from JS that could disagree with the buffer — not
 /// its length, not its size, not the `max_iter` it was computed at.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Frame {
-    width: u32,
-    height: u32,
-    max_iter: u32,
+    key: FrameKey,
+    /// The pixels carried over from the previous frame by a pan (#170), which
+    /// no band computes; [`Region::EMPTY`] for a frame computed in full.
+    carried: Region,
     /// Rows `[0, rows_done)` are filled.
     rows_done: u32,
 }
 
 impl Frame {
+    fn width(self) -> u32 {
+        self.key.viewport.width
+    }
+
+    fn height(self) -> u32 {
+        self.key.viewport.height
+    }
+
     /// Whether every row is in — the only state [`colorize`] and
     /// [`probe_pixel`] read.
     fn is_complete(self) -> bool {
-        self.rows_done == self.height
+        self.rows_done == self.height()
     }
 }
 
-/// The frame state after writing band `[y0, y1)` of a `width` × `height`
-/// frame at `max_iter` over `current`, or why that band may not be written.
+/// A whole-pixel pan `(dx, dy)`, as `fractal_core::whole_pixel_shift` returns it.
+type PixelShift = (i64, i64);
+
+/// The frame state after writing band `[y0, y1)` of the frame `key` over
+/// `current`, or why that band may not be written. Alongside it, for a band
+/// that starts a frame by panning the last one, the shift to apply to the
+/// buffer first.
 ///
-/// `y0 == 0` starts a new frame, abandoning whatever the buffer held. Any
-/// other band must continue the frame in progress exactly where the last band
-/// stopped, at the same size and `max_iter`: so the bands tile the buffer in
-/// order, a band can never index past it, and a frame counts as complete only
-/// once every row has actually been written. (The family, `c` and Field are
-/// not recorded; the worker's band loop passes one request's values to every
-/// band.)
+/// `y0 == 0` starts a new frame. If `current` is a complete frame and `key` is
+/// it panned by whole pixels (same zoom, size, `max_iter`, family and Field;
+/// see `fractal_core::whole_pixel_shift`), the new frame carries the pixels the
+/// pan keeps in view, and the buffer must be shifted by the returned
+/// `(dx, dy)`; otherwise it abandons whatever the buffer held. Any other band
+/// must continue the frame in progress exactly where the last band stopped,
+/// with the same key: so the bands tile the buffer in order, a band can never
+/// index past it, and a frame counts as complete only once every row has
+/// actually been written.
 fn next_frame(
     current: Option<Frame>,
-    width: u32,
-    height: u32,
-    max_iter: u32,
+    key: FrameKey,
     y0: u32,
     y1: u32,
-) -> Result<Frame, &'static str> {
+) -> Result<(Frame, Option<PixelShift>), &'static str> {
+    let (width, height) = (key.viewport.width, key.viewport.height);
     if y0 > y1 || y1 > height {
         return Err("compute_band: require y0 <= y1 <= viewport.height");
     }
     if y0 == 0 {
-        return Ok(Frame {
-            width,
-            height,
-            max_iter,
-            rows_done: y1,
+        let shift = current
+            .filter(|frame| {
+                frame.is_complete()
+                    && frame.key.max_iter == key.max_iter
+                    && frame.key.kind == key.kind
+                    && frame.key.field == key.field
+            })
+            .and_then(|frame| fractal_core::whole_pixel_shift(&frame.key.viewport, &key.viewport));
+        let carried = shift.map_or(Region::EMPTY, |(dx, dy)| {
+            Region::carried(width, height, dx, dy)
         });
+        let frame = Frame {
+            key,
+            carried,
+            rows_done: y1,
+        };
+        return Ok((frame, shift));
     }
     match current {
-        Some(frame)
-            if frame.width == width
-                && frame.height == height
-                && frame.max_iter == max_iter
-                && frame.rows_done == y0 =>
-        {
-            Ok(Frame {
+        Some(frame) if frame.key == key && frame.rows_done == y0 => Ok((
+            Frame {
                 rows_done: y1,
                 ..frame
-            })
-        }
+            },
+            None,
+        )),
         _ => Err(
             "compute_band: a band must continue the frame in progress (start each frame at y0 == 0)",
         ),
@@ -464,9 +498,21 @@ fn core_fractal_kind(
 /// no copy), and the frame is complete — readable by [`colorize`] and
 /// [`probe_pixel`] — once the band ending at `height` lands. The caller MUST
 /// start a frame at `y0 == 0` and walk a contiguous partition up to `height`
-/// at one size and `max_iter`; the worker's band planner does exactly this,
-/// and a band that doesn't continue the frame in progress is rejected (see
-/// `next_frame`).
+/// with one set of compute parameters; the worker's band planner does exactly
+/// this, and a band that doesn't continue the frame in progress is rejected
+/// (see `next_frame`).
+///
+/// ## Panned frames (#170)
+///
+/// When the new frame is the complete frame the buffer holds, panned by whole
+/// pixels with nothing else changed, the first band shifts the buffer in place
+/// instead of clearing it, and every band computes only the pixels the pan
+/// exposed: whole rows at the top or bottom, a column strip at the side. The
+/// bands, their order and the abort points are the same as for a fresh frame;
+/// a frame abandoned partway is refused by every read as before, and the next
+/// frame is computed in full. Carried pixels keep the value sampled at the old
+/// frame's coordinates, within `fractal_core::SHIFT_TOLERANCE_PX` of a pixel of
+/// a fresh compute's (see `fractal_core`'s `frame_shift` module).
 ///
 /// `c_re` / `c_im` (for finiteness, via `core_fractal_kind`) and the band
 /// range are validated at this WASM↔JS boundary. A rejected band changes
@@ -486,10 +532,14 @@ pub fn compute_band(
     y0: u32,
     y1: u32,
 ) -> Result<(), JsError> {
-    let width = viewport.inner.width;
-    let height = viewport.inner.height;
-    let frame = next_frame(FRAME.get(), width, height, max_iter, y0, y1).map_err(JsError::new)?;
-    let core_kind = core_fractal_kind("compute_band", kind, c_re, c_im)?;
+    let key = FrameKey {
+        viewport: viewport.inner,
+        max_iter,
+        kind: core_fractal_kind("compute_band", kind, c_re, c_im)?,
+        field: field.into(),
+    };
+    let (frame, shift) = next_frame(FRAME.get(), key, y0, y1).map_err(JsError::new)?;
+    let (width, height) = (frame.width(), frame.height());
     let w = width as usize;
     // Record the band's rows as unfilled before touching the buffer, so a trap
     // partway through (an allocation failure in `resize` aborts) leaves the
@@ -502,29 +552,44 @@ pub fn compute_band(
     ITER_BUFFER.with(|cell| {
         let mut iters = cell.borrow_mut();
         if y0 == 0 {
-            // Fresh frame: size the persistent buffer to the whole frame once.
-            // `resize` zero-fills, but that single memset is far cheaper than
-            // the per-band intermediate `Vec` + concatenating copy the old
-            // `extend_from_slice(&compute_rows(..))` paid every band — and it
-            // lets each band fill its slice in place below. The allocation is
-            // reused across frames (capacity retained, P4 #80).
-            iters.clear();
-            iters.resize(w * (height as usize), 0.0);
+            if let Some((dx, dy)) = shift {
+                // A pan of the complete frame the buffer holds (#170): move its
+                // pixels to where the new frame shows them. The bands below
+                // compute only what the pan exposed.
+                fractal_core::shift_in_place(&mut iters, width, height, dx, dy);
+            } else {
+                // Fresh frame: size the persistent buffer to the whole frame
+                // once. `resize` zero-fills, but that single memset is far
+                // cheaper than the per-band intermediate `Vec` + concatenating
+                // copy the old `extend_from_slice(&compute_rows(..))` paid every
+                // band — and it lets each band fill its slice in place below.
+                // The allocation is reused across frames (capacity retained, P4
+                // #80).
+                iters.clear();
+                iters.resize(w * (height as usize), 0.0);
+            }
             LAST_NORM.set(None);
         }
         // Each band writes straight into its absolute slice `[y0*w, y1*w)` — no
         // intermediate buffer, no copy. `next_frame` has checked that the
-        // slices tile the frame in order, so this never indexes past it.
+        // slices tile the frame in order, so this never indexes past it. Only
+        // the pixels the frame didn't carry over are computed: all of them for
+        // a fresh frame.
         let band = &mut iters[(y0 as usize) * w..(y1 as usize) * w];
-        fractal_core::compute_rows_into(
-            &viewport.inner,
-            max_iter,
-            core_kind,
-            field.into(),
-            y0,
-            y1,
-            band,
-        );
+        for (ry0, ry1, x0, x1) in frame.carried.exposed(width, y0, y1) {
+            let rows = &mut band[((ry0 - y0) as usize) * w..((ry1 - y0) as usize) * w];
+            fractal_core::compute_region_into(
+                &key.viewport,
+                max_iter,
+                key.kind,
+                key.field,
+                ry0,
+                ry1,
+                x0,
+                x1,
+                rows,
+            );
+        }
     });
     FRAME.set(Some(frame));
     Ok(())
@@ -534,14 +599,14 @@ pub fn compute_band(
 /// of the image [`colorize`] paints — or `0` while there is none.
 #[wasm_bindgen]
 pub fn frame_width() -> u32 {
-    complete_frame().map_or(0, |frame| frame.width)
+    complete_frame().map_or(0, Frame::width)
 }
 
 /// Height in pixels of the complete frame in the iteration buffer, or `0`
 /// while there is none; see [`frame_width`].
 #[wasm_bindgen]
 pub fn frame_height() -> u32 {
-    complete_frame().map_or(0, |frame| frame.height)
+    complete_frame().map_or(0, Frame::height)
 }
 
 /// Colorize the cached iteration buffer with the given palette and
@@ -572,7 +637,7 @@ pub fn colorize(palette: Palette, mode: NormalizationMode) -> Result<*const u8, 
                 &iters,
                 palette.into(),
                 mode.into(),
-                frame.max_iter,
+                frame.key.max_iter,
                 &mut buf,
             );
             // Stash the colouring so the inspector probe (E2, #95) reuses this
@@ -626,9 +691,9 @@ pub fn probe_pixel(
     mode: NormalizationMode,
 ) -> Option<ProbeResult> {
     let frame = complete_frame()?;
-    let x = u32::try_from(x).unwrap_or(0).min(frame.width - 1) as usize;
-    let y = u32::try_from(y).unwrap_or(0).min(frame.height - 1) as usize;
-    let index = y * frame.width as usize + x;
+    let x = u32::try_from(x).unwrap_or(0).min(frame.width() - 1) as usize;
+    let y = u32::try_from(y).unwrap_or(0).min(frame.height() - 1) as usize;
+    let index = y * frame.width() as usize + x;
     let sample = ITER_BUFFER.with(|iters| {
         let iters = iters.borrow();
         LAST_NORM.with(|c| match c.borrow().as_ref() {
@@ -640,7 +705,7 @@ pub fn probe_pixel(
                 // repaint): rebuild it for this one read. Still correct, just not
                 // O(1) for the global/Histogram modes.
                 let coloring =
-                    FrameColoring::build(&iters, palette.into(), mode.into(), frame.max_iter);
+                    FrameColoring::build(&iters, palette.into(), mode.into(), frame.key.max_iter);
                 fractal_core::probe_value(&iters, index, &coloring)
             }
         })
@@ -675,17 +740,32 @@ mod tests {
     const H: u32 = 3;
     const MAX_ITER: u32 = 64;
 
+    fn key_at(re: f64, im: f64) -> FrameKey {
+        FrameKey {
+            viewport: CoreViewport::new(Complex64::new(re, im), 1.0, W, H),
+            max_iter: MAX_ITER,
+            kind: CoreFractalKind::Mandelbrot,
+            field: CoreField::EscapeTime,
+        }
+    }
+
+    fn key() -> FrameKey {
+        key_at(-0.5, 0.0)
+    }
+
     fn frame(rows_done: u32) -> Frame {
         Frame {
-            width: W,
-            height: H,
-            max_iter: MAX_ITER,
+            key: key(),
+            carried: Region::EMPTY,
             rows_done,
         }
     }
 
-    fn band(y0: u32, y1: u32) {
-        let viewport = Viewport::new(-0.5, 0.0, 1.0, W, H).expect("valid viewport");
+    /// A band of the frame at `key()` panned by `(dx, dy)` pixels.
+    fn panned_band(dx: f64, dy: f64, y0: u32, y1: u32) {
+        let at = key().viewport.pan_by_pixels(dx, dy);
+        let viewport =
+            Viewport::new(at.center.re, at.center.im, at.zoom, W, H).expect("valid viewport");
         compute_band(
             &viewport,
             MAX_ITER,
@@ -699,8 +779,12 @@ mod tests {
         .expect("band continues the frame");
     }
 
+    fn band(y0: u32, y1: u32) {
+        panned_band(0.0, 0.0, y0, y1);
+    }
+
     /// The comparable parts of a probe (`raw` by bits: it is `NaN` inside).
-    fn key(probe: ProbeResult) -> (u32, bool, [u8; 3]) {
+    fn key_of(probe: ProbeResult) -> (u32, bool, [u8; 3]) {
         (
             probe.raw.to_bits(),
             probe.inside,
@@ -714,44 +798,174 @@ mod tests {
 
     #[test]
     fn a_frame_starts_at_row_zero_and_completes_at_its_height() {
-        let first = next_frame(None, W, H, MAX_ITER, 0, 1);
-        assert_eq!(first, Ok(frame(1)));
+        assert_eq!(next_frame(None, key(), 0, 1), Ok((frame(1), None)));
         assert!(!frame(1).is_complete());
         assert_eq!(
-            next_frame(Some(frame(1)), W, H, MAX_ITER, 1, H),
-            Ok(frame(H))
+            next_frame(Some(frame(1)), key(), 1, H),
+            Ok((frame(H), None))
         );
         assert!(frame(H).is_complete());
         // Row zero starts over, whatever the buffer held.
         assert_eq!(
-            next_frame(Some(frame(2)), W, H, MAX_ITER, 0, 1),
-            Ok(frame(1))
+            next_frame(Some(frame(2)), key(), 0, 1),
+            Ok((frame(1), None))
         );
+        let other = FrameKey {
+            viewport: CoreViewport::new(Complex64::new(0.0, 0.0), 1.0, 8, 8),
+            max_iter: 16,
+            ..key()
+        };
         assert_eq!(
-            next_frame(Some(frame(H)), 8, 8, 16, 0, 8),
-            Ok(Frame {
-                width: 8,
-                height: 8,
-                max_iter: 16,
-                rows_done: 8,
-            }),
+            next_frame(Some(frame(H)), other, 0, 8),
+            Ok((
+                Frame {
+                    key: other,
+                    carried: Region::EMPTY,
+                    rows_done: 8,
+                },
+                None
+            )),
         );
     }
 
     #[test]
     fn a_band_that_does_not_continue_the_frame_is_rejected() {
         // No frame to continue.
-        assert!(next_frame(None, W, H, MAX_ITER, 1, 2).is_err());
+        assert!(next_frame(None, key(), 1, 2).is_err());
         // A gap, and a repeat.
-        assert!(next_frame(Some(frame(1)), W, H, MAX_ITER, 2, H).is_err());
-        assert!(next_frame(Some(frame(2)), W, H, MAX_ITER, 1, 2).is_err());
-        // A different size or `max_iter` mid-frame.
-        assert!(next_frame(Some(frame(1)), W + 1, H, MAX_ITER, 1, 2).is_err());
-        assert!(next_frame(Some(frame(1)), W, H + 1, MAX_ITER, 1, 2).is_err());
-        assert!(next_frame(Some(frame(1)), W, H, MAX_ITER + 1, 1, 2).is_err());
+        assert!(next_frame(Some(frame(1)), key(), 2, H).is_err());
+        assert!(next_frame(Some(frame(2)), key(), 1, 2).is_err());
+        // Any other compute parameter mid-frame: size, `max_iter`, centre,
+        // zoom, family or Field.
+        let changed = [
+            FrameKey {
+                viewport: CoreViewport::new(Complex64::new(-0.5, 0.0), 1.0, W + 1, H),
+                ..key()
+            },
+            FrameKey {
+                max_iter: MAX_ITER + 1,
+                ..key()
+            },
+            key_at(-0.4, 0.0),
+            FrameKey {
+                viewport: CoreViewport::new(Complex64::new(-0.5, 0.0), 2.0, W, H),
+                ..key()
+            },
+            FrameKey {
+                kind: CoreFractalKind::Julia {
+                    c: Complex64::new(0.0, 0.0),
+                },
+                ..key()
+            },
+            FrameKey {
+                field: CoreField::DistanceEstimate,
+                ..key()
+            },
+        ];
+        for other in changed {
+            assert!(
+                next_frame(Some(frame(1)), other, 1, 2).is_err(),
+                "{other:?}"
+            );
+        }
         // A band outside the frame.
-        assert!(next_frame(None, W, H, MAX_ITER, 0, H + 1).is_err());
-        assert!(next_frame(Some(frame(1)), W, H, MAX_ITER, 2, 1).is_err());
+        assert!(next_frame(None, key(), 0, H + 1).is_err());
+        assert!(next_frame(Some(frame(1)), key(), 2, 1).is_err());
+    }
+
+    #[test]
+    fn a_whole_pixel_pan_of_a_complete_frame_carries_it_over() {
+        let panned = |dx: f64, dy: f64| FrameKey {
+            viewport: key().viewport.pan_by_pixels(dx, dy),
+            ..key()
+        };
+        let (frame, shift) = next_frame(Some(frame(H)), panned(1.0, -1.0), 0, 1).expect("starts");
+        assert_eq!(shift, Some((1, -1)));
+        assert_eq!(frame.carried, Region::carried(W, H, 1, -1));
+        // The continuing bands keep the carried region.
+        let (next, shift) = next_frame(Some(frame), panned(1.0, -1.0), 1, H).expect("continues");
+        assert_eq!((next.carried, shift), (frame.carried, None));
+    }
+
+    #[test]
+    fn a_pan_is_computed_in_full_unless_it_pans_a_complete_frame_and_nothing_else() {
+        let pan = key().viewport.pan_by_pixels(1.0, 0.0);
+        let full = |current: Frame, next: FrameKey| {
+            let (frame, shift) = next_frame(Some(current), next, 0, 1).expect("starts");
+            (frame.carried, shift) == (Region::EMPTY, None)
+        };
+        // An incomplete frame.
+        assert!(full(
+            frame(2),
+            FrameKey {
+                viewport: pan,
+                ..key()
+            }
+        ));
+        // A sub-pixel pan.
+        let sub_pixel = key().viewport.pan_by_pixels(0.5, 0.0);
+        assert!(full(
+            frame(H),
+            FrameKey {
+                viewport: sub_pixel,
+                ..key()
+            }
+        ));
+        // A pan that also changes `max_iter`, the family or the Field.
+        let changed = [
+            FrameKey {
+                viewport: pan,
+                max_iter: MAX_ITER * 2,
+                ..key()
+            },
+            FrameKey {
+                viewport: pan,
+                kind: CoreFractalKind::Julia {
+                    c: Complex64::new(0.0, 0.0),
+                },
+                ..key()
+            },
+            FrameKey {
+                viewport: pan,
+                field: CoreField::DistanceEstimate,
+                ..key()
+            },
+        ];
+        for next in changed {
+            assert!(full(frame(H), next), "{next:?}");
+        }
+    }
+
+    #[test]
+    fn a_panned_frame_carries_the_old_pixels_and_computes_the_exposed_ones() {
+        band(0, H);
+        let old = ITER_BUFFER.with(|cell| cell.borrow().clone());
+        // Panned right by 1 and up by 1, in two bands.
+        panned_band(1.0, -1.0, 0, 1);
+        panned_band(1.0, -1.0, 1, H);
+        assert!(complete_frame().is_some());
+        let got = ITER_BUFFER.with(|cell| cell.borrow().clone());
+        let at = key().viewport.pan_by_pixels(1.0, -1.0);
+        let fresh = fractal_core::compute(
+            &at,
+            MAX_ITER,
+            CoreFractalKind::Mandelbrot,
+            CoreField::EscapeTime,
+        );
+        let carried = Region::carried(W, H, 1, -1);
+        for y in 0..H {
+            for x in 0..W {
+                let i = (y * W + x) as usize;
+                let expected = if (carried.x0..carried.x1).contains(&x)
+                    && (carried.y0..carried.y1).contains(&y)
+                {
+                    old[((y + 1) * W + x - 1) as usize]
+                } else {
+                    fresh[i]
+                };
+                assert_eq!(got[i].to_bits(), expected.to_bits(), "({x}, {y})");
+            }
+        }
     }
 
     #[test]
@@ -799,7 +1013,7 @@ mod tests {
                 assert_eq!([p.r, p.g, p.b], painted[i..i + 3], "pixel ({x}, {y})");
             }
         }
-        let corner = |x, y| key(probe(x, y).expect("frame is complete"));
+        let corner = |x, y| key_of(probe(x, y).expect("frame is complete"));
         assert_eq!(corner(-5, -5), corner(0, 0));
         assert_eq!(corner(99, 99), corner(W as i32 - 1, H as i32 - 1));
     }
