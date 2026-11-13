@@ -1,0 +1,87 @@
+name: Deploy
+
+# Manual deploy to Cloudflare Pages: Actions → Deploy → Run workflow. Same
+# steps as `pnpm deploy`, so the app ships from a clean runner rather than a
+# developer machine. The "Use workflow from" dropdown picks the branch: `main`
+# deploys to production; any other branch gets a Pages preview URL instead of
+# replacing production.
+#
+# Needs two repository secrets: CLOUDFLARE_API_TOKEN (a token with the
+# "Cloudflare Pages: Edit" permission) and CLOUDFLARE_ACCOUNT_ID.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Deploys queue instead of cancelling each other, so a half-finished upload is
+# never abandoned.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    # Only `main` runs as the `production` environment, which is where
+    # protection rules (required reviewers, etc.) can be added in the repo
+    # settings.
+    environment:
+      name: ${{ github.ref_name == 'main' && 'production' || 'preview' }}
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Toolchain and WASM build are the same as the CI `web` job; see the
+      # comments there.
+      - name: Install Rust toolchain (pinned via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@aad518f59d88bae90133242f9ddac7f8bbc5dddf # 1.94.1
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install nightly Rust for the WASM thread build
+        run: rustup toolchain install nightly-2025-11-15 --profile minimal --component rust-src --target wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install wasm-pack
+        run: cargo install --locked wasm-pack@0.15.0
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.30.1
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      # `pnpm build` runs the WASM build, the Vite build and check-dist.
+      - name: Build
+        working-directory: web
+        run: pnpm build
+
+      - name: Deploy to Cloudflare Pages
+        id: deploy
+        working-directory: web
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          pnpm dlx wrangler@4 pages deploy dist \
+            --project-name=escape-velocity \
+            --branch="$BRANCH" \
+            --commit-hash="$GITHUB_SHA" \
+            | tee deploy.log
+          url=$(grep -oE 'https://[^ ]+\.pages\.dev' deploy.log | tail -1)
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Deployed \`${GITHUB_SHA::7}\` from \`$BRANCH\` to $url" >> "$GITHUB_STEP_SUMMARY"
