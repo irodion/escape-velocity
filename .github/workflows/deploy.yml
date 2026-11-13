@@ -1,10 +1,13 @@
 name: Deploy
 
 # Manual deploy to Cloudflare Pages: Actions → Deploy → Run workflow. Same
-# steps as `pnpm deploy`, so the app ships from a clean runner rather than a
-# developer machine. The "Use workflow from" dropdown picks the branch: `main`
-# deploys to production; any other branch gets a Pages preview URL instead of
-# replacing production.
+# steps as `pnpm run deploy`, so the app ships from a clean runner rather than
+# a developer machine. The "Use workflow from" dropdown picks the branch:
+# `main` deploys to production; any other branch gets a Pages preview URL
+# instead of replacing production. Tags are refused (a tag name would become a
+# preview branch, not production).
+#
+# A commit deploys only after the CI workflow has passed on it.
 #
 # Needs two repository secrets: CLOUDFLARE_API_TOKEN (a token with the
 # "Cloudflare Pages: Edit" permission) and CLOUDFLARE_ACCOUNT_ID.
@@ -14,15 +17,49 @@ on:
 permissions:
   contents: read
 
-# Deploys queue instead of cancelling each other, so a half-finished upload is
-# never abandoned.
+# A running deploy is never cancelled. GitHub keeps at most one *pending* run
+# per group, though: dispatching a third deploy while one runs and one waits
+# cancels the waiting one, so the newest request wins.
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    name: Check the ref and CI
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Refuse non-branch refs
+        if: github.ref_type != 'branch'
+        run: |
+          echo "::error::Deploy runs from a branch, not a ${{ github.ref_type }} (${{ github.ref_name }}). Pick main to update production."
+          exit 1
+
+      - name: Require a passing CI run for this commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          runs=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" \
+            --json status,conclusion,url --limit 20)
+          if jq -e 'any(.[]; .conclusion == "success")' <<<"$runs" >/dev/null; then
+            echo "CI passed: $(jq -r 'map(select(.conclusion == "success"))[0].url' <<<"$runs")"
+            exit 0
+          fi
+          if jq -e 'length == 0' <<<"$runs" >/dev/null; then
+            echo "::error::No CI run found for ${GITHUB_SHA::7}. Push the branch or open a PR so CI runs, then deploy."
+          else
+            echo "::error::CI has not passed for ${GITHUB_SHA::7}:"
+            jq -r '.[] | "  \(.status)/\(.conclusion // "-")  \(.url)"' <<<"$runs"
+          fi
+          exit 1
+
   deploy:
     name: Build and deploy
+    needs: preflight
     runs-on: ubuntu-latest
     # Only `main` runs as the `production` environment, which is where
     # protection rules (required reviewers, etc.) can be added in the repo
@@ -72,16 +109,25 @@ jobs:
       - name: Deploy to Cloudflare Pages
         id: deploy
         working-directory: web
+        # Explicit `shell: bash` runs with `-eo pipefail`, so a wrangler
+        # failure fails the step instead of being masked by `tee`.
+        shell: bash
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           BRANCH: ${{ github.ref_name }}
         run: |
-          pnpm dlx wrangler@4 pages deploy dist \
+          # Pinned: this binary runs with the Cloudflare token in its env.
+          # Keep in step with the `deploy` script in web/package.json.
+          pnpm dlx wrangler@4.161.0 pages deploy dist \
             --project-name=escape-velocity \
             --branch="$BRANCH" \
             --commit-hash="$GITHUB_SHA" \
             | tee deploy.log
-          url=$(grep -oE 'https://[^ ]+\.pages\.dev' deploy.log | tail -1)
+          url=$(grep -oE 'https://[^ ]+\.pages\.dev' deploy.log | tail -1 || true)
+          if [ -z "$url" ]; then
+            echo "::error::wrangler finished but printed no deployment URL"
+            exit 1
+          fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "Deployed \`${GITHUB_SHA::7}\` from \`$BRANCH\` to $url" >> "$GITHUB_STEP_SUMMARY"

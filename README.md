@@ -205,10 +205,12 @@ git push origin v0.1.0
 The app is hosted on Cloudflare Pages (project `escape-velocity`). Deploys are
 manual: **Actions → Deploy → Run workflow** builds on a clean runner and
 uploads `web/dist`. Run it from `main` to update production; run it from any
-other branch to get a preview URL without touching production. The workflow
-needs the `CLOUDFLARE_API_TOKEN` (Cloudflare Pages: Edit) and
-`CLOUDFLARE_ACCOUNT_ID` repository secrets. `pnpm deploy` in `web/` does the
-same from a local machine (after `wrangler login`).
+other branch to get a preview URL without touching production (tags are
+refused). It deploys a commit only after the CI workflow has passed on it. The
+workflow needs the `CLOUDFLARE_API_TOKEN` (Cloudflare Pages: Edit) and
+`CLOUDFLARE_ACCOUNT_ID` repository secrets. `pnpm run deploy` in `web/` does
+the same from a local machine, after `wrangler login` and without the CI check
+(plain `pnpm deploy` is pnpm's own built-in command, not this script).
 
 ## Contributing
 
