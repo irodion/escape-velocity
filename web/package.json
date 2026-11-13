@@ -8,7 +8,7 @@
     "wasm:build": "rustup run nightly-2025-11-15 wasm-pack build ../crates/fractal-wasm --target web --out-dir ../../web/wasm --release",
     "dev": "pnpm wasm:build && vite",
     "build": "pnpm wasm:build && vite build && node scripts/check-dist.mjs",
-    "deploy": "pnpm build && pnpm dlx wrangler@4.161.0 pages deploy dist --project-name=escape-velocity --branch=main",
+    "deploy": "pnpm build && wrangler pages deploy dist --project-name=escape-velocity --branch=main",
     "preview": "vite preview",
     "typecheck": "pnpm wasm:build && tsc --noEmit",
     "typecheck:only": "tsc --noEmit",
@@ -29,7 +29,8 @@
     "vite": "^8.3.4",
     "vite-plugin-pwa": "1.3.0",
     "vitest": "^4.1.9",
-    "workbox-window": "^7.4.1"
+    "workbox-window": "^7.4.1",
+    "wrangler": "4.161.0"
   },
   "dependencies": {
     "@fontsource-variable/martian-mono": "^5.3.0",
