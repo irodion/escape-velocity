@@ -43,12 +43,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          # Newest first. The verdict is the most recent *finished* run, so a
-          # later failing re-run outweighs an earlier pass.
+          # Newest first. The verdict is the most recent run that finished
+          # with a result, so a later failing re-run outweighs an earlier
+          # pass. Cancelled and skipped runs carry no result (CI cancels a
+          # run when a newer one starts) and are passed over.
           runs=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" \
             --json status,conclusion,url,createdAt --limit 20 \
             | jq 'sort_by(.createdAt) | reverse')
-          latest=$(jq 'map(select(.status == "completed"))[0] // empty' <<<"$runs")
+          latest=$(jq 'map(select(.status == "completed"
+            and (.conclusion | IN("cancelled", "skipped") | not)))[0] // empty' <<<"$runs")
           if [ -n "$latest" ] && [ "$(jq -r .conclusion <<<"$latest")" = success ]; then
             echo "CI passed: $(jq -r .url <<<"$latest")"
             exit 0
@@ -57,7 +60,7 @@ jobs:
             # CI runs on pushes to main and on PRs, not on plain branch pushes.
             echo "::error::No CI run found for ${GITHUB_SHA::7}. Open a PR for this branch (or run CI on it from the Actions tab), wait for it to pass, then deploy."
           elif [ -z "$latest" ]; then
-            echo "::error::CI is still running for ${GITHUB_SHA::7}; deploy once it passes."
+            echo "::error::No CI run for ${GITHUB_SHA::7} has finished with a result yet (still running, or cancelled); deploy once one passes."
           else
             echo "::error::The latest CI run for ${GITHUB_SHA::7} did not pass."
           fi
@@ -74,8 +77,10 @@ jobs:
     environment:
       name: ${{ github.ref_name == 'main' && 'production' || 'preview' }}
       url: ${{ steps.deploy.outputs.url }}
+    # Every action in this job is pinned by commit SHA: they all run before
+    # the deploy step, in the job that holds the Cloudflare token.
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -90,22 +95,34 @@ jobs:
         run: rustup toolchain install nightly-2025-11-15 --profile minimal --component rust-src --target wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Restore only. Saving would add a large cache entry per deployed
+          # branch and could evict CI's caches from the repo's 10 GB quota.
+          save-if: false
 
       - name: Install wasm-pack
         run: cargo install --locked wasm-pack@0.15.0
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
           version: 10.30.1
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
+          cache-dependency-path: |
+            web/pnpm-lock.yaml
+            tools/deploy/pnpm-lock.yaml
 
       - name: Install dependencies
         working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      # wrangler lives in its own package and lockfile (tools/deploy), so it
+      # and its transitive deps are pinned without entering the app's tree.
+      - name: Install deploy tooling
+        working-directory: tools/deploy
         run: pnpm install --frozen-lockfile
 
       # `pnpm build` runs the WASM build, the Vite build and check-dist.
@@ -124,18 +141,19 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           BRANCH: ${{ github.ref_name }}
         run: |
-          # wrangler is a locked devDependency, so the code that runs with the
-          # token is pinned down to its transitive deps by pnpm-lock.yaml.
-          pnpm exec wrangler pages deploy dist \
+          # The log goes to the runner's temp dir, not the checkout, so
+          # wrangler doesn't see an untracked file in the git tree.
+          log="$RUNNER_TEMP/deploy.log"
+          "$GITHUB_WORKSPACE/tools/deploy/node_modules/.bin/wrangler" pages deploy dist \
             --project-name=escape-velocity \
             --branch="$BRANCH" \
             --commit-hash="$GITHUB_SHA" \
-            | tee deploy.log
+            | tee "$log"
           # The deployment's own URL is on the "Take a peek over at" line
           # (a branch alias URL may also be printed). pipefail above already
           # fails the step if wrangler fails, so a URL we can't parse only
           # warns: the deploy itself is live by now.
-          url=$(sed -nE 's/.*Take a peek over at (https:\/\/[^[:space:]]+\.pages\.dev).*/\1/p' deploy.log | head -1)
+          url=$(sed -nE 's/.*Take a peek over at (https:\/\/[^[:space:]]+\.pages\.dev).*/\1/p' "$log" | head -1)
           if [ -n "$url" ]; then
             echo "url=$url" >> "$GITHUB_OUTPUT"
             echo "Deployed \`${GITHUB_SHA::7}\` from \`$BRANCH\` to $url" >> "$GITHUB_STEP_SUMMARY"
