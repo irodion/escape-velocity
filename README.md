@@ -200,6 +200,20 @@ git push origin v0.1.0
 # then: GitHub → Releases → Draft → choose the tag → "Generate release notes"
 ```
 
+## Deploying
+
+The app is hosted on Cloudflare Pages (project `escape-velocity`). Deploys are
+manual: **Actions → Deploy → Run workflow** builds on a clean runner and
+uploads `web/dist`. Run it from `main` to update production; run it from any
+other branch to get a preview URL without touching production (tags are
+refused). It deploys a commit only after the CI workflow has passed on it. The
+workflow needs the `CLOUDFLARE_API_TOKEN` (Cloudflare Pages: Edit) and
+`CLOUDFLARE_ACCOUNT_ID` repository secrets. `pnpm run deploy` in `web/` does
+the same from a local machine, after `wrangler login` and without the CI check
+(plain `pnpm deploy` is pnpm's own built-in command, not this script). Wrangler is
+pinned in its own package, [`tools/deploy`](tools/deploy), so the app's
+install never pulls it in.
+
 ## Contributing
 
 The project is GPL-3.0 ([ADR-0010](docs/decisions/0010-gpl-3-license.md)) —
