@@ -25,6 +25,16 @@ updates:
       npm-minor-patch:
         update-types: [minor, patch]
 
+  # Deploy tooling (wrangler), kept out of the app's tree; see the comment in
+  # tools/deploy/package.json.
+  - package-ecosystem: npm
+    directory: "/tools/deploy"
+    schedule:
+      interval: weekly
+    groups:
+      deploy-tools-minor-patch:
+        update-types: [minor, patch]
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

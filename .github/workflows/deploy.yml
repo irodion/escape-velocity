@@ -1,0 +1,163 @@
+name: Deploy
+
+# Manual deploy to Cloudflare Pages: Actions → Deploy → Run workflow. Same
+# steps as `pnpm run deploy`, so the app ships from a clean runner rather than
+# a developer machine. The "Use workflow from" dropdown picks the branch:
+# `main` deploys to production; any other branch gets a Pages preview URL
+# instead of replacing production. Tags are refused (a tag name would become a
+# preview branch, not production).
+#
+# A commit deploys only after the CI workflow has passed on it.
+#
+# Needs two repository secrets: CLOUDFLARE_API_TOKEN (a token with the
+# "Cloudflare Pages: Edit" permission) and CLOUDFLARE_ACCOUNT_ID.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A running deploy is never cancelled. GitHub keeps at most one *pending* run
+# per group, though: dispatching a third deploy while one runs and one waits
+# cancels the waiting one, so the newest request wins.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Check the ref and CI
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Refuse non-branch refs
+        if: github.ref_type != 'branch'
+        run: |
+          echo "::error::Deploy runs from a branch, not a ${{ github.ref_type }} (${{ github.ref_name }}). Pick main to update production."
+          exit 1
+
+      - name: Require a passing CI run for this commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Newest first. The verdict is the most recent run that finished
+          # with a result, so a later failing re-run outweighs an earlier
+          # pass. Cancelled and skipped runs carry no result (CI cancels a
+          # run when a newer one starts) and are passed over.
+          runs=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" \
+            --json status,conclusion,url,createdAt --limit 20 \
+            | jq 'sort_by(.createdAt) | reverse')
+          latest=$(jq 'map(select(.status == "completed"
+            and (.conclusion | IN("cancelled", "skipped") | not)))[0] // empty' <<<"$runs")
+          if [ -n "$latest" ] && [ "$(jq -r .conclusion <<<"$latest")" = success ]; then
+            echo "CI passed: $(jq -r .url <<<"$latest")"
+            exit 0
+          fi
+          if jq -e 'length == 0' <<<"$runs" >/dev/null; then
+            # CI runs on pushes to main and on PRs, not on plain branch pushes.
+            echo "::error::No CI run found for ${GITHUB_SHA::7}. Open a PR for this branch (or run CI on it from the Actions tab), wait for it to pass, then deploy."
+          elif [ -z "$latest" ]; then
+            echo "::error::No CI run for ${GITHUB_SHA::7} has finished with a result yet (still running, or cancelled); deploy once one passes."
+          else
+            echo "::error::The latest CI run for ${GITHUB_SHA::7} did not pass."
+          fi
+          jq -r '.[] | "  \(.status)/\(if .conclusion == "" then "-" else .conclusion end)  \(.url)"' <<<"$runs"
+          exit 1
+
+  deploy:
+    name: Build and deploy
+    needs: preflight
+    runs-on: ubuntu-latest
+    # Only `main` runs as the `production` environment, which is where
+    # protection rules (required reviewers, etc.) can be added in the repo
+    # settings.
+    environment:
+      name: ${{ github.ref_name == 'main' && 'production' || 'preview' }}
+      url: ${{ steps.deploy.outputs.url }}
+    # Every action in this job is pinned by commit SHA: they all run before
+    # the deploy step, in the job that holds the Cloudflare token.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Toolchain and WASM build are the same as the CI `web` job; see the
+      # comments there.
+      - name: Install Rust toolchain (pinned via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@aad518f59d88bae90133242f9ddac7f8bbc5dddf # 1.94.1
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install nightly Rust for the WASM thread build
+        run: rustup toolchain install nightly-2025-11-15 --profile minimal --component rust-src --target wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Restore only. Saving would add a large cache entry per deployed
+          # branch and could evict CI's caches from the repo's 10 GB quota.
+          save-if: false
+
+      - name: Install wasm-pack
+        run: cargo install --locked wasm-pack@0.15.0
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 10.30.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            web/pnpm-lock.yaml
+            tools/deploy/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      # wrangler lives in its own package and lockfile (tools/deploy), so it
+      # and its transitive deps are pinned without entering the app's tree.
+      - name: Install deploy tooling
+        working-directory: tools/deploy
+        run: pnpm install --frozen-lockfile
+
+      # `pnpm build` runs the WASM build, the Vite build and check-dist.
+      - name: Build
+        working-directory: web
+        run: pnpm build
+
+      - name: Deploy to Cloudflare Pages
+        id: deploy
+        working-directory: web
+        # Explicit `shell: bash` runs with `-eo pipefail`, so a wrangler
+        # failure fails the step instead of being masked by `tee`.
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          # The log goes to the runner's temp dir, not the checkout, so
+          # wrangler doesn't see an untracked file in the git tree.
+          log="$RUNNER_TEMP/deploy.log"
+          "$GITHUB_WORKSPACE/tools/deploy/node_modules/.bin/wrangler" pages deploy dist \
+            --project-name=escape-velocity \
+            --branch="$BRANCH" \
+            --commit-hash="$GITHUB_SHA" \
+            | tee "$log"
+          # The deployment's own URL is on the "Take a peek over at" line
+          # (a branch alias URL may also be printed). pipefail above already
+          # fails the step if wrangler fails, so a URL we can't parse only
+          # warns: the deploy itself is live by now.
+          url=$(sed -nE 's/.*Take a peek over at (https:\/\/[^[:space:]]+\.pages\.dev).*/\1/p' "$log" | head -1)
+          if [ -n "$url" ]; then
+            echo "url=$url" >> "$GITHUB_OUTPUT"
+            echo "Deployed \`${GITHUB_SHA::7}\` from \`$BRANCH\` to $url" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Deployed, but could not find the deployment URL in wrangler's output"
+            echo "Deployed \`${GITHUB_SHA::7}\` from \`$BRANCH\` (URL not parsed; see the log)" >> "$GITHUB_STEP_SUMMARY"
+          fi
